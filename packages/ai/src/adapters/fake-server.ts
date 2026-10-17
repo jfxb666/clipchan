@@ -15,6 +15,8 @@ export interface FakeResponse {
   body: unknown;
   /** 延后 end() 的毫秒数，用于超时用例。 */
   delayMs?: number;
+  /** 响应头立刻发、响应体延后这么久才 end：模拟"200 已到、体还在流"的中途超时。 */
+  bodyDelayMs?: number;
 }
 
 export type FakeRoutes = Record<string, (req: FakeRequest) => FakeResponse>;
@@ -54,7 +56,18 @@ async function handle(
   const send = (): void => {
     try {
       res.writeHead(result.status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(result.body));
+      if (result.bodyDelayMs && result.bodyDelayMs > 0) {
+        // 头已发出、体故意拖着：专测"超时发生在读体阶段"的错误定性。
+        setTimeout(() => {
+          try {
+            res.end(JSON.stringify(result.body));
+          } catch {
+            // 客户端已因超时断开，忽略写入失败
+          }
+        }, result.bodyDelayMs);
+      } else {
+        res.end(JSON.stringify(result.body));
+      }
     } catch {
       // 客户端已因超时断开，忽略写入失败
     }

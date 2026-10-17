@@ -29,6 +29,7 @@ function combinedSignal(timeoutMs: number, external?: AbortSignal): AbortSignal 
  */
 export async function requestJson(url: string, req: JsonRequest): Promise<unknown> {
   const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const signal = combinedSignal(timeoutMs, req.signal);
 
   let res: Response;
   try {
@@ -36,7 +37,7 @@ export async function requestJson(url: string, req: JsonRequest): Promise<unknow
       method: req.method,
       headers: req.headers,
       body: req.body === undefined ? undefined : JSON.stringify(req.body),
-      signal: combinedSignal(timeoutMs, req.signal),
+      signal,
     });
   } catch (e) {
     throw toAiError(e, { timeoutMs });
@@ -49,6 +50,14 @@ export async function requestJson(url: string, req: JsonRequest): Promise<unknow
   try {
     return (await res.json()) as unknown;
   } catch {
+    // ★ 响应头已到、体还没读完就中止（默认 60s 兜底最常见）：res.json() 抛的是
+    //   "读流被掐断"，不是超时本体。必须先看 signal 再定性，否则真实模型超时
+    //   会被误报成 bad-response（Task 8 真实 DeepSeek 端到端实测踩到）。
+    if (signal.aborted) {
+      const timeoutLike = new Error('请求超时');
+      timeoutLike.name = 'TimeoutError';
+      throw toAiError(timeoutLike, { timeoutMs });
+    }
     throw structured('bad-response', `响应不是合法 JSON（HTTP ${res.status}）`, res.status);
   }
 }
