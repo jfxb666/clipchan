@@ -161,6 +161,13 @@ export interface Db {
   clearAll(): number;
   getSettings(): Settings;
   setSettings(patch: Partial<Settings>): Settings;
+  /**
+   * 读任意 settings 键（绕过 sanitizeSettings 白名单）。
+   * AI provider 元数据与 Key 用：这些键不在 Settings 里，也不进 settingsCache。
+   */
+  getSettingValue<T = unknown>(key: string): T | undefined;
+  /** 写任意 settings 键；**不**写 settingsCache，所以 getSettings() 永远看不到它。 */
+  setSettingValue(key: string, value: unknown): void;
   getRow(id: string): ItemRow | null;
   getImageRow(id: string): ImageRow | null;
   /** 全部图片行；unpinnedOnly=true 时只要未收藏的（清空未收藏 / 预算淘汰用）。 */
@@ -508,11 +515,30 @@ export function openDb(file: string): Db {
       return { ...settingsCache };
     },
 
+    getSettingValue<T = unknown>(key: string): T | undefined {
+      const row = raw.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+      if (!row) return undefined;
+      try {
+        return JSON.parse(row.value) as T;
+      } catch {
+        // 单条损坏按"没有这个键"处理（与 loadSettings 的容错一致）。
+        return undefined;
+      }
+    },
+
+    setSettingValue(key: string, value: unknown): void {
+      raw
+        .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+        .run(key, JSON.stringify(value ?? null));
+    },
+
     setSettings(patch: Partial<Settings>): Settings {
       const merged = sanitizeSettings({ ...settingsCache, ...(patch ?? {}) });
       const upsert = raw.prepare(
         'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
       );
+      // 直查/直写 settings 表：走 getSettings()/setSettings() 会被白名单裁掉，
+      // 而 Key 与 provider 元数据刻意不进 settingsCache（settings:get 不许带它们出去）。
       const tx = raw.transaction((s: Settings) => {
         for (const [k, v] of Object.entries(s)) upsert.run(k, JSON.stringify(v));
       });

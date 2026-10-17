@@ -32,6 +32,15 @@ export const CH = {
     capabilities: 'app:capabilities',
   },
   wordcloud: { today: 'wordcloud:today', exportPng: 'wordcloud:exportPng' },
+  ai: {
+    listProviders: 'ai:listProviders',
+    saveProvider: 'ai:saveProvider',
+    removeProvider: 'ai:removeProvider',
+    listModels: 'ai:listModels',
+    test: 'ai:test',
+    optimize: 'ai:optimize',
+    scenes: 'ai:scenes',
+  },
 } as const;
 
 /** 主进程 -> 渲染进程的单向事件。 */
@@ -44,6 +53,8 @@ export const EV = {
   toast: 'app:toast',
   /** 连续复制提示（主进程 -> 界面）。 */
   burstHint: 'items:burstHint',
+  /** provider 增删改后通知界面重取列表（Key 本身绝不随事件下发）。 */
+  aiChanged: 'ai:changed',
 } as const;
 
 /** 所有 invoke 通道的扁平清单（--smoke 用来断言"一个都没漏"）。 */
@@ -53,4 +64,5 @@ export const ALL_INVOKE_CHANNELS: string[] = [
   ...Object.values(CH.ghost),
   ...Object.values(CH.app),
   ...Object.values(CH.wordcloud),
+  ...Object.values(CH.ai),
 ];

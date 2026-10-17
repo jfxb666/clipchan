@@ -13,7 +13,11 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_SETTINGS } from '@clipchan/core';
 import type { Capabilities, GhostState, NavigateTarget, Settings } from '@clipchan/core';
+import { adapterFor } from '@clipchan/ai';
+import { optimize as runOptimize } from '@clipchan/ai';
 import { CH, EV } from './channels';
+import { createAi } from './ai';
+import type { AiApi } from './ai';
 import { openDb } from './db';
 import type { Db, InsertResult } from './db';
 import { runLegacyMigration } from './migrate-runner';
@@ -99,6 +103,34 @@ let mergeSvc: MergeService | null = null;
 let burstDetector: BurstDetector | null = null;
 /** 面板不可见时攒下的预选 id，等下次显示面板再发给界面（照抄 legacy MainForm.cs:596-598）。 */
 let pendingBurstIds: string[] = [];
+
+/** 广播器在 buildHandlers() 里才创建；AI 桥用它的 aiChanged 通道。 */
+let aiBroadcast: { aiChanged(): void } = { aiChanged: () => {} };
+
+/**
+ * AI 桥（Task 5 Step 4）。
+ * ★ 这里只做"依赖装配"：kv 从库来、adapterFor/optimize 从 @clipchan/ai 来，
+ *   业务逻辑全在 ai.ts 里（那才测得了）。
+ */
+let aiApi: AiApi | null = null;
+function buildAiApi(getBroadcast: () => { aiChanged(): void }): AiApi {
+  return createAi({
+    kv: {
+      getSettingValue: <T,>(key: string): T | undefined => {
+        if (!rt.db) throw new Error('数据库尚未就绪');
+        return rt.db.getSettingValue<T>(key);
+      },
+      setSettingValue: (key: string, value: unknown): void => {
+        if (!rt.db) throw new Error('数据库尚未就绪');
+        rt.db.setSettingValue(key, value);
+      },
+    },
+    adapterFor,
+    optimize: runOptimize,
+    // ★ Key 变了只发"变了"这一件事，数据让界面自己重取（事件里不带任何 provider 字段）。
+    onChanged: () => getBroadcast().aiChanged(),
+  });
+}
 
 /** 导出今日词云：量出 [data-cc-wordcloud] 的矩形再截那一片（spec §9 步骤⑥）。 */
 const MEASURE_WORDCLOUD_JS =
@@ -340,6 +372,7 @@ function selfHwnd(): number {
  */
 function buildHandlers(): Partial<Record<string, IpcHandler>> {
   const broadcast = makeBroadcaster(() => rt.win);
+  aiBroadcast = broadcast;
   const needDb = (): Db => {
     if (!rt.db) throw new Error('数据库尚未就绪');
     return rt.db;
@@ -476,8 +509,15 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       return wordCloudToday(wdb);
     },
     [CH.wordcloud.exportPng]: () => exportWordCloudPng(),
+    // ★ AI 面（Task 5）：Key 只在主进程与库之间流动，界面拿到的是掩码与布尔。
+    ...needAi().handlers(),
   };
   return handlers;
+}
+
+function needAi(): AiApi {
+  if (!aiApi) throw new Error('AI 桥尚未就绪');
+  return aiApi;
 }
 
 function needWin(): BrowserWindow {
@@ -700,6 +740,8 @@ function main(): void {
     // ★ smoke 只验骨架，不碰真实剪贴板，也不启动助手（保持冒烟又快又干净）。
     if (!SMOKE) setupServices(rt.dataDir);
 
+    // ★ 必须早于 buildHandlers()：处理器表里要展开 needAi().handlers()。
+    aiApi = buildAiApi(() => aiBroadcast);
     registerIpc({ handlers: buildHandlers(), capabilities: capabilitiesOf });
 
     rt.win = createMainWindow({

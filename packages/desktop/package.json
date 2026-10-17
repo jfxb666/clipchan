@@ -9,6 +9,7 @@
     "dev": "node ../../scripts/dev.mjs"
   },
   "dependencies": {
+    "@clipchan/ai": "workspace:*",
     "@clipchan/core": "workspace:*",
     "better-sqlite3": "^13.0.3",
     "clsx": "^2.1.1",

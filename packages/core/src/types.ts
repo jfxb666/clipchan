@@ -98,6 +98,55 @@ export interface BurstHint {
   count: number;
 }
 
+/** AI 协议（与 @clipchan/ai 的 AiProtocol 镜像：core 不依赖 ai 包，避免构建依赖）。 */
+export type AiProtocol = 'openai-compat' | 'anthropic' | 'gemini';
+
+/** 结构化后的 AI 错误：主进程把 HTTP/网络异常统一成这个形状再上抛。 */
+export interface AiError {
+  kind: 'auth' | 'network' | 'timeout' | 'rate-limit' | 'bad-response' | 'unknown';
+  status?: number;
+  message: string;
+}
+
+/**
+ * 给界面看的 provider 投影。
+ * ★ 只有掩码（Review Focus 6）：apiKey 绝不出现在这个对象里。
+ */
+export interface AiProvider {
+  id: string;
+  name: string;
+  protocol: AiProtocol;
+  baseUrl: string;
+  model: string;
+  hasKey: boolean;
+  keyMask: string;
+}
+
+/** 保存 provider 的入参：apiKey 只上行，不回读。 */
+export interface AiProviderInput {
+  id?: string;
+  name: string;
+  protocol: AiProtocol;
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+}
+
+/** 一次提示词优化请求（sceneId 由渲染层选，主进程查场景与 Key）。 */
+export interface OptimizeRequest {
+  providerId: string;
+  text: string;
+  sceneId: string;
+  mode: 'user' | 'system';
+  extra?: string;
+}
+
+export interface OptimizeResult {
+  optimized: string;
+  notes: string[];
+  degraded: boolean;
+}
+
 /** preload 暴露给渲染进程的完整 API。任何新增能力都必须先加到这里。 */
 export interface ClipchanApi {
   items: {
@@ -146,6 +195,19 @@ export interface ClipchanApi {
   wordcloud: {
     today(): Promise<WordCloudData>;
     exportPng(): Promise<{ ok: boolean; path?: string }>;
+  };
+  ai: {
+    /** Key 已掩码：只回 keyMask 与 hasKey。 */
+    listProviders(): Promise<AiProvider[]>;
+    /** apiKey 仅上行；没传就保留原 Key（编辑时不清空）。 */
+    saveProvider(p: AiProviderInput): Promise<AiProvider[]>;
+    removeProvider(id: string): Promise<AiProvider[]>;
+    listModels(id: string): Promise<string[]>;
+    test(id: string): Promise<{ ok: boolean; error?: AiError; model?: string }>;
+    optimize(req: OptimizeRequest): Promise<OptimizeResult>;
+    /** 只投影 id/name/description（rules 不出主进程）。 */
+    scenes(): Promise<{ id: string; name: string; description: string }[]>;
+    onChanged(cb: () => void): () => void;
   };
   capabilities: Capabilities;
 }

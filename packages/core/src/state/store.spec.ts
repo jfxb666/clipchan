@@ -130,6 +130,16 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       today: async () => ({ words: [], totalItems: 0 }),
       exportPng: async () => ({ ok: true }),
     },
+    ai: {
+      listProviders: async () => [],
+      saveProvider: async () => [],
+      removeProvider: async () => [],
+      listModels: async () => [],
+      test: async () => ({ ok: false }),
+      optimize: async () => ({ optimized: '', notes: [], degraded: false }),
+      scenes: async () => [],
+      onChanged: () => () => {},
+    },
     capabilities: {
       autoPaste: true,
       globalHotkey: true,

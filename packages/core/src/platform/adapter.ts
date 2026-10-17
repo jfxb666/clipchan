@@ -56,6 +56,16 @@ const stub: PlatformAdapter = {
     today: () => Promise.reject(new Error('当前环境没有实现 wordcloud.today')),
     exportPng: () => Promise.reject(new Error('当前环境没有实现 wordcloud.exportPng')),
   },
+  ai: {
+    listProviders: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    saveProvider: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    removeProvider: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    listModels: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    test: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    optimize: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    scenes: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    onChanged: () => unsubscribe(),
+  },
   capabilities: {
     autoPaste: false,
     globalHotkey: false,

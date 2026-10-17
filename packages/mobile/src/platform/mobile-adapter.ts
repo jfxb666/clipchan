@@ -412,6 +412,32 @@ export function createMobileAdapter(): PlatformAdapter {
       },
     },
 
+    ai: {
+      // 手机端不接 AI：七个方法全部如实报不可用，不返回空数组假装成功。
+      async listProviders(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async saveProvider(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async removeProvider(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async listModels(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async test(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async optimize(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async scenes(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      onChanged: (): Unsub => () => {},
+    },
+
     capabilities: { ...CAPABILITIES },
   };
 

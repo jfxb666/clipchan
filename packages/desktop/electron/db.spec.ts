@@ -172,6 +172,40 @@ describe('settings 持久化', () => {
   });
 });
 
+describe('KV 访问器（绕过 sanitizeSettings 白名单）', () => {
+  it('setSettingValue 写的结构化值能深相等读回（aiProviders 这类非 Settings 键）', () => {
+    const db = mem();
+    const providers = [
+      { id: 'p1', name: '本地 Ollama', protocol: 'openai-compat', baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5' },
+      { id: 'p2', name: 'Claude', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-5' },
+    ];
+    db.setSettingValue('aiProviders', providers);
+    expect(db.getSettingValue('aiProviders')).toEqual(providers);
+  });
+
+  it('Key 独立成键，且不渗进 getSettings() 的载荷', () => {
+    const db = mem();
+    db.setSettings({ theme: 'dark' });
+    db.setSettingValue('aiKey:p1', 'sk-abc');
+    db.setSettingValue('aiProviders', [{ id: 'p1', name: 'A', protocol: 'openai-compat', baseUrl: 'http://a/v1', model: 'm' }]);
+
+    expect(db.getSettingValue('aiKey:p1')).toBe('sk-abc');
+
+    // ★ Review Focus 6/7：Key 与 provider 元数据都不许出现在 settings:get 的返回里。
+    const s: Record<string, unknown> = { ...db.getSettings() };
+    expect(Object.prototype.hasOwnProperty.call(s, 'aiKey:p1')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(s, 'aiProviders')).toBe(false);
+    expect(JSON.stringify(s)).not.toContain('sk-abc');
+    expect(s.theme).toBe('dark');
+  });
+
+  it('读不存在的键返回 undefined，不抛', () => {
+    const db = mem();
+    expect(db.getSettingValue('nope')).toBeUndefined();
+    expect(db.getSettingValue('aiKey:missing')).toBeUndefined();
+  });
+});
+
 describe('historyLimit 淘汰', () => {
   it('非收藏按 historyLimit 淘汰，收藏不计入上限', () => {
     const db = mem();

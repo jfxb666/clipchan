@@ -7,7 +7,23 @@
  * ★ 订阅类方法返回**取消函数**（removeListener），界面卸载时调用。
  */
 import { contextBridge, ipcRenderer } from 'electron';
-import type { BurstHint, Capabilities, ClipItemDTO, GhostState, HotkeyStatus, ListQuery, NavigateTarget, PasteResult, Settings, WordCloudData } from '@clipchan/core';
+import type {
+  AiError,
+  AiProvider,
+  AiProviderInput,
+  BurstHint,
+  Capabilities,
+  ClipItemDTO,
+  GhostState,
+  HotkeyStatus,
+  ListQuery,
+  NavigateTarget,
+  OptimizeRequest,
+  OptimizeResult,
+  PasteResult,
+  Settings,
+  WordCloudData,
+} from '@clipchan/core';
 import { CH, EV } from './channels';
 
 function on(channel: string, cb: (...args: any[]) => void): () => void {
@@ -59,6 +75,18 @@ const api = {
   wordcloud: {
     today: (): Promise<WordCloudData> => ipcRenderer.invoke(CH.wordcloud.today),
     exportPng: (): Promise<{ ok: boolean; path?: string }> => ipcRenderer.invoke(CH.wordcloud.exportPng),
+  },
+  ai: {
+    // ★ 全部只走 invoke：Key 由主进程从库里取，渲染进程永远拿不到明文（Review Focus 6）。
+    listProviders: (): Promise<AiProvider[]> => ipcRenderer.invoke(CH.ai.listProviders),
+    saveProvider: (p: AiProviderInput): Promise<AiProvider[]> => ipcRenderer.invoke(CH.ai.saveProvider, p),
+    removeProvider: (id: string): Promise<AiProvider[]> => ipcRenderer.invoke(CH.ai.removeProvider, id),
+    listModels: (id: string): Promise<string[]> => ipcRenderer.invoke(CH.ai.listModels, id),
+    test: (id: string): Promise<{ ok: boolean; error?: AiError; model?: string }> =>
+      ipcRenderer.invoke(CH.ai.test, id),
+    optimize: (req: OptimizeRequest): Promise<OptimizeResult> => ipcRenderer.invoke(CH.ai.optimize, req),
+    scenes: (): Promise<{ id: string; name: string; description: string }[]> => ipcRenderer.invoke(CH.ai.scenes),
+    onChanged: (cb: () => void): (() => void) => on(EV.aiChanged, cb),
   },
   capabilities,
 };

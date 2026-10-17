@@ -75,6 +75,8 @@ export interface Broadcaster {
   toast(message: string, kind?: 'info' | 'warn' | 'error'): void;
   /** 连续复制提示：把预选 id 交给界面（spec §7.5）。 */
   burstHint(hint: { ids: string[]; count: number }): void;
+  /** provider 列表变了（只发信号，不带数据）。 */
+  aiChanged(): void;
 }
 
 export function makeBroadcaster(getWindow: () => Electron.BrowserWindow | null): Broadcaster {
@@ -90,5 +92,6 @@ export function makeBroadcaster(getWindow: () => Electron.BrowserWindow | null):
     ghostChanged: (ghost) => send(EV.ghostChanged, ghost),
     toast: (message, kind = 'info') => send(EV.toast, { message, kind }),
     burstHint: (hint) => send(EV.burstHint, hint),
+    aiChanged: () => send(EV.aiChanged),
   };
 }

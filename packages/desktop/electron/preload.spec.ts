@@ -26,6 +26,7 @@ const EXPECTED = {
     'capabilities',
   ],
   wordcloud: ['today', 'exportPng'],
+  ai: ['listProviders', 'saveProvider', 'removeProvider', 'listModels', 'test', 'optimize', 'scenes'],
 } as const;
 
 describe('channels 契约', () => {
