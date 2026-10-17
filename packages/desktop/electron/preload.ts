@@ -45,6 +45,7 @@ const api = {
     mergeSelected: (ids: string[]): Promise<{ ok: boolean; id?: string; reason?: string }> =>
       ipcRenderer.invoke(CH.items.mergeSelected, ids),
     getFullImage: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getFullImage, id),
+    getText: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getText, id),
     onChanged: (cb: () => void): (() => void) => on(EV.itemsChanged, cb),
     onBurstHint: (cb: (hint: BurstHint) => void): (() => void) => on(EV.burstHint, cb),
   },
@@ -86,6 +87,7 @@ const api = {
       ipcRenderer.invoke(CH.ai.test, id),
     optimize: (req: OptimizeRequest): Promise<OptimizeResult> => ipcRenderer.invoke(CH.ai.optimize, req),
     scenes: (): Promise<{ id: string; name: string; description: string }[]> => ipcRenderer.invoke(CH.ai.scenes),
+    copyAndPaste: (text: string): Promise<PasteResult> => ipcRenderer.invoke(CH.ai.copyAndPaste, text),
     onChanged: (cb: () => void): (() => void) => on(EV.aiChanged, cb),
   },
   capabilities,

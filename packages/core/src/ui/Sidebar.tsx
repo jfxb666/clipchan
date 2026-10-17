@@ -30,7 +30,7 @@ export function Sidebar({
   onOpenSettings,
 }: {
   kind: KindFilter;
-  view: 'list' | 'settings' | 'wordcloud';
+  view: 'list' | 'settings' | 'wordcloud' | 'optimize';
   onSelectKind: (kind: KindFilter) => void;
   onOpenSettings: () => void;
 }) {

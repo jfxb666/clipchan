@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 import { motion } from 'framer-motion';
-import { ImageIcon, Star } from 'lucide-react';
+import { ImageIcon, Sparkles, Star } from 'lucide-react';
 import type { ClipItemDTO } from '../types';
 import { TypeBadge } from './TypeBadge';
 import { cn, formatTime } from './util';
@@ -19,6 +19,7 @@ export function ClipCard({
   onPaste,
   onTogglePin,
   onHover,
+  onOptimize,
 }: {
   item: ClipItemDTO;
   selected: boolean;
@@ -26,6 +27,8 @@ export function ClipCard({
   onPaste: (id: string) => void;
   onTogglePin: (id: string) => void;
   onHover?: (id: string | null) => void;
+  /** 打开优化面板并带出全文；未传则不渲染「优化」按钮。 */
+  onOptimize?: (id: string) => void;
 }) {
   const isCode = item.kind === 'code';
   return (
@@ -79,24 +82,42 @@ export function ClipCard({
         </div>
       </div>
 
-      <button
-        type="button"
-        title={item.pinned ? '取消收藏' : '收藏（Ctrl+D）'}
-        onClick={(event) => {
-          // 固定按钮：单击不能冒泡成"选中卡片"。
-          event.stopPropagation();
-          onTogglePin(item.id);
-        }}
-        onDoubleClick={(event) => event.stopPropagation()}
-        className={cn(
-          'shrink-0 rounded-full p-[3px] transition-colors',
-          item.pinned
-            ? 'text-[var(--cc-warm)]'
-            : 'text-ink-3 opacity-0 group-hover:opacity-100 hover:text-[var(--cc-warm)]',
-        )}
-      >
-        <Star size={14} fill={item.pinned ? 'currentColor' : 'none'} aria-hidden />
-      </button>
+      <div className="flex shrink-0 items-center gap-[2px]">
+        {onOptimize ? (
+          <button
+            type="button"
+            title="优化提示词"
+            onClick={(event) => {
+              // 同收藏按钮：单击只开优化面板，不能顺带选中卡片。
+              event.stopPropagation();
+              onOptimize(item.id);
+            }}
+            onDoubleClick={(event) => event.stopPropagation()}
+            className="shrink-0 rounded-full p-[3px] text-ink-3 opacity-0 transition-colors group-hover:opacity-100 hover:text-[var(--cc-primary)]"
+          >
+            <Sparkles size={14} aria-hidden />
+          </button>
+        ) : null}
+
+        <button
+          type="button"
+          title={item.pinned ? '取消收藏' : '收藏（Ctrl+D）'}
+          onClick={(event) => {
+            // 固定按钮：单击不能冒泡成"选中卡片"。
+            event.stopPropagation();
+            onTogglePin(item.id);
+          }}
+          onDoubleClick={(event) => event.stopPropagation()}
+          className={cn(
+            'shrink-0 rounded-full p-[3px] transition-colors',
+            item.pinned
+              ? 'text-[var(--cc-warm)]'
+              : 'text-ink-3 opacity-0 group-hover:opacity-100 hover:text-[var(--cc-warm)]',
+          )}
+        >
+          <Star size={14} fill={item.pinned ? 'currentColor' : 'none'} aria-hidden />
+        </button>
+      </div>
     </motion.div>
   );
 }

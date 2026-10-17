@@ -26,6 +26,7 @@ const stub: PlatformAdapter = {
     clearAll: () => Promise.reject(new Error('当前环境没有实现 items.clearAll')),
     mergeSelected: () => Promise.reject(new Error('当前环境没有实现 items.mergeSelected')),
     getFullImage: () => Promise.reject(new Error('当前环境没有实现 items.getFullImage')),
+    getText: () => Promise.reject(new Error('当前环境没有实现 items.getText')),
     onChanged: () => unsubscribe(),
     onBurstHint: () => unsubscribe(),
   },
@@ -64,6 +65,7 @@ const stub: PlatformAdapter = {
     test: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     optimize: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     scenes: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    copyAndPaste: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     onChanged: () => unsubscribe(),
   },
   capabilities: {

@@ -90,7 +90,7 @@ export interface WordCloudData {
 }
 
 /** 界面导航目标：主进程托盘菜单 / 全局热键 -> 渲染进程（Task 9 接线）。 */
-export type NavigateTarget = 'list' | 'settings' | 'wordcloud';
+export type NavigateTarget = 'list' | 'settings' | 'wordcloud' | 'optimize';
 
 /** 连续复制提示（spec §7.5）：只提示 + 预选，**绝不自动合并**。 */
 export interface BurstHint {
@@ -158,6 +158,8 @@ export interface ClipchanApi {
     clearAll(): Promise<void>;
     mergeSelected(ids: string[]): Promise<{ ok: boolean; id?: string; reason?: string }>;
     getFullImage(id: string): Promise<string>;
+    /** 正文全文（列表预览是截断的）；图片行或 id 不存在 → ''。 */
+    getText(id: string): Promise<string>;
     onChanged(cb: () => void): () => void;
     /** 连续复制 3 条：把这几条预选并浮出提示条（不合并）。 */
     onBurstHint(cb: (hint: BurstHint) => void): () => void;
@@ -207,6 +209,8 @@ export interface ClipchanApi {
     optimize(req: OptimizeRequest): Promise<OptimizeResult>;
     /** 只投影 id/name/description（rules 不出主进程）。 */
     scenes(): Promise<{ id: string; name: string; description: string }[]>;
+    /** 把优化结果写进剪贴板并贴回目标窗口（不进历史、不刷新排序）。 */
+    copyAndPaste(text: string): Promise<PasteResult>;
     onChanged(cb: () => void): () => void;
   };
   capabilities: Capabilities;

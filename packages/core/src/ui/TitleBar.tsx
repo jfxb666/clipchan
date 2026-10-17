@@ -24,7 +24,14 @@ export function TitleBar({
   onHide: () => void;
   onClose: () => void;
 }) {
-  const title = view === 'settings' ? '设置' : view === 'wordcloud' ? '今日词云' : '剪贴板酱';
+  const title =
+    view === 'settings'
+      ? '设置'
+      : view === 'wordcloud'
+        ? '今日词云'
+        : view === 'optimize'
+          ? '优化提示词'
+          : '剪贴板酱';
   return (
     <header className="cc-drag flex h-[38px] shrink-0 items-center gap-tight border-b border-line px-base">
       <div className="flex min-w-0 items-center gap-tight">

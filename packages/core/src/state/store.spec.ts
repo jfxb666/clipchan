@@ -60,6 +60,7 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       clearAll: async () => {},
       mergeSelected: async () => ({ ok: true, id: 'merged-1' }),
       getFullImage: async () => '',
+      getText: async () => '',
       onChanged: (cb: () => void) => {
         itemChanged = cb;
         return () => {
@@ -138,6 +139,7 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       test: async () => ({ ok: false }),
       optimize: async () => ({ optimized: '', notes: [], degraded: false }),
       scenes: async () => [],
+      copyAndPaste: async () => ({ ok: false, reason: 'send-failed' }),
       onChanged: () => () => {},
     },
     capabilities: {

@@ -31,8 +31,8 @@ export const QUERY_DEBOUNCE_MS = 300;
 /** 浮层提示停留时长。 */
 export const TOAST_TTL_MS = 3000;
 
-/** 顶层视图：列表 / 设置 / 今日词云（spec §6.9 词云是应用内视图）。 */
-export type View = 'list' | 'settings' | 'wordcloud';
+/** 顶层视图：列表 / 设置 / 今日词云 / 优化面板（spec §6.9 词云是应用内视图）。 */
+export type View = 'list' | 'settings' | 'wordcloud' | 'optimize';
 /** 窗口形态：主面板 900×620 / 小组件 280×420（spec §6.6）。 */
 export type AppMode = 'main' | 'widget';
 
@@ -67,10 +67,16 @@ export interface ClipStoreState {
   toasts: Toast[];
   mergeHint: MergeHint | null;
   wordcloud: WordCloudData | null;
+  /** 优化面板的原文初值：由卡片「优化」按钮带出（计划 Task 7 Step 3）。 */
+  optimizeSource: string;
 }
 
 export interface ClipStoreActions {
   setView(view: View): void;
+  /** 打开优化面板并带出原文（列表卡片「优化」按钮）。 */
+  openOptimize(text: string): void;
+  /** 关闭优化面板并清空原文。 */
+  closeOptimize(): void;
   setMode(mode: AppMode): void;
   /** 切侧栏分类：清空选中并立刻重新请求（不走防抖）。 */
   setKind(kind: KindFilter): void;
@@ -182,6 +188,7 @@ function initialState(): ClipStoreState {
     toasts: [],
     mergeHint: null,
     wordcloud: null,
+    optimizeSource: '',
   };
 }
 
@@ -200,6 +207,10 @@ export const useClipStore = create<ClipStore>((set, get) => ({
   ...initialState(),
 
   setView: (view) => set({ view }),
+
+  openOptimize: (text) => set({ view: 'optimize', optimizeSource: text }),
+
+  closeOptimize: () => set({ view: 'list', optimizeSource: '' }),
 
   setMode: (mode) => set({ mode }),
 

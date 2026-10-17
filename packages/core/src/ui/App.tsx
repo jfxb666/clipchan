@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LayoutGrid, List, Settings2, Sparkles } from 'lucide-react';
-import type { AiError, AiProvider, AiProviderInput, Settings } from '../types';
+import type { AiError, AiProvider, AiProviderInput, OptimizeRequest, Settings } from '../types';
 import { getPlatform } from '../platform/adapter';
 import { bindClipStore, useClipStore, type AppMode, type View } from '../state/store';
 import { ListPanel } from './ListPanel';
@@ -10,9 +10,10 @@ import { SettingsView } from './SettingsView';
 import { Sidebar } from './Sidebar';
 import { TitleBar } from './TitleBar';
 import { ToastStack } from './Toast';
-import { pasteToast } from './toastText';
+import { pasteToast, type ToastTone } from './toastText';
 import { WidgetView, WIDGET_PREVIEW_COUNT } from './WidgetView';
 import { widgetWindowHeight } from './widgetFit';
+import { OptimizeView } from './OptimizeViewCard';
 import { WordCloudView } from './WordCloudView';
 import { resolveKey, shouldPreventDefault } from './keymap';
 import { useAutoStart, useHotkeyStatus } from './usePlatformValue';
@@ -41,6 +42,8 @@ export function App() {
   const toasts = useClipStore((s) => s.toasts);
   const wordcloud = useClipStore((s) => s.wordcloud);
   const mergeHint = useClipStore((s) => s.mergeHint);
+  /** 优化面板的原文初值：由卡片「优化」按钮写进来。 */
+  const optimizeSource = useClipStore((s) => s.optimizeSource);
 
   const searchRef = useRef<HTMLInputElement | null>(null);
   const hotkeys = useHotkeyStatus();
@@ -196,6 +199,29 @@ export function App() {
     })();
   }, []);
 
+  /**
+   * 卡片「优化」按钮：先取全文，取不到就不打开空面板（不假装成功）。
+   * 通道报错时也要出声，不能让按钮点了毫无反应。
+   */
+  const openOptimize = useCallback(async (id: string) => {
+    try {
+      const text = await getPlatform().items.getText(id);
+      if (text === '') {
+        useClipStore.getState().toast('这条记录没有可优化的文本', 'warn');
+        return;
+      }
+      useClipStore.getState().openOptimize(text);
+    } catch {
+      useClipStore.getState().toast('读取全文失败，请重试', 'warn');
+    }
+  }, []);
+
+  // 优化面板的三个平台动作：组件不碰 getPlatform，一律由 App 注入（与设置页一致）。
+  const loadScenes = useCallback(() => getPlatform().ai.scenes(), []);
+  const runOptimize = useCallback((req: OptimizeRequest) => getPlatform().ai.optimize(req), []);
+  const copyAndPaste = useCallback((text: string) => getPlatform().ai.copyAndPaste(text), []);
+  const toast = useCallback((text: string, tone?: ToastTone) => useClipStore.getState().toast(text, tone), []);
+
   const openWordCloud = useCallback(() => {
     useClipStore.getState().setView('wordcloud');
     void useClipStore.getState().loadWordCloud();
@@ -339,6 +365,7 @@ export function App() {
                 onSelect={(id, opts) => useClipStore.getState().select(id, opts)}
                 onPaste={(id) => void paste(id)}
                 onTogglePin={(id) => void useClipStore.getState().togglePin(id)}
+                onOptimize={(id) => void openOptimize(id)}
                 onLoadMore={() => void useClipStore.getState().loadMore()}
               />
 
@@ -380,6 +407,18 @@ export function App() {
               onAiRemove={removeAiProvider}
               onAiTest={testAiProvider}
               onAiListModels={listAiModels}
+            />
+          ) : null}
+
+          {view === 'optimize' ? (
+            <OptimizeView
+              source={optimizeSource}
+              providers={aiProviders}
+              onScenes={loadScenes}
+              onOptimize={runOptimize}
+              onCopyAndPaste={copyAndPaste}
+              onToast={toast}
+              onGoSettings={() => useClipStore.getState().setView('settings')}
             />
           ) : null}
 

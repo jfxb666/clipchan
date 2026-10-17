@@ -16,6 +16,7 @@ export const CH = {
     clearAll: 'items:clearAll',
     mergeSelected: 'items:mergeSelected',
     getFullImage: 'items:getFullImage',
+    getText: 'items:getText',
   },
   settings: { get: 'settings:get', set: 'settings:set' },
   ghost: { get: 'ghost:get', set: 'ghost:set' },
@@ -40,6 +41,7 @@ export const CH = {
     test: 'ai:test',
     optimize: 'ai:optimize',
     scenes: 'ai:scenes',
+    copyAndPaste: 'ai:copyAndPaste',
   },
 } as const;
 

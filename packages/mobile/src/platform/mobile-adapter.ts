@@ -296,6 +296,12 @@ export function createMobileAdapter(): PlatformAdapter {
         return rec && rec.kind === 'image' && rec.dataUrl ? rec.dataUrl : '';
       },
 
+      async getText(id: string): Promise<string> {
+        const rec = records.find((r) => r.id === id);
+        // 手机端记录本来就存全文（内存数组里没有"截断的预览"这回事），原样返回。
+        return rec && rec.kind !== 'image' ? (rec.content ?? '') : '';
+      },
+
       onChanged(cb: () => void): Unsub {
         return subscribe(itemsSubs, cb);
       },
@@ -430,6 +436,9 @@ export function createMobileAdapter(): PlatformAdapter {
         throw new Error('手机端暂不支持 AI 提示词优化');
       },
       async optimize(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async copyAndPaste(): Promise<never> {
         throw new Error('手机端暂不支持 AI 提示词优化');
       },
       async scenes(): Promise<never> {

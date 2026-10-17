@@ -429,6 +429,15 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       const abs = imageAbs(rt.dataDir, row.image_path);
       return fs.existsSync(abs) ? abs : '';
     },
+    // ★ 正文全文（列表预览是截断的）：优化面板要原文，图片行/不存在一律空串。
+    [CH.items.getText]: (_e, id: string) => needDb().getText(String(id)),
+    // ★ 优化结果「复制并粘贴」：同一段文本可能贴多次，不走 items:paste（那是库里的记录，
+    //   会刷新排序）。不查库、不 touch，编排与 pasteItem 一致。
+    [CH.ai.copyAndPaste]: (_e, text: string) => {
+      const svc = pasteSvc;
+      if (!svc) return { ok: false, reason: 'send-failed' };
+      return Promise.resolve(svc.pasteText(typeof text === 'string' ? text : ''));
+    },
     [CH.ghost.get]: () => ghostSvc?.get() ?? rt.ghost,
     [CH.ghost.set]: (_e, minutes: number | null) => {
       // ★ 幽灵模式：彻底停止轮询（不是"读了再丢"），恢复时静默重置基线、不补录。

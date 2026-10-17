@@ -9,6 +9,8 @@ export { Sidebar, NAV_ITEMS, type NavItem } from './Sidebar';
 export { SearchBar } from './SearchBar';
 export { ClipCard } from './ClipCard';
 export { ListPanel, LOAD_MORE_THRESHOLD_PX } from './ListPanel';
+export { OptimizeView, type OptimizeScene, type OptimizeViewProps } from './OptimizeViewCard';
+export { OPTIMIZE_MODES, degradedHint, type OptimizeMode } from './optimizeView';
 export { WidgetView, WIDGET_PREVIEW_COUNT, visibleWidgetItems } from './WidgetView';
 export {
   WIDGET_AUTO_MAX_HEIGHT,

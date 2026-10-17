@@ -20,6 +20,7 @@ export function ListPanel({
   onPaste,
   onTogglePin,
   onHover,
+  onOptimize,
   onLoadMore,
 }: {
   items: ClipItemDTO[];
@@ -31,6 +32,8 @@ export function ListPanel({
   onPaste: (id: string) => void;
   onTogglePin: (id: string) => void;
   onHover?: (id: string | null) => void;
+  /** 打开优化面板并带出全文（计划 Task 7 Step 6）。 */
+  onOptimize?: (id: string) => void;
   onLoadMore: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -63,6 +66,7 @@ export function ListPanel({
               onPaste={onPaste}
               onTogglePin={onTogglePin}
               onHover={onHover}
+              onOptimize={onOptimize}
             />
           ))}
           {loading ? (

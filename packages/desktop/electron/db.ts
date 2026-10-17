@@ -169,6 +169,11 @@ export interface Db {
   /** 写任意 settings 键；**不**写 settingsCache，所以 getSettings() 永远看不到它。 */
   setSettingValue(key: string, value: unknown): void;
   getRow(id: string): ItemRow | null;
+  /**
+   * 读一条记录的正文全文（列表预览是截断的，优化面板要原文）。
+   * 图片行 content 为 NULL、id 不存在 → 一律返回 ''，不抛。
+   */
+  getText(id: string): string;
   getImageRow(id: string): ImageRow | null;
   /** 全部图片行；unpinnedOnly=true 时只要未收藏的（清空未收藏 / 预算淘汰用）。 */
   allImageRows(opts?: { unpinnedOnly?: boolean }): ImageRow[];
@@ -550,6 +555,15 @@ export function openDb(file: string): Db {
     getRow(id: string): ItemRow | null {
       const row = raw.prepare('SELECT * FROM items WHERE id = ?').get(id) as ItemRow | undefined;
       return row ?? null;
+    },
+
+    getText(id: string): string {
+      const row = raw.prepare('SELECT content, kind FROM items WHERE id = ?').get(id) as
+        | { content: string | null; kind: string }
+        | undefined;
+      // 图片行 content 为 NULL；不存在的 id 也没有 content —— 两种都按空串返回。
+      if (!row || row.kind === 'image') return '';
+      return row.content ?? '';
     },
 
     getImageRow(id: string): ImageRow | null {

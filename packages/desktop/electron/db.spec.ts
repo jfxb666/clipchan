@@ -239,3 +239,26 @@ describe('remove / removeMany / togglePin / clearUnpinned', () => {
     expect(db.list()).toHaveLength(0);
   });
 });
+
+describe('getText 读全文（Task 7）', () => {
+  it('文本行取回全文（含换行，不截断）', () => {
+    const db = mem();
+    const long = '第一行\n第二行\n' + 'x'.repeat(200);
+    const r = db.insertText(long, { now: 1000 });
+    expect(db.getText(r.id)).toBe(long);
+  });
+
+  it('图片行返回空串（图片 content 为 NULL）', () => {
+    const db = mem();
+    const img = db.insertImage(
+      { imagePath: 'images/i1.jpg', thumbPath: 'thumbs/i1.png', width: 10, height: 20, bytes: 99, hash: 'h-i1' },
+      { now: 1000 },
+    );
+    expect(db.getText(img.id)).toBe('');
+  });
+
+  it('不存在的 id 返回空串', () => {
+    const db = mem();
+    expect(db.getText('f'.repeat(32))).toBe('');
+  });
+});

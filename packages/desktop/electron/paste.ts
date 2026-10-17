@@ -163,4 +163,42 @@ export class PasteService {
       return SEND_FAILED;
     }
   }
+
+  /**
+   * 把一段现成的文本复制进剪贴板并尝试自动贴回目标窗口（优化面板「复制并粘贴」）。
+   *
+   * 与 pasteItem 的第 ②③④⑤⑥ 步同构，唯一区别是内容来自入参：
+   * **不查库、不 touch**（这段文本不是库里的一条记录，没有 created_at 要刷新）。
+   * 永不抛异常 —— 失败一律返回诚实的 PasteResult。
+   */
+  async pasteText(text: string): Promise<PasteResult> {
+    const body = typeof text === 'string' ? text : '';
+    if (body.length === 0) return SEND_FAILED;
+
+    // ② 先写剪贴板（writer 内部会先 suppressNext()，否则自己这一跳会被轮询记成新记录）
+    try {
+      this.writer.writeText(body);
+    } catch {
+      // 剪贴板被别的进程锁住：中止本跳，不消耗目标。
+      return SEND_FAILED;
+    }
+
+    // ③ 跳过：这段文本不是库里的记录，没有 touched/seq 要刷新。
+
+    // ④ 取目标：一次性消费，取出即清空（陈旧 HWND 绝不复用）
+    const hwnd = this.tracker.consume();
+
+    // ⑤ 不注入的两种情形：开关关闭 / 没有可粘贴的目标。内容已在剪贴板里。
+    if (!this.getSettings().autoPaste) return COPY_ONLY;
+    if (hwnd === null) return COPY_ONLY;
+
+    // ⑥ 助手不可用：不调用 paste()，直接诚实回退。
+    if (!this.helper.available) return SEND_FAILED;
+
+    try {
+      return await this.helper.paste(hwnd);
+    } catch {
+      return SEND_FAILED;
+    }
+  }
 }

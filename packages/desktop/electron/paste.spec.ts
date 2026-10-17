@@ -434,3 +434,160 @@ describe('PasteService 与真 db 的集成（Review Focus 1）', () => {
     }
   });
 });
+
+// ---------------- PasteService.pasteText（Task 7：把优化结果写进剪贴板） ----------------
+
+describe('PasteService.pasteText 编排（与 pasteItem 同构，但不查库、不 touch）', () => {
+  it('② 写剪贴板 → ④ consume → ⑥ 调助手；**不 getRow、不 touch**', async () => {
+    const events: string[] = [];
+    const writer = fakeWriter(events);
+    const helper = fakeHelper({ ok: true });
+    const svc = new PasteService({
+      // 假 db 的行是 null：pasteText 一旦查库就会走错分支，这里能立刻暴露。
+      db: fakeDb(null, events),
+      helper,
+      tracker: fakeTracker(0x5555, events),
+      getSettings: () => ({ autoPaste: true }),
+      writer,
+    });
+
+    expect(await svc.pasteText('优化后的提示词')).toEqual({ ok: true });
+    expect(events).toEqual(['writeText', 'consume']);
+    expect(events).not.toContain('getRow');
+    expect(events).not.toContain('touch');
+    expect(writer.texts).toEqual(['优化后的提示词']);
+    expect(helper.calls).toEqual([0x5555]);
+  });
+
+  it('空文本 → {send-failed}，不写剪贴板、不调助手、不碰 db', async () => {
+    const events: string[] = [];
+    const writer = fakeWriter(events);
+    const helper = fakeHelper({ ok: true });
+    const svc = new PasteService({
+      db: fakeDb(null, events),
+      helper,
+      tracker: fakeTracker(0x5555, events),
+      getSettings: () => ({ autoPaste: true }),
+      writer,
+    });
+
+    expect(await svc.pasteText('')).toEqual({ ok: false, reason: 'send-failed' });
+    expect(events).toEqual([]);
+    expect(writer.texts).toEqual([]);
+    expect(helper.calls).toEqual([]);
+  });
+
+  it('自动粘贴开关关闭 → {no-target} 且不调助手（内容已进剪贴板）', async () => {
+    const events: string[] = [];
+    const writer = fakeWriter(events);
+    const helper = fakeHelper({ ok: true });
+    const svc = new PasteService({
+      db: fakeDb(null, events),
+      helper,
+      tracker: fakeTracker(0x5555, events),
+      getSettings: () => ({ autoPaste: false }),
+      writer,
+    });
+
+    expect(await svc.pasteText('优化后的提示词')).toEqual({ ok: false, reason: 'no-target' });
+    expect(events).toEqual(['writeText', 'consume']);
+    expect(events).not.toContain('touch');
+    expect(writer.texts).toEqual(['优化后的提示词']);
+    expect(helper.calls).toEqual([]);
+  });
+
+  it('目标为 null → {no-target} 且不调助手', async () => {
+    const events: string[] = [];
+    const helper = fakeHelper({ ok: true });
+    const svc = new PasteService({
+      db: fakeDb(null, events),
+      helper,
+      tracker: fakeTracker(null, events),
+      getSettings: () => ({ autoPaste: true }),
+      writer: fakeWriter(events),
+    });
+
+    expect(await svc.pasteText('x')).toEqual({ ok: false, reason: 'no-target' });
+    expect(events).not.toContain('touch');
+    expect(helper.calls).toEqual([]);
+  });
+
+  it('helper.available===false → {send-failed} 且一次都不调 helper.paste', async () => {
+    const events: string[] = [];
+    const writer = fakeWriter(events);
+    const helper = fakeHelper({ ok: true }, false);
+    const svc = new PasteService({
+      db: fakeDb(null, events),
+      helper,
+      tracker: fakeTracker(0x5555, events),
+      getSettings: () => ({ autoPaste: true }),
+      writer,
+    });
+
+    expect(await svc.pasteText('x')).toEqual({ ok: false, reason: 'send-failed' });
+    expect(helper.calls).toEqual([]);
+    expect(writer.texts).toEqual(['x']); // 复制仍然成功
+    expect(events).not.toContain('touch');
+  });
+
+  it('助手结果原样透传（不重复映射）', async () => {
+    for (const code of [0, 1, 3, 6, 2, 4, 5, 7]) {
+      const helper = fakeHelper(mapHelperCode(code));
+      const svc = new PasteService({
+        db: fakeDb(null, []),
+        helper,
+        tracker: fakeTracker(0x5555, []),
+        getSettings: () => ({ autoPaste: true }),
+        writer: fakeWriter(),
+      });
+      expect(await svc.pasteText('x')).toEqual(mapHelperCode(code));
+      expect(helper.calls).toEqual([0x5555]);
+    }
+  });
+
+  it('writer 抛异常（剪贴板被占用）→ {send-failed}，不消耗目标、不 touch', async () => {
+    const events: string[] = [];
+    const writer: ClipboardWriter = {
+      writeText: () => {
+        events.push('writeText');
+        throw new Error('剪贴板被占用');
+      },
+      writeImage: () => {},
+    };
+    const helper = fakeHelper({ ok: true });
+    const svc = new PasteService({
+      db: fakeDb(null, events),
+      helper,
+      tracker: fakeTracker(0x5555, events),
+      getSettings: () => ({ autoPaste: true }),
+      writer,
+    });
+
+    expect(await svc.pasteText('x')).toEqual({ ok: false, reason: 'send-failed' });
+    expect(events).toEqual(['writeText']);
+    expect(events).not.toContain('touch');
+    expect(helper.calls).toEqual([]);
+  });
+
+  it('helper.paste 抛异常 → {send-failed}（压成诚实回退）', async () => {
+    const events: string[] = [];
+    const helper: PasteHelper = {
+      available: true,
+      paste: async () => {
+        events.push('paste');
+        throw new Error('注入失败');
+      },
+    };
+    const svc = new PasteService({
+      db: fakeDb(null, events),
+      helper,
+      tracker: fakeTracker(0x5555, events),
+      getSettings: () => ({ autoPaste: true }),
+      writer: fakeWriter(events),
+    });
+
+    expect(await svc.pasteText('x')).toEqual({ ok: false, reason: 'send-failed' });
+    expect(events).toEqual(['writeText', 'consume', 'paste']);
+    expect(events).not.toContain('touch');
+  });
+});
