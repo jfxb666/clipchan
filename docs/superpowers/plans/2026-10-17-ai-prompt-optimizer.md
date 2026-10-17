@@ -11,7 +11,63 @@
 
 **Tech Stack:** TypeScript 5.9 / pnpm workspace / vitest 3.2 / Electron 37 / React 18 / Tailwind 3 / better-sqlite3 13。网络请求只用 `fetch`（Electron 主进程内置），**不引入新的运行时依赖**。
 
-**Spec:** 本文件即规格。上游设计定稿见会话分级规划（北极星：让 Clipchan 用户把随手复制的文字一键变成按使用场景优化过的高质量提示词，直接粘贴去用）。
+**Spec:** 本文件即规格，不依赖任何会话上下文或外部文档——拿到这个文件就能开工。北极星：让 Clipchan 用户把随手复制的文字一键变成按使用场景优化过的高质量提示词，直接粘贴去用。
+
+---
+
+## 0. 给执行者（尤其是没有本项目上下文的 agent）
+
+本仓库**没有** `AGENTS.md` / `CLAUDE.md`，所有约定都在这一节，开工前先读完。
+
+### 0.1 环境前置
+
+```bash
+cd <仓库根目录>          # 含 pnpm-workspace.yaml 的那一层
+pnpm install            # 必须，否则 tsc/vitest 都跑不起来
+pnpm typecheck          # 基线必须 exit 0，非 0 说明环境或分支有问题，先停下来报告
+pnpm test               # 基线必须全绿
+```
+
+- **包管理器只用 pnpm**。不要用 npm / yarn，会破坏 workspace 链接与 `onlyBuiltDependencies`。
+- Node 需 ≥ 22（实测环境 v24.21.0，pnpm 12.11.2）。
+- Windows + PowerShell（pwsh）。**不要设 `$ErrorActionPreference='Stop'`**：pnpm 把正常输出写到 stderr，会被当成 NativeCommandError 让整条命令假失败。判断成功只看 `$LASTEXITCODE`。
+
+### 0.2 仓库硬约定（违反会被人打回）
+
+1. **不引新运行时依赖**。HTTP 用全局 `fetch`，不装 axios / openai SDK / @anthropic-ai/sdk。`packages/ai` 的 dependencies 留空。
+2. **UI 全中文**，视觉复用 `packages/core/src/ui/SettingsView.tsx` 里的 `Section` / `Row` / `Segmented` / `Toggle` 与 tailwind token，不新造设计语言。
+3. **无 jsdom、无 testing-library**。所有 `*.spec.tsx` 只能测纯函数，不得渲染组件（依据：`packages/core/src/ui/App.tsx:86`、`badges.spec.tsx:7` 的注释）。
+4. **不假装成功**。未实现/不支持的路径明确抛错（中文），不返回 `undefined`、不返回空数组充数。
+5. **每步 TDD**：先写失败测试 → 跑它确认红 → 实现 → 跑绿 → 收口 → 提交。跳步的 PR 会被打回。
+6. **通道名是契约**：新增 IPC 顺序固定为 `packages/core/src/types.ts` 的 `ClipchanApi` → `packages/desktop/electron/channels.ts` → `ipc.ts` 处理器表 → `preload.ts` → `preload.spec.ts` 的 `EXPECTED`。漏任何一步 `pnpm smoke:main` 或契约测试会红。
+7. **YAGNI**：本计划没写的功能不要顺手加（流式输出、多轮迭代、Key 加密、模型热切换都明确不做）。
+
+### 0.3 git 约定
+
+- 直接在 `main` 上做，不开分支（仓库现状就是如此）。
+- 一个 Task 一个 commit，message 用计划里写好的那句（`feat(ai): ...` / `feat(ui): ...`）。
+- 不要 `git push`，除非用户明确要求；推之前先 `git fetch` 确认没有他人提交。
+- 不要提交：`node_modules/`、`dist/`、`dist-electron/`、`release/`、`_diag_*.jsonl`（工作区里那两个诊断文件与本任务无关，别误加）。
+
+### 0.4 任务依赖图（决定谁能并行）
+
+```
+Task 1 ──► Task 2 ──┐
+                    ├──► Task 5 ──► Task 6 ──┐
+Task 3 ──► Task 4 ──┘                        ├──► Task 8 ──► Task 9
+                              Task 7 ◄───────┘
+```
+
+- **可并行**：`Task 1+2`（协议层）与 `Task 3+4`（方法论层）互不依赖，可同时开工。
+- **必须串行**：Task 5 需要 1-4 全部收口（它 import `@clipchan/ai`）；Task 7 需要 Task 5 的通道先存在；Task 6 与 Task 7 可并行，但两者都改 `App.tsx`，**并行时先约定好各自改哪一段，否则必冲突**。
+- **Task 8 必须人来做**：需要真实 API Key，agent 不得编造、不得跳过、不得把 Key 写进任何文件或 commit message。
+
+### 0.5 已踩过的坑（省你半小时）
+
+- `scripts/build-main.mjs` 用**原生 esbuild.exe**（在 `node_modules/.pnpm` 里找），不能用 `node_modules/.bin/esbuild` —— pnpm 没提升 bin，JS 包装会静默失败、退出码 0、无产物。参数必须等号形式（`--bundle`、`--outfile=...`）。
+- `tsc -b` 会编译到新加的 `packages/ai`，但**前提是根 `tsconfig.json` 的 `references` 里有它**。忘加 = 那个包完全不参与类型检查（也不会报错，最阴）。
+- `packages/desktop/electron/db.ts:323-336` 的 `sanitizeSettings` 是逐键白名单，写白名单外的键会被**静默丢弃**。这就是为什么 Key 与 provider 元数据必须走新加的 KV 访问器。
+- 改 `ClipchanApi` 会让三处手写的适配器对象同时报错：`packages/core/src/platform/adapter.ts:19-65`（stub）、`packages/core/src/state/store.spec.ts:41-77`（测试假 adapter）、`packages/mobile/src/platform/mobile-adapter.ts:177`（手机端）。一次改完，别分三次跑 typecheck。
 
 ---
 
