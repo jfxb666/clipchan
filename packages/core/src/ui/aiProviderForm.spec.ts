@@ -74,4 +74,15 @@ describe('aiErrorMessage', () => {
   it('timeout：提示超时', () => {
     expect(aiErrorMessage({ kind: 'timeout', message: 'whatever' })).toContain('超时');
   });
+
+  it('IPC 包装过的 Error：剥掉 "Error invoking remote method…: Error: " 双重前缀只留正文', () => {
+    // Electron 用 toString() 拼接（name 也进 message），实测见 ipc.spec.ts 注释。
+    expect(
+      aiErrorMessage(new Error("Error invoking remote method 'ai:optimize': Error: 请求超时（60 秒）")),
+    ).toBe('请求超时（60 秒）');
+  });
+
+  it('普通 Error 的 message 原样展示，不受前缀剥离影响', () => {
+    expect(aiErrorMessage(new Error('自定义错误'))).toBe('自定义错误');
+  });
 });

@@ -79,9 +79,12 @@ function readKind(e: unknown): AiError['kind'] | null {
   return typeof kind === 'string' && kind in KIND_MESSAGES ? (kind as AiError['kind']) : null;
 }
 
+/** ipcRenderer.invoke 的拒绝被 Electron 用 toString() 拼成 "Error invoking remote method 'x': Error: 正文"，展示前剥掉。 */
+const IPC_WRAPPER = /^(?:Error invoking remote method '[^']+': )?(?:Error: )?/;
+
 function readMessage(e: unknown): string | null {
   if (typeof e === 'string') return e.trim() || null;
-  if (e instanceof Error) return e.message;
+  if (e instanceof Error) return e.message.replace(IPC_WRAPPER, '') || null;
   if (typeof e === 'object' && e !== null) {
     const message = (e as { message?: unknown }).message;
     if (typeof message === 'string' && message.trim()) return message;

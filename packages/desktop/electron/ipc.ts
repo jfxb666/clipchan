@@ -30,6 +30,24 @@ export function resetRegistry(): void {
   registered.clear();
 }
 
+/**
+ * 把处理器抛出的东西包成 Error。Electron 的 ipcMain.handle 只序列化 Error 实例的
+ * message/name/stack，throw 普通对象（如 @clipchan/ai 的 AiError）会在渲染层变成
+ * "Error invoking remote method 'x': [object Object]"——结构化信息全丢。
+ */
+export function toIpcError(e: unknown): Error {
+  if (e instanceof Error) return e;
+  if (typeof e === 'string') return new Error(e);
+  const message = (e as { message?: unknown } | null | undefined)?.message;
+  if (typeof message === 'string' && message.trim()) return new Error(message);
+  // 无 message 的对象用 JSON 表示（String({}) 也是 "[object Object]"）；循环引用再退回 String。
+  try {
+    return new Error(JSON.stringify(e));
+  } catch {
+    return new Error(String(e));
+  }
+}
+
 export function registerIpc(deps: IpcDeps = {}): string[] {
   const handlers = deps.handlers ?? {};
   for (const channel of ALL_INVOKE_CHANNELS) {
@@ -37,7 +55,13 @@ export function registerIpc(deps: IpcDeps = {}): string[] {
     ipcMain.removeHandler(channel);
     const impl = handlers[channel];
     if (impl) {
-      ipcMain.handle(channel, impl);
+      ipcMain.handle(channel, async (event, ...args: unknown[]) => {
+        try {
+          return await impl(event, ...args);
+        } catch (e) {
+          throw toIpcError(e);
+        }
+      });
     } else {
       ipcMain.handle(channel, () => {
         throw new Error('not-implemented: ' + channel);
