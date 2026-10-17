@@ -56,6 +56,9 @@ importers:
 
   packages/desktop:
     dependencies:
+      '@clipchan/ai':
+        specifier: workspace:*
+        version: link:../ai
       '@clipchan/core':
         specifier: workspace:*
         version: link:../core
