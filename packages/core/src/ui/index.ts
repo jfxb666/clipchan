@@ -46,6 +46,18 @@ export {
   WIDGET_SIZE_MAX,
   WIDGET_SIZE_MIN,
 } from './SettingsView';
+export {
+  AiProviderForm,
+  LIST_FAILED_HINT,
+  type AiProviderFormProps,
+} from './AiProviderFormCard';
+export {
+  DEFAULT_BASE_URL,
+  PROTOCOL_OPTIONS,
+  aiErrorMessage,
+  protocolLabel,
+  validateProvider,
+} from './aiProviderForm';
 export { badgeOf, filterKindOf, emptyHintOf, type Badge, type BadgeIcon } from './badges';
 export {
   GHOST_RESUME_TOAST,

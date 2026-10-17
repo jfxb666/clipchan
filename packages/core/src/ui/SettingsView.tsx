@@ -1,8 +1,19 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { FolderOpen, Ghost } from 'lucide-react';
-import type { Capabilities, GhostState, HotkeyStatus, Settings, ThemeMode } from '../types';
+import type {
+  AiError,
+  AiProvider,
+  AiProviderInput,
+  Capabilities,
+  GhostState,
+  HotkeyStatus,
+  Settings,
+  ThemeMode,
+} from '../types';
 import { cn, formatClock, formatRemaining } from './util';
 import { autoStartClick, autoStartSettle, initialAutoStartToggle } from './autoStartToggle';
+import { AiProviderForm } from './AiProviderFormCard';
+import { aiErrorMessage, protocolLabel } from './aiProviderForm';
 
 /**
  * 设置页（spec §6.7）：快捷键 / 外观 / 历史 / 小组件 / 数据 五个分区。
@@ -118,6 +129,11 @@ export function SettingsView({
   onSetAutoStart,
   onToggleMode,
   mode,
+  aiProviders,
+  onAiSave,
+  onAiRemove,
+  onAiTest,
+  onAiListModels,
 }: {
   settings: Settings;
   ghost: GhostState;
@@ -134,6 +150,15 @@ export function SettingsView({
   onSetAutoStart: (on: boolean) => void | Promise<boolean>;
   onToggleMode: () => void;
   mode: 'main' | 'widget';
+  /** 已保存的模型列表（Key 已掩码，渲染层拿不到明文）。 */
+  aiProviders: AiProvider[];
+  /** 保存（apiKey 留空则沿用主进程里存的原 Key）。 */
+  onAiSave: (input: AiProviderInput) => Promise<void>;
+  onAiRemove: (id: string) => Promise<void>;
+  /** 连通性测试：结果由主进程返回，这里只负责显示。 */
+  onAiTest: (id: string) => Promise<{ ok: boolean; error?: AiError; model?: string }>;
+  /** 拉取模型列表；返回空数组或抛错时降级为手输，不报错。 */
+  onAiListModels: (id: string) => Promise<string[]>;
 }) {
   // 危险操作两次点击确认（spec §6.7）：第一次点变成"再点一次"，3 秒后自动复位。
   const [pendingClear, setPendingClear] = useState<'unpinned' | 'all' | null>(null);
@@ -159,6 +184,33 @@ export function SettingsView({
   const historyValue = Math.min(HISTORY_SLIDER_MAX, Math.max(HISTORY_SLIDER_MIN, settings.historyLimit));
   const custom = Number(customMinutes);
   const customValid = Number.isFinite(custom) && custom > 0 && custom <= GHOST_MAX_MINUTES;
+
+  // 「AI 模型」区：'new' = 新增中，字符串 = 正在编辑的 provider id，null = 都没展开。
+  const [aiEditing, setAiEditing] = useState<'new' | string | null>(null);
+  const [aiTesting, setAiTesting] = useState<string | null>(null);
+  const [aiTestText, setAiTestText] = useState<Record<string, string>>({});
+
+  const aiEditingProvider = aiProviders.find((p) => p.id === aiEditing) ?? null;
+
+  async function testProvider(id: string) {
+    setAiTesting(id);
+    try {
+      const result = await onAiTest(id);
+      setAiTestText((prev) => ({
+        ...prev,
+        [id]: result.ok ? `${result.model ?? '模型'} 可用` : aiErrorMessage(result.error),
+      }));
+    } catch (err) {
+      setAiTestText((prev) => ({ ...prev, [id]: aiErrorMessage(err) }));
+    } finally {
+      setAiTesting(null);
+    }
+  }
+
+  async function removeProvider(id: string) {
+    await onAiRemove(id);
+    setAiEditing((current) => (current === id ? null : current));
+  }
 
   return (
     <div className="cc-scroll flex min-h-0 flex-1 flex-col overflow-y-auto pb-base">
@@ -297,6 +349,79 @@ export function SettingsView({
             {mode === 'widget' ? '切回主面板' : '切换到小组件'}
           </button>
         </Row>
+      </Section>
+
+      <Section title="AI 模型">
+        {aiProviders.length === 0 ? (
+          <p className="text-[11px] leading-[1.6] text-ink-3">
+            还没有配置模型。添加一个之后，就能在优化提示词时用它改写内容。
+          </p>
+        ) : null}
+
+        {aiProviders.map((p) => (
+          <div
+            key={p.id}
+            className="flex items-center gap-snug rounded-card border border-line bg-surface-2 px-snug py-tight"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[12px] text-ink">{p.name}</p>
+              <p className="truncate text-[11px] text-ink-3">
+                {protocolLabel(p.protocol)} · {p.model}
+              </p>
+              {aiTestText[p.id] ? (
+                <p className="mt-[2px] text-[11px] leading-[1.6] text-ink-3">{aiTestText[p.id]}</p>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              disabled={aiTesting === p.id}
+              onClick={() => void testProvider(p.id)}
+              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {aiTesting === p.id ? '测试中…' : '测试'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setAiEditing(p.id)}
+              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
+            >
+              编辑
+            </button>
+            <button
+              type="button"
+              onClick={() => void removeProvider(p.id)}
+              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-red-400 hover:bg-surface-2"
+            >
+              删除
+            </button>
+          </div>
+        ))}
+
+        {aiEditing === 'new' || aiEditingProvider ? (
+          <AiProviderForm
+            {...(aiEditingProvider ? { provider: aiEditingProvider } : {})}
+            onSave={async (input) => {
+              await onAiSave(input);
+              setAiEditing(null);
+            }}
+            onRemove={async (id) => {
+              await removeProvider(id);
+            }}
+            onTest={onAiTest}
+            onListModels={onAiListModels}
+            onCancel={() => setAiEditing(null)}
+          />
+        ) : (
+          <Row label="添加模型" hint="支持 OpenAI 兼容 / Anthropic / Gemini 三种协议">
+            <button
+              type="button"
+              onClick={() => setAiEditing('new')}
+              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
+            >
+              添加模型
+            </button>
+          </Row>
+        )}
       </Section>
 
       <Section title="数据">

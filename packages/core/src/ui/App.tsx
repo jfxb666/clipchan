@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { LayoutGrid, List, Settings2, Sparkles } from 'lucide-react';
-import type { Settings } from '../types';
+import type { AiError, AiProvider, AiProviderInput, Settings } from '../types';
 import { getPlatform } from '../platform/adapter';
 import { bindClipStore, useClipStore, type AppMode, type View } from '../state/store';
 import { ListPanel } from './ListPanel';
@@ -46,6 +46,12 @@ export function App() {
   const hotkeys = useHotkeyStatus();
   const autoStart = useAutoStart();
 
+  /**
+   * AI 模型列表：主进程是唯一事实来源（Key 只在那边存）。
+   * 这里不放进 store —— 只有设置页用得到，也没必要跟着全局状态走。
+   */
+  const [aiProviders, setAiProviders] = useState<AiProvider[]>([]);
+
   /** 小组件形态下收起侧栏，把宽度让给内容（spec §6.6 切形态改布局）。 */
   const widgetCompact = mode === 'widget';
 
@@ -79,6 +85,29 @@ export function App() {
     return () => {
       unbind();
       clearInterval(tick);
+    };
+  }, []);
+
+  // AI 模型列表：读一次 + 订阅主进程的变更（新增/编辑/删除后刷新）。
+  // 非 Electron 环境读不到就保持空列表，不打扰用户（照 store.ts 的订阅写法）。
+  useEffect(() => {
+    const platform = getPlatform();
+    let alive = true;
+    const refresh = () => {
+      platform.ai
+        .listProviders()
+        .then((list) => {
+          if (alive) setAiProviders(list);
+        })
+        .catch(() => {
+          /* 没有实现（浏览器预览 / 手机端）就保持空列表 */
+        });
+    };
+    refresh();
+    const off = platform.ai.onChanged(refresh);
+    return () => {
+      alive = false;
+      off();
     };
   }, []);
 
@@ -185,6 +214,26 @@ export function App() {
     (patch: Partial<Settings>) => void useClipStore.getState().updateSettings(patch),
     [],
   );
+
+  // 设置页「AI 模型」区的四个动作：全部走主进程，渲染层只拿掩码（Review Focus 6）。
+  // 失败一律往上抛（由表单显示中文错误），不在这里吞掉。
+  const saveAiProvider = useCallback(async (input: AiProviderInput) => {
+    const next = await getPlatform().ai.saveProvider(input);
+    setAiProviders(next);
+  }, []);
+
+  const removeAiProvider = useCallback(async (id: string) => {
+    const next = await getPlatform().ai.removeProvider(id);
+    setAiProviders(next);
+  }, []);
+
+  const testAiProvider = useCallback(
+    (id: string): Promise<{ ok: boolean; error?: AiError; model?: string }> =>
+      getPlatform().ai.test(id),
+    [],
+  );
+
+  const listAiModels = useCallback((id: string): Promise<string[]> => getPlatform().ai.listModels(id), []);
 
   const glassClass = capabilities.frostedGlass ? 'cc-shell--glass' : 'cc-shell--glass-fallback';
 
@@ -326,6 +375,11 @@ export function App() {
               onOpenDataFolder={openDataFolder}
               onSetAutoStart={setAutoStart}
               onToggleMode={toggleMode}
+              aiProviders={aiProviders}
+              onAiSave={saveAiProvider}
+              onAiRemove={removeAiProvider}
+              onAiTest={testAiProvider}
+              onAiListModels={listAiModels}
             />
           ) : null}
 
