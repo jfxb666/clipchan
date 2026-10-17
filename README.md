@@ -3,12 +3,14 @@
 Windows 剪贴板历史工具。Ctrl+` 唤起面板，选中即粘贴回刚才那个窗口。
 Electron + React + SQLite，界面代码与手机端壳共用一份。
 
-- **免安装版**：`release\Clipchan.exe`（单文件，双击即用，不要求装任何运行时）
-- **安装版**：`release\Clipchan-Setup-0.1.0.exe`
+- **下载**：[Releases · v0.1.0](https://github.com/jfxb666/clipchan/releases/tag/v0.1.0)
+  - 免安装版 `Clipchan.exe`（单文件，双击即用，不要求装任何运行时）
+  - 安装版 `Clipchan-Setup-0.1.0.exe`
+- **源码**：本仓库（私有）。构建产物不进版本库，由 `pnpm build` 生成到 `release\`。
 
 ## 安装与首次运行
 
-1. 双击 `release\Clipchan.exe`（免安装版会先解压到临时目录再启动，首次启动约 3–5 秒）。
+1. 从 Releases 下载并双击 `Clipchan.exe`（免安装版会先解压到临时目录再启动，首次启动约 3–5 秒）。
 2. 托盘出现图标，按 **Ctrl+`** 唤出面板。
 3. 面板出现在**鼠标所在显示器的中间偏上**，宽度 900、高度 620。
 
