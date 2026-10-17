@@ -1,0 +1,150 @@
+/* 剪贴板酱设计令牌 —— 取色自用户提供的应用图标（暖色水彩）。 */
+:root {
+  --cc-bg: #FEFBF4;
+  --cc-surface: #FFFDF8;
+  --cc-surface-2: #F7F1E6;
+  --cc-text: #3C2814;
+  --cc-text-2: #8C6450;
+  --cc-text-3: #B49A85;
+  --cc-primary: #446971;
+  --cc-primary-soft: #E4EEF0;
+  --cc-accent: #81271E;
+  --cc-accent-soft: #F3E0DC;
+  --cc-warm: #C8A078;
+  --cc-pink: #DCB4A0;
+  --cc-border: rgba(60, 40, 20, 0.08);
+  --cc-border-strong: rgba(60, 40, 20, 0.16);
+  --cc-shadow: 0 8px 28px rgba(60, 40, 20, 0.12);
+  --cc-shadow-sm: 0 2px 8px rgba(60, 40, 20, 0.08);
+  --cc-badge-text-bg: #F0E4D2;
+  --cc-badge-link-bg: #DDE9EC;
+  --cc-badge-code-bg: #F0DCD8;
+  --cc-badge-image-bg: #F6E3DA;
+  --cc-badge-path-bg: #EFE6D6;
+  --cc-badge-number-bg: #E9E3D2;
+  --cc-scroll: rgba(60, 40, 20, 0.18);
+  --cc-glass: rgba(255, 253, 248, 0.72);
+  --cc-glass-fallback: rgba(255, 253, 248, 0.88);
+  --cc-radius-card: 16px;
+  --cc-radius-button: 12px;
+  --cc-radius-input: 10px;
+  --cc-font: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --cc-font-mono: "Cascadia Code", Consolas, "Courier New", monospace;
+}
+
+/* 深色：夜晚书房 */
+:root[data-theme="dark"] {
+  --cc-bg: #1E1813;
+  --cc-surface: #2A221B;
+  --cc-surface-2: #352B22;
+  --cc-text: #F5EDE1;
+  --cc-text-2: #C4B2A0;
+  --cc-text-3: #8E7C6B;
+  --cc-primary: #7FA8B0;
+  --cc-primary-soft: #26363A;
+  --cc-accent: #C25A4E;
+  --cc-accent-soft: #3A241F;
+  --cc-warm: #C8A078;
+  --cc-pink: #B98C78;
+  --cc-border: rgba(245, 237, 225, 0.10);
+  --cc-border-strong: rgba(245, 237, 225, 0.20);
+  --cc-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
+  --cc-shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.30);
+  --cc-badge-text-bg: #3B3025;
+  --cc-badge-link-bg: #24363A;
+  --cc-badge-code-bg: #3C2521;
+  --cc-badge-image-bg: #3B2B24;
+  --cc-badge-path-bg: #362E22;
+  --cc-badge-number-bg: #33301F;
+  --cc-scroll: rgba(245, 237, 225, 0.20);
+  --cc-glass: rgba(42, 34, 27, 0.72);
+  --cc-glass-fallback: rgba(42, 34, 27, 0.90);
+}
+
+/* 不依赖系统主题的显式覆盖（设置页选浅色/深色时由 JS 设置 data-theme） */
+@media (prefers-color-scheme: light) {
+  :root[data-theme="auto"] {
+    --cc-bg: #FEFBF4;
+    --cc-surface: #FFFDF8;
+    --cc-surface-2: #F7F1E6;
+    --cc-text: #3C2814;
+    --cc-text-2: #8C6450;
+    --cc-primary: #446971;
+    --cc-accent: #81271E;
+    --cc-border: rgba(60, 40, 20, 0.08);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    --cc-bg: #1E1813;
+    --cc-surface: #2A221B;
+    --cc-surface-2: #352B22;
+    --cc-text: #F5EDE1;
+    --cc-text-2: #C4B2A0;
+    --cc-primary: #7FA8B0;
+    --cc-accent: #C25A4E;
+    --cc-border: rgba(245, 237, 225, 0.10);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--cc-font);
+  background: transparent;
+  color: var(--cc-text);
+  font-size: 14px;
+  overflow: hidden;
+  user-select: none;
+}
+
+.cc-shell {
+  background: var(--cc-bg);
+  color: var(--cc-text);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/*
+ * ★ 为什么两个类现在长得一样：真机六组探针（ACRYLIC / BLURBEHIND × setShape 前/后 ×
+ *   SWP_FRAMECHANGED / RedrawWindow）证明 —— Win10 19045 上系统模糊层**铺满整个 HWND 矩形**，
+ *   Electron 的 setShape(SetWindowRgn) 裁不掉它，圆角外就会露出一圈浅灰白（用户报的
+ *   「四边不光滑、有白色突出」）。所以现在关掉系统模糊，改用「窗口 setShape 真圆角 +
+ *   页面 88% 半透明」：圆角外是真的没有像素，四边干净。
+ *   保留 .cc-shell--glass 这个名字是为了将来系统支持圆角模糊时只改这一个地方。
+ */
+.cc-shell--glass,
+.cc-shell--glass-fallback {
+  background: var(--cc-glass-fallback);
+  box-shadow: inset 0 0 0 1px var(--cc-border), inset 0 0 40px rgba(60, 40, 20, 0.06);
+}
+
+.cc-drag { -webkit-app-region: drag; }
+.cc-no-drag { -webkit-app-region: no-drag; }
+
+.cc-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.cc-scroll::-webkit-scrollbar-track { background: transparent; }
+.cc-scroll::-webkit-scrollbar-thumb {
+  background: var(--cc-scroll);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+@keyframes cc-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.cc-pop { animation: cc-pop 220ms cubic-bezier(0.22, 1.2, 0.36, 1); }
+
+@keyframes cc-fade { from { opacity: 0; } to { opacity: 1; } }
+.cc-fade { animation: cc-fade 160ms ease-out; }

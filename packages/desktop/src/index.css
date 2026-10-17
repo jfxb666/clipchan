@@ -1,0 +1,18 @@
+/* 渲染进程样式入口：先引入设计令牌，再走 Tailwind 三层（spec §6.1）。 */
+@import '../../core/src/theme/tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 窗口本体铺满，滚动交给列表容器（tokens.css 已把 body 设为 overflow: hidden）。 */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}

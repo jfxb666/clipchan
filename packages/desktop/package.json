@@ -1,0 +1,33 @@
+{
+  "name": "@clipchan/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "build": "node ../../scripts/package-win.mjs",
+    "dev": "node ../../scripts/dev.mjs"
+  },
+  "dependencies": {
+    "@clipchan/core": "workspace:*",
+    "better-sqlite3": "^13.0.3",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.29.0",
+    "lucide-react": "^0.562.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^37.6.0",
+    "electron-builder": "^26.15.3",
+    "tailwindcss": "^3.4.19",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "vite": "^6.0.7"
+  }
+}

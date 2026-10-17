@@ -1,0 +1,55 @@
+# electron-builder 配置（spec §10.3）。
+# ★ 两条必填项是本机实测出来的：没有 Python，所以绝不能让 electron-builder 走
+#   @electron/rebuild → node-gyp（否则报 Could not find any Python installation to use）。
+#   better-sqlite3 自带 prebuild（Node-API ABI 稳定），Electron 37 直接可用。
+# ★ extraResources 里的 helper/dist/clipchan-helper.exe 由 scripts/package-win.mjs 保证存在；
+#   助手编译失败时 package-win 会改用一份临时配置（去掉该项）并在运行时如实降级。
+
+appId: com.clipchan.app
+productName: Clipchan
+copyright: Copyright © 2026 Clipchan
+
+npmRebuild: false
+buildDependenciesFromSource: false
+
+# better-sqlite3 的 .node 不能进 asar（否则 dlopen 失败）。
+asarUnpack:
+  - '**/*.node'
+
+files:
+  - 'dist/**/*'
+  - 'dist-electron/**/*'
+  - 'node_modules/**/*'
+  - '!node_modules/electron/**'
+  - '!node_modules/.cache/**'
+  - '!**/*.map'
+  - 'package.json'
+
+directories:
+  output: ../../release
+
+win:
+  target:
+    - portable
+    - nsis
+  # ★ 相对路径是按**配置文件所在目录**（packages/desktop/）解析的，不是仓库根：
+  #   图标与输出目录因此都写成 ../ 形式。第一次打包时写成 build/icon.ico，
+  #   electron-builder 报 file source doesn't exist 并退回默认 Electron 图标。
+  icon: ../../build/icon.ico
+
+portable:
+  artifactName: Clipchan.exe
+
+nsis:
+  artifactName: 'Clipchan-Setup-${version}.exe'
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: 剪贴板酱
+
+extraResources:
+  - from: helper/dist/clipchan-helper.exe
+    to: clipchan-helper.exe
+  - from: ../../build/icon.ico
+    to: build/icon.ico

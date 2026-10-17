@@ -1,0 +1,10 @@
+{
+  "ctrl": true,
+  "alt": false,
+  "shift": false,
+  "win": false,
+  "key": 192,
+  "theme": "dark",
+  "autopaste": false,
+  "label": "Ctrl+`"
+}

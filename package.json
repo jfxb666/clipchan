@@ -1,0 +1,20 @@
+{
+  "name": "clipchan-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/package-win.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build:helper": "node scripts/build-helper.mjs",
+    "smoke:main": "node scripts/smoke-main.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

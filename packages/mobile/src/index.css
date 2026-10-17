@@ -1,0 +1,623 @@
+/**
+ * 手机端最小样式补齐层（**替代 Tailwind**，不是替代 tokens.css）。
+ *
+ * ★ 为什么需要它：@clipchan/core/ui 的组件全部用 Tailwind 工具类名写样式
+ *   （flex / px-snug / text-ink-2 / hover:bg-surface-2 …）。桌面端由 packages/desktop
+ *   的 tailwindcss + postcss 把类名编译成 CSS；手机端 package.json 里没有 tailwindcss，
+ *   按 Task 11 的硬约束「绝不为它新增依赖 / 不装 tailwind」，所以这里手写一份等价规则：
+ *   对 core 界面真正用到的 181 条类名逐条映射。
+ *   值不写死颜色，全部指向 tokens.css 的 --cc-* 变量，因此明暗主题照常跟着 data-theme 走。
+ *
+ * ★ 命名与转义严格照抄 Tailwind：变体类名保留**完整原串**再转义，
+ *   例如 className="hover:bg-surface-2" 的类名就是 `hover:bg-surface-2`，
+ *   选择器是 .hover\\:bg-surface-2:hover —— **不是** .bg-surface-2:hover
+ *   （后者匹配不到任何元素：元素上根本没有 bg-surface-2 这个类）。
+ *   同理 group-hover / focus / focus-within / placeholder / last 各变体。
+ *
+ * ★ 这份文件是「补齐层」，不是新设计：类名与令牌逐条对齐 core/tailwind.config.ts
+ *   （colors / spacing / borderRadius / boxShadow / fontFamily 的映射原样照搬）。
+ *   若将来手机端也能装 tailwindcss，删掉本文件与 main.tsx 里对应 import 即可。
+ */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+.flex {
+  display: flex;
+}
+.hidden {
+  display: none;
+}
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.inline-flex {
+  display: inline-flex;
+}
+.relative {
+  position: relative;
+}
+.absolute {
+  position: absolute;
+}
+.right-0 {
+  right: 0px;
+}
+.top-\[38px\] {
+  top: 38px;
+}
+.z-40 {
+  z-index: 40;
+}
+.bottom-0 {
+  bottom: 0px;
+}
+.left-0 {
+  left: 0px;
+}
+.top-\[2px\] {
+  top: 2px;
+}
+.left-\[18px\] {
+  left: 18px;
+}
+.left-\[2px\] {
+  left: 2px;
+}
+.bottom-comfortable {
+  bottom: 24px;
+}
+.left-1\/2 {
+  left: 50%;
+}
+.z-50 {
+  z-index: 50;
+}
+.flex-1 {
+  flex: 1 1 0%;
+}
+.flex-col {
+  flex-direction: column;
+}
+.shrink-0 {
+  flex-shrink: 0;
+}
+.items-center {
+  align-items: center;
+}
+.gap-tight {
+  gap: 8px;
+}
+.gap-\[4px\] {
+  gap: 4px;
+}
+.items-start {
+  align-items: flex-start;
+}
+.gap-snug {
+  gap: 12px;
+}
+.justify-center {
+  justify-content: center;
+}
+.gap-base {
+  gap: 16px;
+}
+.gap-\[2px\] {
+  gap: 2px;
+}
+.flex-wrap {
+  flex-wrap: wrap;
+}
+.gap-\[3px\] {
+  gap: 3px;
+}
+.gap-\[6px\] {
+  gap: 6px;
+}
+.min-h-0 {
+  min-height: 0px;
+}
+.min-w-0 {
+  min-width: 0px;
+}
+.h-16 {
+  height: 64px;
+}
+.w-16 {
+  width: 64px;
+}
+.h-full {
+  height: 100%;
+}
+.h-\[128px\] {
+  height: 128px;
+}
+.w-\[128px\] {
+  width: 128px;
+}
+.h-24 {
+  height: 96px;
+}
+.w-24 {
+  width: 96px;
+}
+.max-w-\[360px\] {
+  max-width: 360px;
+}
+.h-\[calc\(100\%-38px\)\] {
+  height: calc(100% - 38px);
+}
+.w-\[6px\] {
+  width: 6px;
+}
+.h-\[6px\] {
+  height: 6px;
+}
+.w-full {
+  width: 100%;
+}
+.h-\[14px\] {
+  height: 14px;
+}
+.w-\[14px\] {
+  width: 14px;
+}
+.h-\[34px\] {
+  height: 34px;
+}
+.h-\[20px\] {
+  height: 20px;
+}
+.w-\[36px\] {
+  width: 36px;
+}
+.h-4 {
+  height: 16px;
+}
+.w-4 {
+  width: 16px;
+}
+.w-\[150px\] {
+  width: 150px;
+}
+.w-\[70px\] {
+  width: 70px;
+}
+.w-\[64px\] {
+  width: 64px;
+}
+.h-\[52px\] {
+  height: 52px;
+}
+.w-\[52px\] {
+  width: 52px;
+}
+.h-\[38px\] {
+  height: 38px;
+}
+.h-\[7px\] {
+  height: 7px;
+}
+.w-\[7px\] {
+  width: 7px;
+}
+.max-w-\[420px\] {
+  max-width: 420px;
+}
+.h-\[22px\] {
+  height: 22px;
+}
+.min-w-\[22px\] {
+  min-width: 22px;
+}
+.h-7 {
+  height: 28px;
+}
+.w-7 {
+  width: 28px;
+}
+.overflow-hidden {
+  overflow: hidden;
+}
+.overflow-y-auto {
+  overflow-y: auto;
+}
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.object-cover {
+  object-fit: cover;
+}
+.object-contain {
+  object-fit: contain;
+}
+.pointer-events-auto {
+  pointer-events: auto;
+}
+.pointer-events-none {
+  pointer-events: none;
+}
+.p-snug {
+  padding: 12px;
+}
+.p-\[3px\] {
+  padding: 3px;
+}
+.p-\[2px\] {
+  padding: 2px;
+}
+.p-\[5px\] {
+  padding: 5px;
+}
+.px-base {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+.px-snug {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.px-\[6px\] {
+  padding-left: 6px;
+  padding-right: 6px;
+}
+.px-tight {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.px-comfortable {
+  padding-left: 24px;
+  padding-right: 24px;
+}
+.px-\[4px\] {
+  padding-left: 4px;
+  padding-right: 4px;
+}
+.py-snug {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+.py-\[7px\] {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+.py-\[6px\] {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.py-\[1px\] {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+.py-\[2px\] {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+.py-base {
+  padding-top: 16px;
+  padding-bottom: 16px;
+}
+.py-\[3px\] {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+.pb-base {
+  padding-bottom: 16px;
+}
+.py-\[4px\] {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.py-tight {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+.pt-base {
+  padding-top: 16px;
+}
+.py-\[5px\] {
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+.pt-snug {
+  padding-top: 12px;
+}
+.pt-tight {
+  padding-top: 8px;
+}
+.mx-base {
+  margin-left: 16px;
+  margin-right: 16px;
+}
+.mb-snug {
+  margin-bottom: 12px;
+}
+.mt-\[2px\] {
+  margin-top: 2px;
+}
+.mt-tight {
+  margin-top: 8px;
+}
+.cursor-default {
+  cursor: default;
+}
+.cursor-col-resize {
+  cursor: col-resize;
+}
+.cursor-row-resize {
+  cursor: row-resize;
+}
+.cursor-nwse-resize {
+  cursor: nwse-resize;
+}
+.outline-none {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+.cursor-not-allowed {
+  cursor: not-allowed;
+}
+.rounded-card {
+  border-radius: var(--cc-radius-card);
+}
+.rounded-button {
+  border-radius: var(--cc-radius-button);
+}
+.rounded-full {
+  border-radius: 9999px;
+}
+.rounded-input {
+  border-radius: var(--cc-radius-input);
+}
+.rounded-\[9px\] {
+  border-radius: 9px;
+}
+.rounded-\[6px\] {
+  border-radius: 6px;
+}
+.border {
+  border-width: 1px;
+  border-style: solid;
+}
+.border-t {
+  border-top-width: 1px;
+  border-top-style: solid;
+}
+.border-b {
+  border-bottom-width: 1px;
+  border-bottom-style: solid;
+}
+.border-r {
+  border-right-width: 1px;
+  border-right-style: solid;
+}
+.border-line {
+  border-color: var(--cc-border);
+}
+.border-\[var\(--cc-primary\)\] {
+  border-color: var(--cc-primary);
+}
+.border-\[var\(--cc-accent\)\] {
+  border-color: var(--cc-accent);
+}
+.border-\[var\(--cc-accent-soft\)\] {
+  border-color: var(--cc-accent-soft);
+}
+.border-transparent {
+  border-color: transparent;
+}
+.bg-surface-2 {
+  background-color: var(--cc-surface-2);
+}
+.bg-\[var\(--cc-badge-text-bg\)\] {
+  background-color: var(--cc-badge-text-bg);
+}
+.bg-\[var\(--cc-badge-link-bg\)\] {
+  background-color: var(--cc-badge-link-bg);
+}
+.bg-\[var\(--cc-badge-code-bg\)\] {
+  background-color: var(--cc-badge-code-bg);
+}
+.bg-\[var\(--cc-badge-path-bg\)\] {
+  background-color: var(--cc-badge-path-bg);
+}
+.bg-\[var\(--cc-badge-number-bg\)\] {
+  background-color: var(--cc-badge-number-bg);
+}
+.bg-\[var\(--cc-badge-image-bg\)\] {
+  background-color: var(--cc-badge-image-bg);
+}
+.bg-surface {
+  background-color: var(--cc-surface);
+}
+.bg-transparent {
+  background-color: transparent;
+}
+.bg-\[var\(--cc-primary\)\] {
+  background-color: var(--cc-primary);
+}
+.bg-\[var\(--cc-border-strong\)\] {
+  background-color: var(--cc-border-strong);
+}
+.bg-white {
+  background-color: #fff;
+}
+.bg-\[var\(--cc-accent\)\] {
+  background-color: var(--cc-accent);
+}
+.bg-primary-soft {
+  background-color: var(--cc-primary-soft);
+}
+.bg-\[var\(--cc-accent-soft\)\] {
+  background-color: var(--cc-accent-soft);
+}
+.bg-\[var\(--cc-primary-soft\)\] {
+  background-color: var(--cc-primary-soft);
+}
+.text-\[11px\] {
+  font-size: 11px;
+}
+.text-ink-2 {
+  color: var(--cc-text-2);
+}
+.text-ink-3 {
+  color: var(--cc-text-3);
+}
+.text-\[var\(--cc-warm\)\] {
+  color: var(--cc-warm);
+}
+.text-\[var\(--cc-primary\)\] {
+  color: var(--cc-primary);
+}
+.text-\[var\(--cc-accent\)\] {
+  color: var(--cc-accent);
+}
+.font-mono {
+  font-family: var(--cc-font-mono);
+}
+.text-\[var\(--cc-pink\)\] {
+  color: var(--cc-pink);
+}
+.text-\[13px\] {
+  font-size: 13px;
+}
+.text-ink {
+  color: var(--cc-text);
+}
+.text-\[12px\] {
+  font-size: 12px;
+}
+.text-center {
+  text-align: center;
+}
+.font-semibold {
+  font-weight: 600;
+}
+.text-right {
+  text-align: right;
+}
+.text-white {
+  color: #fff;
+}
+.text-\[10px\] {
+  font-size: 10px;
+}
+.leading-none {
+  line-height: 1;
+}
+.text-left {
+  text-align: left;
+}
+.whitespace-nowrap {
+  white-space: nowrap;
+}
+.shadow-card {
+  box-shadow: var(--cc-shadow-sm);
+}
+.ring-1 {
+  box-shadow: 0 0 0 1px var(--tw-ring-color, currentColor);
+}
+.ring-\[var\(--cc-primary\)\] {
+  --tw-ring-color: var(--cc-primary);
+  box-shadow: 0 0 0 1px var(--tw-ring-color);
+}
+.opacity-0 {
+  opacity: 0;
+}
+.opacity-50 {
+  opacity: 0.5;
+}
+.opacity-60 {
+  opacity: 0.6;
+}
+.shadow-panel {
+  box-shadow: var(--cc-shadow);
+}
+.-translate-x-1\/2 {
+  transform: translateX(-50%);
+}
+.scale-90 {
+  transform: scale(0.9);
+}
+.transition-colors {
+  transition-property: color, background-color, border-color, text-decoration-color, fill, stroke;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+.transition-all {
+  transition-property: all;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+.accent-\[var\(--cc-primary\)\] {
+  accent-color: var(--cc-primary);
+}
+.hover\:border-\[var\(--cc-border-strong\)\]:hover {
+  border-color: var(--cc-border-strong);
+}
+.focus-within\:border-\[var\(--cc-border-strong\)\]:focus-within {
+  border-color: var(--cc-border-strong);
+}
+.focus\:border-\[var\(--cc-border-strong\)\]:focus {
+  border-color: var(--cc-border-strong);
+}
+.hover\:border-line:hover {
+  border-color: var(--cc-border);
+}
+.hover\:bg-surface-2:hover {
+  background-color: var(--cc-surface-2);
+}
+.hover\:bg-surface:hover {
+  background-color: var(--cc-surface);
+}
+.hover\:bg-\[var\(--cc-accent-soft\)\]:hover {
+  background-color: var(--cc-accent-soft);
+}
+.hover\:text-ink:hover {
+  color: var(--cc-text);
+}
+.hover\:text-ink-2:hover {
+  color: var(--cc-text-2);
+}
+.hover\:text-\[var\(--cc-warm\)\]:hover {
+  color: var(--cc-warm);
+}
+.placeholder\:text-ink-3::placeholder {
+  color: var(--cc-text-3);
+}
+.hover\:text-\[var\(--cc-accent\)\]:hover {
+  color: var(--cc-accent);
+}
+.group:hover .group-hover\:opacity-100 {
+  opacity: 1;
+}
+
+/* ── 任意值 / 边界变体的补漏（自动提取器覆盖不到的四条，手工对齐 Tailwind 语义）── */
+.leading-\[\1\.6\] {
+  line-height: 1.6;
+}
+
+.leading-\[\1\.7\] {
+  line-height: 1.7;
+}
+
+.leading-\[\1\.5\] {
+  line-height: 1.5;
+}
+
+.last\:border-b-0:last-child {
+  border-bottom-width: 0px;
+}

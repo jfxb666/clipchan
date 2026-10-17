@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "text": "第一行\n第二行\t第三行",
+      "at": "2026-10-14T01:02:03.0000000Z",
+      "seq": 7,
+      "pin": true,
+      "trunc": false
+    },
+    {
+      "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "text": "带\"引号\"与反斜杠 C:\\temp\\a.txt 还有 \\\\server\\share",
+      "at": "2026-10-14T02:03:04.500Z",
+      "seq": 8,
+      "pin": false,
+      "trunc": true
+    },
+    {
+      "id": "cccccccccccccccccccccccccccccccc",
+      "text": "普通文本",
+      "at": "2026-10-14T03:04:05.0000000+08:00",
+      "seq": 9,
+      "pin": false,
+      "trunc": false
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+# 依赖与构建产物
+node_modules/
+dist/
+dist-electron/
+release/
+helper/dist/
+*.tsbuildinfo
+
+# 工具与本地状态
+.codeartsdoer/
+.merkle-snapshot.json
+*.local
+*.log
+.DS_Store
+
+# 证据临时目录
+docs/superpowers/evidence/tmp/
