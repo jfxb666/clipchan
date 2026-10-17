@@ -108,6 +108,15 @@ export function toAiError(e: unknown, ctx: { timeoutMs: number }): AiError {
     return { kind: 'timeout', message: `${KIND_MESSAGE.timeout}（${Math.round(ctx.timeoutMs / 1000)} 秒）` };
   }
 
+  // fetch 在 DNS 解析失败 / 连接被拒时统一抛 TypeError("fetch failed")（undici 包装），
+  // 归为 network 而不是 unknown，UI 才能显示中文提示（Task 8 GUI 验收踩到）。
+  if (typeof e === 'object' && e !== null && (e as { name?: unknown }).name === 'TypeError') {
+    const msg = (e as { message?: unknown }).message;
+    if (typeof msg === 'string' && /fetch failed|failed to fetch/i.test(msg)) {
+      return { kind: 'network', message: KIND_MESSAGE.network };
+    }
+  }
+
   const message = e instanceof Error ? e.message : String(e);
   return { kind: 'unknown', message: message || KIND_MESSAGE.unknown };
 }

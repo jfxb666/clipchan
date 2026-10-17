@@ -42,6 +42,12 @@ describe('toAiError', () => {
     expect(toAiError(new DOMException('aborted', 'TimeoutError'), CTX).kind).toBe('timeout');
   });
 
+  it('fetch 网络失败翻译成 network（DNS 不通等，Task 8 GUI 验收踩到）', () => {
+    const err = toAiError(new TypeError('fetch failed'), CTX);
+    expect(err.kind).toBe('network');
+    expect(err.message).toContain('网络');
+  });
+
   it('未知异常不裸抛', () => {
     const err = toAiError(new Error('boom'), CTX);
     expect(err.kind).toBe('unknown');
