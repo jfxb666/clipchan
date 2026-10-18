@@ -1,12 +1,13 @@
 import {
   type ChatMessage,
   type ChatOptions,
+  type ChatStreamOptions,
   type ProviderAdapter,
   type ProviderConfig,
   normalizeBaseUrl,
   toAiError,
 } from '../types';
-import { DEFAULT_TIMEOUT_MS, pickString, requestJson, structured } from './request';
+import { DEFAULT_TIMEOUT_MS, pickString, requestJson, requestStream, structured } from './request';
 
 function base(cfg: ProviderConfig): string {
   return normalizeBaseUrl(cfg.protocol, cfg.baseUrl);
@@ -63,9 +64,37 @@ function chat(cfg: ProviderConfig, key: string, messages: ChatMessage[], opts?: 
   });
 }
 
+/** Gemini 原生协议流式：SSE 的 candidates[0].content.parts[].text 逐段累加。 */
+function chatStream(
+  cfg: ProviderConfig,
+  key: string,
+  messages: ChatMessage[],
+  opts?: ChatStreamOptions,
+): Promise<string> {
+  const systemInstruction = toSystemInstruction(messages);
+  return requestStream(
+    withKey(`${base(cfg)}/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse`, key),
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: {
+        contents: toContents(messages),
+        ...(systemInstruction ? { systemInstruction } : {}),
+      },
+      signal: opts?.signal,
+      firstChunkTimeoutMs: opts?.firstChunkTimeoutMs,
+      idleTimeoutMs: opts?.idleTimeoutMs,
+      onDelta: opts?.onDelta,
+      extract: (payload) => pickString(payload, ['candidates', 0, 'content', 'parts', 0, 'text']),
+      extractWhole: (payload) => pickString(payload, ['candidates', 0, 'content', 'parts', 0, 'text']),
+    },
+  );
+}
+
 /** Gemini 原生协议：key 走查询参数，模型名跟在路径里。 */
 export const geminiAdapter: ProviderAdapter = {
   chat,
+  chatStream,
 
   async listModels(cfg: ProviderConfig, key: string): Promise<string[]> {
     const json = await requestJson(withKey(`${base(cfg)}/models`, key), {

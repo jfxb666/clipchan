@@ -1,12 +1,13 @@
 import {
   type ChatMessage,
   type ChatOptions,
+  type ChatStreamOptions,
   type ProviderAdapter,
   type ProviderConfig,
   normalizeBaseUrl,
   toAiError,
 } from '../types';
-import { DEFAULT_TIMEOUT_MS, pickIdList, pickString, requestJson, structured } from './request';
+import { DEFAULT_TIMEOUT_MS, pickIdList, pickString, requestJson, requestStream, structured } from './request';
 
 function base(cfg: ProviderConfig): string {
   return normalizeBaseUrl(cfg.protocol, cfg.baseUrl);
@@ -32,9 +33,30 @@ function chat(cfg: ProviderConfig, key: string, messages: ChatMessage[], opts?: 
   });
 }
 
+/** OpenAI 兼容协议流式：SSE 的 choices[0].delta.content 逐段累加。 */
+function chatStream(
+  cfg: ProviderConfig,
+  key: string,
+  messages: ChatMessage[],
+  opts?: ChatStreamOptions,
+): Promise<string> {
+  return requestStream(`${base(cfg)}/chat/completions`, {
+    method: 'POST',
+    headers: authHeaders(key),
+    body: { model: cfg.model, messages, stream: true },
+    signal: opts?.signal,
+    firstChunkTimeoutMs: opts?.firstChunkTimeoutMs,
+    idleTimeoutMs: opts?.idleTimeoutMs,
+    onDelta: opts?.onDelta,
+    extract: (payload) => pickString(payload, ['choices', 0, 'delta', 'content']),
+    extractWhole: (payload) => pickString(payload, ['choices', 0, 'message', 'content']),
+  });
+}
+
 /** OpenAI 兼容协议（官方 / 各类中转站）。 */
 export const openaiCompatAdapter: ProviderAdapter = {
   chat,
+  chatStream,
 
   async listModels(cfg: ProviderConfig, key: string): Promise<string[]> {
     const json = await requestJson(`${base(cfg)}/models`, {

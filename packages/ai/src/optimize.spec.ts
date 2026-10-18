@@ -37,6 +37,12 @@ function stubAdapter(reply: string) {
       calls.push({ cfg, key, messages, opts });
       return reply;
     },
+    // 也记录入参并返回同一份 reply：optimize 现在优先走流式，两条路径的断言都要能成立。
+    chatStream: async (cfg, key, messages, opts) => {
+      calls.push({ cfg, key, messages, opts });
+      if (opts?.onDelta) opts.onDelta(reply);
+      return reply;
+    },
     listModels: async () => {
       throw new Error('stub 不支持 listModels');
     },

@@ -17,6 +17,8 @@ export interface OptimizeInput {
   signal?: AbortSignal;
   /** 覆盖默认超时（测试用）。 */
   timeoutMs?: number;
+  /** 流式预览：每收到一段增量就把「已可展示的成品」回调一次。 */
+  onPreview?: (preview: string) => void;
 }
 
 export interface OptimizeResult {
@@ -30,6 +32,22 @@ function stripFence(raw: string): string {
   const trimmed = raw.trim();
   const fenced = /^\`\`\`[^\n]*\n([\s\S]*?)\n?\`\`\`$/.exec(trimmed);
   return fenced?.[1] !== undefined ? fenced[1].trim() : trimmed;
+}
+
+/**
+ * 从流式累积的原文里提取「当前可展示的成品」，供面板边下边显示。
+ * 1. 已有 <optimized> 开标签：取其后内容（闭标签未到就取到末尾）。
+ * 2. 否则若被代码块围栏包住：剥壳。
+ * 3. 否则原样（未 trim 掉内部换行）。
+ */
+export function previewOf(accumulated: string): string {
+  const open = accumulated.indexOf('<optimized>');
+  if (open !== -1) {
+    const body = accumulated.slice(open + '<optimized>'.length);
+    const close = body.indexOf('</optimized>');
+    return (close === -1 ? body : body.slice(0, close)).trim();
+  }
+  return stripFence(accumulated);
 }
 
 /**
@@ -75,10 +93,28 @@ export async function optimize(
     ...(input.extra === undefined ? {} : { extra: input.extra }),
   });
 
-  const raw = await adapter.chat(cfg, key, messages, {
+  const opts = {
     signal: input.signal,
     timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-  });
+  };
+
+  // 流式优先：慢模型（实测 23–60s+）靠增量把「首字节」提前，整段超时不再是瓶颈。
+  const raw = adapter.chatStream
+    ? await adapter.chatStream(cfg, key, messages, {
+        ...opts,
+        ...(input.onPreview === undefined
+          ? {}
+          : {
+              onDelta: (() => {
+                let acc = '';
+                return (delta: string): void => {
+                  acc += delta;
+                  input.onPreview?.(previewOf(acc));
+                };
+              })(),
+            }),
+      })
+    : await adapter.chat(cfg, key, messages, opts);
 
   return parseOptimized(raw);
 }

@@ -25,9 +25,20 @@ export type ChatOptions = { signal?: AbortSignal; timeoutMs?: number };
 
 export interface ProviderAdapter {
   chat(cfg: ProviderConfig, key: string, messages: ChatMessage[], opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<string>;
+  chatStream(cfg: ProviderConfig, key: string, messages: ChatMessage[], opts?: ChatStreamOptions): Promise<string>;
   listModels(cfg: ProviderConfig, key: string): Promise<string[]>;
   test(cfg: ProviderConfig, key: string): Promise<{ ok: true; model: string } | { ok: false; error: AiError }>;
 }
+
+export interface ChatStreamOptions {
+  signal?: AbortSignal;
+  firstChunkTimeoutMs?: number;
+  idleTimeoutMs?: number;
+  onDelta?: (delta: string) => void;
+}
+
+export const FIRST_CHUNK_TIMEOUT_MS = 30000;
+export const IDLE_TIMEOUT_MS = 60000;
 
 /** 各协议缺省版本段。 */
 const DEFAULT_VERSION_PATH: Record<AiProtocol, string> = {

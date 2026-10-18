@@ -1,12 +1,13 @@
 import {
   type ChatMessage,
   type ChatOptions,
+  type ChatStreamOptions,
   type ProviderAdapter,
   type ProviderConfig,
   normalizeBaseUrl,
   toAiError,
 } from '../types';
-import { DEFAULT_TIMEOUT_MS, pickIdList, pickString, requestJson, structured } from './request';
+import { DEFAULT_TIMEOUT_MS, pickIdList, pickString, requestJson, requestStream, structured } from './request';
 
 const ANTHROPIC_VERSION = '2023-06-01';
 
@@ -50,9 +51,42 @@ function chat(cfg: ProviderConfig, key: string, messages: ChatMessage[], opts?: 
   });
 }
 
+/** Anthropic 原生协议流式：SSE 的 content_block_delta.delta.text 逐段累加。 */
+function chatStream(
+  cfg: ProviderConfig,
+  key: string,
+  messages: ChatMessage[],
+  opts?: ChatStreamOptions,
+): Promise<string> {
+  const system = messages
+    .filter((m) => m.role === 'system')
+    .map((m) => m.content)
+    .join('\n\n');
+  const rest = messages.filter((m) => m.role !== 'system');
+
+  return requestStream(`${base(cfg)}/messages`, {
+    method: 'POST',
+    headers: headers(key),
+    body: {
+      model: cfg.model,
+      max_tokens: 2048,
+      ...(system.length > 0 ? { system } : {}),
+      messages: rest,
+      stream: true,
+    },
+    signal: opts?.signal,
+    firstChunkTimeoutMs: opts?.firstChunkTimeoutMs,
+    idleTimeoutMs: opts?.idleTimeoutMs,
+    onDelta: opts?.onDelta,
+    extract: (payload) => pickString(payload, ['delta', 'text']),
+    extractWhole: (payload) => pickString(payload, ['content', 0, 'text']),
+  });
+}
+
 /** Anthropic 原生协议。 */
 export const anthropicAdapter: ProviderAdapter = {
   chat,
+  chatStream,
 
   async listModels(cfg: ProviderConfig, key: string): Promise<string[]> {
     const json = await requestJson(`${base(cfg)}/models`, {
