@@ -101,6 +101,8 @@ export interface Broadcaster {
   burstHint(hint: { ids: string[]; count: number }): void;
   /** provider 列表变了（只发信号，不带数据）。 */
   aiChanged(): void;
+  /** 流式增量：text 是"本次新增的尾巴"，渲染层按 requestId 配对后追加。 */
+  aiOptimizeDelta(requestId: string, text: string): void;
 }
 
 export function makeBroadcaster(getWindow: () => Electron.BrowserWindow | null): Broadcaster {
@@ -117,5 +119,7 @@ export function makeBroadcaster(getWindow: () => Electron.BrowserWindow | null):
     toast: (message, kind = 'info') => send(EV.toast, { message, kind }),
     burstHint: (hint) => send(EV.burstHint, hint),
     aiChanged: () => send(EV.aiChanged),
+    // ★ 事件载荷与 core 的 OptimizeDelta 逐字同形：渲染层拿到就能直接 mergeDelta。
+    aiOptimizeDelta: (requestId, text) => send(EV.aiOptimizeDelta, { requestId, text }),
   };
 }

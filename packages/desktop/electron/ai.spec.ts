@@ -36,6 +36,18 @@ function fakeAdapter(): ProviderAdapter & { chatCalls: number } {
       adapter.chatCalls += 1;
       return '<optimized>你是资深编辑，请把这段改清楚。</optimized>\n<notes>- 补了角色</notes>';
     },
+    // 流式替身：整段一次性回，把 reply 当唯一一块增量交出去（真实适配器是逐块）。
+    async chatStream(
+      _cfg: ProviderConfig,
+      _key: string,
+      _messages: unknown,
+      opts?: { onDelta?: (delta: string) => void },
+    ): Promise<string> {
+      adapter.chatCalls += 1;
+      const reply = '<optimized>你是资深编辑，请把这段改清楚。</optimized>\n<notes>- 补了角色</notes>';
+      if (opts?.onDelta) opts.onDelta(reply);
+      return reply;
+    },
     async listModels(): Promise<string[]> {
       return ['fake-model'];
     },
@@ -50,14 +62,16 @@ function makeAi(seed: Record<string, unknown> = {}) {
   const kv = fakeKv(seed);
   const adapter = fakeAdapter();
   const onChanged = vi.fn();
+  const onDelta = vi.fn();
   const api = createAi({
     kv,
     adapterFor: () => adapter,
     // ★ 用真的 optimize（含 buildMetaPrompt + parseOptimized），只把网络那层换掉。
     optimize: runOptimize,
     onChanged,
+    onDelta,
   });
-  return { api, kv, adapter, onChanged };
+  return { api, kv, adapter, onChanged, onDelta };
 }
 
 const row = (over: Partial<AiProviderInput> = {}): AiProviderInput => ({
@@ -106,10 +120,51 @@ describe('ai IPC 主进程桥', () => {
   it('optimize 在没有 provider 时抛中文错误，不返回 undefined', async () => {
     const { api, onChanged } = makeAi();
     await expect(
-      api.optimize({ providerId: 'missing', text: '帮我写个周报', sceneId: 'general', mode: 'user' }),
+      api.optimize({
+        providerId: 'missing',
+        text: '帮我写个周报',
+        sceneId: 'general',
+        mode: 'user',
+        requestId: 'req-1',
+      }),
     ).rejects.toThrow('请先在设置里添加 AI 模型');
     // 没配 provider 时不该广播，也不该假装成功。
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('optimize 把 requestId 与「已可展示」的文本交给 onDelta（spy 适配器，不联网）', async () => {
+    const { api, onDelta } = makeAi();
+    await api.saveProvider(row({ apiKey: FULL_KEY }));
+    const res = await api.optimize({
+      providerId: 'p1',
+      text: '帮我写个周报',
+      sceneId: 'general',
+      mode: 'user',
+      requestId: 'req-42',
+    });
+    // 整段结果照旧从 invoke 带回（增量只是"边下边看"，不替代返回值）。
+    expect(res.optimized).toBe('你是资深编辑，请把这段改清楚。');
+    expect(onDelta).toHaveBeenCalled();
+    // 每一段增量都带同一个 requestId：渲染层靠它配对，错一个字符整段就被当过期丢弃。
+    for (const call of onDelta.mock.calls) expect(call[0]).toBe('req-42');
+    // onPreview 给的是成品文本，不是原始流：没有 <optimized> 标签、没有 notes。
+    const last = onDelta.mock.calls.at(-1) as [string, string];
+    expect(last[1]).toBe('你是资深编辑，请把这段改清楚。');
+    expect(last[1]).not.toContain('<optimized>');
+    expect(last[1]).not.toContain('<notes>');
+  });
+
+  it('requestId 为空时不接 onPreview：不发没有配对键的增量', async () => {
+    const { api, onDelta } = makeAi();
+    await api.saveProvider(row({ apiKey: FULL_KEY }));
+    await api.optimize({
+      providerId: 'p1',
+      text: '帮我写个周报',
+      sceneId: 'general',
+      mode: 'user',
+      requestId: '',
+    });
+    expect(onDelta).not.toHaveBeenCalled();
   });
 
   it('镜像类型不漂移：ai 包 ProviderConfig 的五个字段都在 core 的 AiProvider 上', async () => {

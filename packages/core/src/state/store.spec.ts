@@ -131,6 +131,9 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       today: async () => ({ words: [], totalItems: 0 }),
       exportPng: async () => ({ ok: true }),
     },
+    clipboard: {
+      writeText: async () => {},
+    },
     ai: {
       listProviders: async () => [],
       saveProvider: async () => [],
@@ -141,6 +144,7 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       scenes: async () => [],
       copyAndPaste: async () => ({ ok: false, reason: 'send-failed' }),
       onChanged: () => () => {},
+      onOptimizeDelta: () => () => {},
     },
     capabilities: {
       autoPaste: true,

@@ -418,6 +418,15 @@ export function createMobileAdapter(): PlatformAdapter {
       },
     },
 
+    clipboard: {
+      // WebView 里 navigator.clipboard 可用；不可用时明确报错，不静默吞。
+      async writeText(text: string): Promise<void> {
+        const nav = globalThis.navigator as Navigator | undefined;
+        if (!nav?.clipboard?.writeText) throw new Error('当前环境不支持写剪贴板');
+        await nav.clipboard.writeText(text);
+      },
+    },
+
     ai: {
       // 手机端不接 AI：七个方法全部如实报不可用，不返回空数组假装成功。
       async listProviders(): Promise<never> {
@@ -445,6 +454,7 @@ export function createMobileAdapter(): PlatformAdapter {
         throw new Error('手机端暂不支持 AI 提示词优化');
       },
       onChanged: (): Unsub => () => {},
+      onOptimizeDelta: (): Unsub => () => {},
     },
 
     capabilities: { ...CAPABILITIES },

@@ -7,6 +7,9 @@
  */
 
 export const CH = {
+  clipboard: {
+    writeText: 'clipboard:writeText',
+  },
   items: {
     list: 'items:list',
     paste: 'items:paste',
@@ -47,6 +50,7 @@ export const CH = {
 
 /** 主进程 -> 渲染进程的单向事件。 */
 export const EV = {
+  aiOptimizeDelta: 'ai:optimize:delta',
   itemsChanged: 'items:changed',
   settingsChanged: 'settings:changed',
   ghostChanged: 'ghost:changed',
@@ -66,5 +70,6 @@ export const ALL_INVOKE_CHANNELS: string[] = [
   ...Object.values(CH.ghost),
   ...Object.values(CH.app),
   ...Object.values(CH.wordcloud),
+  ...Object.values(CH.clipboard),
   ...Object.values(CH.ai),
 ];

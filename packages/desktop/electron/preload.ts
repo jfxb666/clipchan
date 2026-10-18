@@ -18,6 +18,7 @@ import type {
   HotkeyStatus,
   ListQuery,
   NavigateTarget,
+  OptimizeDelta,
   OptimizeRequest,
   OptimizeResult,
   PasteResult,
@@ -73,6 +74,9 @@ const api = {
     onMode: (cb: (mode: 'main' | 'widget') => void): (() => void) => on(EV.modeChanged, cb),
     onNavigate: (cb: (target: NavigateTarget) => void): (() => void) => on(EV.navigate, cb),
   },
+  clipboard: {
+    writeText: (text: string): Promise<void> => ipcRenderer.invoke(CH.clipboard.writeText, text),
+  },
   wordcloud: {
     today: (): Promise<WordCloudData> => ipcRenderer.invoke(CH.wordcloud.today),
     exportPng: (): Promise<{ ok: boolean; path?: string }> => ipcRenderer.invoke(CH.wordcloud.exportPng),
@@ -89,6 +93,7 @@ const api = {
     scenes: (): Promise<{ id: string; name: string; description: string }[]> => ipcRenderer.invoke(CH.ai.scenes),
     copyAndPaste: (text: string): Promise<PasteResult> => ipcRenderer.invoke(CH.ai.copyAndPaste, text),
     onChanged: (cb: () => void): (() => void) => on(EV.aiChanged, cb),
+    onOptimizeDelta: (cb: (delta: OptimizeDelta) => void): (() => void) => on(EV.aiOptimizeDelta, cb),
   },
   capabilities,
 };

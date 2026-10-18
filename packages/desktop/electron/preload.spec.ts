@@ -25,6 +25,7 @@ const EXPECTED = {
     'openDataFolder',
     'capabilities',
   ],
+  clipboard: ['writeText'],
   wordcloud: ['today', 'exportPng'],
   ai: ['listProviders', 'saveProvider', 'removeProvider', 'listModels', 'test', 'optimize', 'scenes', 'copyAndPaste'],
 } as const;
@@ -52,6 +53,16 @@ describe('channels 契约', () => {
     for (const ev of Object.values(EV)) {
       expect(invokes.has(ev), ev + ' 同时是 invoke 通道与事件名').toBe(false);
     }
+  });
+
+  it('流式增量走事件、只写剪贴板走 invoke：两条新契约各有独立通道', () => {
+    // 增量是主进程主动推的，必须是事件名而不是 invoke 通道（invoke 只能渲染层发起）。
+    expect(EV.aiOptimizeDelta).toBe('ai:optimize:delta');
+    expect(ALL_INVOKE_CHANNELS).not.toContain(EV.aiOptimizeDelta);
+    // 「只写剪贴板」与「复制并粘贴」是两个通道：前者不 touch、不模拟粘贴。
+    expect(CH.clipboard.writeText).toBe('clipboard:writeText');
+    expect(CH.clipboard.writeText).not.toBe(CH.ai.copyAndPaste);
+    expect(ALL_INVOKE_CHANNELS).toContain(CH.clipboard.writeText);
   });
 
   it('capabilities 走同步通道（types.ts 里它是普通对象，不是 Promise）', () => {

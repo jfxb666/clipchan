@@ -17,6 +17,7 @@ import { adapterFor } from '@clipchan/ai';
 import { optimize as runOptimize } from '@clipchan/ai';
 import { CH, EV } from './channels';
 import { createAi } from './ai';
+import { createDeltaThrottle } from './deltaThrottle';
 import type { AiApi } from './ai';
 import { openDb } from './db';
 import type { Db, InsertResult } from './db';
@@ -105,7 +106,15 @@ let burstDetector: BurstDetector | null = null;
 let pendingBurstIds: string[] = [];
 
 /** 广播器在 buildHandlers() 里才创建；AI 桥用它的 aiChanged 通道。 */
-let aiBroadcast: { aiChanged(): void } = { aiChanged: () => {} };
+let aiBroadcast: {
+  aiChanged(): void;
+  aiOptimizeDelta(requestId: string, text: string): void;
+} = { aiChanged: () => {}, aiOptimizeDelta: () => {} };
+
+/** 流式增量节流器（节流 + 尾巴投影的规则全在 deltaThrottle.ts，那里可测）。 */
+const deltaThrottle = createDeltaThrottle({
+  send: (requestId, tail) => aiBroadcast.aiOptimizeDelta(requestId, tail),
+});
 
 /**
  * AI 桥（Task 5 Step 4）。
@@ -113,7 +122,7 @@ let aiBroadcast: { aiChanged(): void } = { aiChanged: () => {} };
  *   业务逻辑全在 ai.ts 里（那才测得了）。
  */
 let aiApi: AiApi | null = null;
-function buildAiApi(getBroadcast: () => { aiChanged(): void }): AiApi {
+function buildAiApi(getBroadcast: () => { aiChanged(): void; aiOptimizeDelta(requestId: string, text: string): void }): AiApi {
   return createAi({
     kv: {
       getSettingValue: <T,>(key: string): T | undefined => {
@@ -129,6 +138,9 @@ function buildAiApi(getBroadcast: () => { aiChanged(): void }): AiApi {
     optimize: runOptimize,
     // ★ Key 变了只发"变了"这一件事，数据让界面自己重取（事件里不带任何 provider 字段）。
     onChanged: () => getBroadcast().aiChanged(),
+    // ★ 流式增量：走节流器，过期 requestId 由渲染层自己按 id 丢弃。
+    onDelta: (requestId: string, text: string) => deltaThrottle.push(requestId, text),
+    onDeltaEnd: (requestId: string) => deltaThrottle.end(requestId),
   });
 }
 
@@ -437,6 +449,14 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       const svc = pasteSvc;
       if (!svc) return { ok: false, reason: 'send-failed' };
       return Promise.resolve(svc.pasteText(typeof text === 'string' ? text : ''));
+    },
+    // ★ 只写剪贴板：不查库、不 touch、不模拟粘贴（优化面板「复制」用；与 copyAndPaste 区分）。
+    [CH.clipboard.writeText]: (_e, text: string) => {
+      const s = typeof text === 'string' ? text : '';
+      if (s === '') return;
+      // 自我抑制：程序自己写的不该被自己的 watcher 当成新复制入库。
+      watcher?.suppressNext();
+      clipboard.writeText(s);
     },
     [CH.ghost.get]: () => ghostSvc?.get() ?? rt.ghost,
     [CH.ghost.set]: (_e, minutes: number | null) => {

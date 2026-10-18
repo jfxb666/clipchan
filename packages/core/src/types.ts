@@ -139,6 +139,14 @@ export interface OptimizeRequest {
   sceneId: string;
   mode: 'user' | 'system';
   extra?: string;
+  /** 渲染层生成的请求标识：流式增量按它配对，过期请求的增量直接丢弃。 */
+  requestId: string;
+}
+
+/** 流式增量：同一次优化请求的中间结果（只含已可展示的成品文本）。 */
+export interface OptimizeDelta {
+  requestId: string;
+  text: string;
 }
 
 export interface OptimizeResult {
@@ -198,6 +206,10 @@ export interface ClipchanApi {
     today(): Promise<WordCloudData>;
     exportPng(): Promise<{ ok: boolean; path?: string }>;
   };
+  clipboard: {
+    /** 只写系统剪贴板：不查库、不 touch、不模拟粘贴（优化面板「复制」用）。 */
+    writeText(text: string): Promise<void>;
+  };
   ai: {
     /** Key 已掩码：只回 keyMask 与 hasKey。 */
     listProviders(): Promise<AiProvider[]>;
@@ -212,6 +224,8 @@ export interface ClipchanApi {
     /** 把优化结果写进剪贴板并贴回目标窗口（不进历史、不刷新排序）。 */
     copyAndPaste(text: string): Promise<PasteResult>;
     onChanged(cb: () => void): () => void;
+    /** 流式增量：requestId 与发起时一致才采用。 */
+    onOptimizeDelta(cb: (delta: OptimizeDelta) => void): () => void;
   };
   capabilities: Capabilities;
 }

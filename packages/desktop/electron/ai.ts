@@ -25,6 +25,10 @@ export interface AiDeps {
   optimize: (adapter: ProviderAdapter, cfg: ProviderConfig, key: string, input: OptimizeInput) => Promise<OptimizeResult>;
   /** provider 增删改后通知界面重取列表（默认不广播，测试里可注入 spy）。 */
   onChanged?: () => void;
+  /** 流式增量：把 (requestId, 已可展示文本) 交给 main.ts 广播；不注入则退回整段返回。 */
+  onDelta?: (requestId: string, text: string) => void;
+  /** 请求收尾（成功或失败都会调）：让节流器把最后一段发出去并清表。 */
+  onDeltaEnd?: (requestId: string) => void;
 }
 
 /** provider 元数据在 KV 里的键；Key 拆成 aiKey:<providerId> 单独放。 */
@@ -116,7 +120,7 @@ export interface AiApi {
  * @param deps 依赖注入；onChanged 由 main.ts 传 broadcaster.aiChanged。
  */
 export function createAi(deps: AiDeps): AiApi {
-  const { kv, adapterFor, optimize, onChanged } = deps;
+  const { kv, adapterFor, optimize, onChanged, onDelta, onDeltaEnd } = deps;
 
   const list = (): AiProvider[] => readProviders(kv).map((cfg) => toPublic(kv, cfg));
   const changed = (): void => {
@@ -190,6 +194,8 @@ export function createAi(deps: AiDeps): AiApi {
       const { cfg, key } = requireProvider(req.providerId);
       const scene = sceneById(req.sceneId);
       if (!scene) throw err('未知的优化场景：' + req.sceneId);
+      // 只有"有 onDelta 且有 requestId"才走流式增量；否则退回整段返回（界面照样能显示结果）。
+      const canStream = typeof onDelta === 'function' && typeof req.requestId === 'string' && req.requestId !== '';
       try {
         // 场景规则由 buildMetaPrompt 注入，这层只做"取 Key + 选适配器"。
         return await optimize(adapterFor(cfg.protocol), cfg, key, {
@@ -197,10 +203,16 @@ export function createAi(deps: AiDeps): AiApi {
           scene,
           mode: req.mode,
           extra: req.extra,
+          // ★ 增量只带 requestId 与"已可展示"的成品文本：渲染层按 id 配对，过期即丢。
+          //   requestId 为空时不接 onPreview：没有配对键的增量发出去只会被界面当过期丢掉。
+          onPreview: canStream ? (preview: string) => onDelta!(req.requestId, preview) : undefined,
         });
       } catch (e) {
         // ★ 抛结构化错误给渲染层（它只认 kind/status/message）。
         throw toAiError(e, { timeoutMs: DEFAULT_TIMEOUT_MS });
+      } finally {
+        // 成功失败都要收尾：否则节流器里的最后一段永远发不出去（用户看到的是半截）。
+        if (onDeltaEnd) onDeltaEnd(req.requestId);
       }
     },
 
