@@ -44,8 +44,11 @@ export function ClipCard({
       onMouseEnter={() => onHover?.(item.id)}
       onMouseLeave={() => onHover?.(null)}
       title="单击选中 · 双击粘贴"
+      // ★ 用户实测反馈：右侧两个按钮原先写的是 opacity-0 + group-hover 才显形，
+      //   打包版里 computed opacity 恒为 0 —— 用户根本找不到优化入口。改成常态半透明
+      //   （opacity-60）+ 悬停不透明，不再依赖 hover 才可见（也不再需要 group）。
       className={cn(
-        'group relative flex cursor-default items-start gap-snug rounded-card border bg-surface p-snug shadow-card',
+        'relative flex cursor-default items-start gap-snug rounded-card border bg-surface p-snug shadow-card',
         selected
           ? 'border-[var(--cc-primary)] ring-1 ring-[var(--cc-primary)]'
           : 'border-line hover:border-[var(--cc-border-strong)]',
@@ -93,7 +96,7 @@ export function ClipCard({
               onOptimize(item.id);
             }}
             onDoubleClick={(event) => event.stopPropagation()}
-            className="shrink-0 rounded-full p-[3px] text-ink-3 opacity-0 transition-colors group-hover:opacity-100 hover:text-[var(--cc-primary)]"
+            className="shrink-0 rounded-full p-[3px] text-ink-3 opacity-60 transition-colors hover:opacity-100 hover:text-[var(--cc-primary)]"
           >
             <Sparkles size={14} aria-hidden />
           </button>
@@ -112,7 +115,7 @@ export function ClipCard({
             'shrink-0 rounded-full p-[3px] transition-colors',
             item.pinned
               ? 'text-[var(--cc-warm)]'
-              : 'text-ink-3 opacity-0 group-hover:opacity-100 hover:text-[var(--cc-warm)]',
+              : 'text-ink-3 opacity-60 hover:opacity-100 hover:text-[var(--cc-warm)]',
           )}
         >
           <Star size={14} fill={item.pinned ? 'currentColor' : 'none'} aria-hidden />

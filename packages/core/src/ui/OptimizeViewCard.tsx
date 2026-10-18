@@ -1,9 +1,18 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Sparkles } from 'lucide-react';
-import type { AiProvider, OptimizeRequest, OptimizeResult, PasteResult } from '../types';
+import type { AiProvider, OptimizeDelta, OptimizeRequest, OptimizeResult, PasteResult } from '../types';
 import type { ToastTone } from './toastText';
 import { aiErrorMessage } from './aiProviderForm';
-import { OPTIMIZE_MODES, degradedHint } from './optimizeView';
+import {
+  OPTIMIZE_MODES,
+  beginStream,
+  copyFailedToast,
+  copiedToast,
+  degradedHint,
+  endStream,
+  mergeDelta,
+  newRequestId,
+} from './optimizeView';
 import { pasteToast } from './toastText';
 import { cn } from './util';
 
@@ -18,6 +27,14 @@ import { cn } from './util';
  * 全部由 App 注入，组件自己不 getPlatform()，便于移动端复用与静态检查。
  *
  * 已配好的模型（providers）为空时不白屏，直接引导去设置页。
+ *
+ * ★ 用户实测反馈（本轮修复）：
+ *   1. 慢模型单次优化 20-60 秒，等整段响应看着像卡死 —— 订阅主进程的流式增量，
+ *      首字节先到、边收边显示（此时只读），结束后落成可编辑的 textarea。
+ *   2. 「优化后」原来是只读 <p>，改不了 —— 改成 textarea，可改完再复制。
+ *   3. 「复制」与「直接粘贴」原先是同一个动作 —— 「复制」只写剪贴板，
+ *      「直接粘贴」才写剪贴板并贴回目标窗口。
+ * 每次点「优化」生成一个 requestId，只接受它的增量（过期 delta 丢弃）。
  */
 export interface OptimizeScene {
   id: string;
@@ -33,8 +50,12 @@ export interface OptimizeViewProps {
   /** 场景由主进程投影：只回 id / name / description（rules 不出主进程）。 */
   onScenes: () => Promise<OptimizeScene[]>;
   onOptimize: (req: OptimizeRequest) => Promise<OptimizeResult>;
-  /** 写剪贴板并按 autoPaste / 目标可用性决定是否自动贴回。 */
+  /** 写剪贴板并按 autoPaste / 目标可用性决定是否自动贴回（「直接粘贴」）。 */
   onCopyAndPaste: (text: string) => Promise<PasteResult>;
+  /** 只写剪贴板、不贴回（「复制」）；由 App 注入 platform.clipboard.writeText。 */
+  onCopyToClipboard: (text: string) => Promise<void>;
+  /** 订阅主进程的流式增量（App 注入 ai.onOptimizeDelta）；返回值用于取消订阅。 */
+  onOptimizeDelta: (cb: (delta: OptimizeDelta) => void) => () => void;
   onToast: (text: string, tone?: ToastTone) => void;
   onGoSettings: () => void;
 }
@@ -78,7 +99,17 @@ function ModePicker({ value, onChange }: { value: OptimizeRequest['mode']; onCha
   );
 }
 
-export function OptimizeView({ source, providers, onScenes, onOptimize, onCopyAndPaste, onToast, onGoSettings }: OptimizeViewProps) {
+export function OptimizeView({
+  source,
+  providers,
+  onScenes,
+  onOptimize,
+  onCopyAndPaste,
+  onCopyToClipboard,
+  onOptimizeDelta,
+  onToast,
+  onGoSettings,
+}: OptimizeViewProps) {
   const [scenes, setScenes] = useState<OptimizeScene[]>([]);
   const [sceneId, setSceneId] = useState('');
   const [sceneFailed, setSceneFailed] = useState(false);
@@ -86,8 +117,12 @@ export function OptimizeView({ source, providers, onScenes, onOptimize, onCopyAn
   const [providerId, setProviderId] = useState(providers[0]?.id ?? '');
   const [text, setText] = useState(source);
   const [result, setResult] = useState<OptimizeResult | null>(null);
+  /** 优化后的文本：流式期间是增量预览（只读），结束后是最终结果（可改后再复制）。 */
+  const [output, setOutput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  /** 在途请求的 requestId：只认它的增量，过期请求的 delta 一律丢弃。 */
+  const activeRequest = useRef<string | null>(null);
 
   // 场景目录：主进程投影，失败时把错误摊在工具条上，不静默留个空下拉。
   useEffect(() => {
@@ -116,36 +151,73 @@ export function OptimizeView({ source, providers, onScenes, onOptimize, onCopyAn
     setProviderId((prev) => (providers.some((p) => p.id === prev) ? prev : (providers[0]?.id ?? '')));
   }, [providers]);
 
-  // 换一条记录重新打开面板：原文与上一次的输出一起换掉（不留旧结果）。
+  // 流式增量：订阅主进程，只接受在途请求（requestId 匹配）的那条。
+  // 返回值就是取消函数——切换视图会卸载本组件，清理由此完成（App 只注入订阅入口）。
   useEffect(() => {
+    return onOptimizeDelta((delta) => {
+      setOutput((prev) => mergeDelta(prev, delta, activeRequest.current));
+    });
+  }, [onOptimizeDelta]);
+
+  // 换一条记录重新打开面板：原文与上一次的输出一起换掉（不留旧结果），
+  // 在途请求一并作废（它的增量与结果都不该落到新记录上）。
+  useEffect(() => {
+    activeRequest.current = null;
     setText(source);
     setResult(null);
+    setOutput('');
     setError(null);
+    setLoading(false);
   }, [source]);
 
-  const optimized = result?.optimized ?? '';
   const degraded = result ? degradedHint(result.degraded) : null;
   const canRun = !loading && providerId !== '' && sceneId !== '' && text.trim().length > 0;
 
   async function run(): Promise<void> {
     if (!canRun) return;
-    setLoading(true);
+    // 本轮请求的 requestId：清空上一次的预览，之后只认这个 id 的流式增量。
+    const stream = beginStream(newRequestId());
+    activeRequest.current = stream.requestId;
+    setOutput(stream.text);
+    setResult(null);
     setError(null);
+    setLoading(true);
     try {
-      const res = await onOptimize({ providerId, text, sceneId, mode });
+      const res = await onOptimize({ providerId, text, sceneId, mode, requestId: stream.requestId });
+      if (activeRequest.current !== stream.requestId) return; // 途中换了记录：这次结果作废
       setResult(res);
+      setOutput(res.optimized);
     } catch (err) {
+      if (activeRequest.current !== stream.requestId) return;
       // 失败不白屏：把结构化错误翻成中文摊在右栏，原结果保留可重试。
       setError(aiErrorMessage(err));
     } finally {
-      setLoading(false);
+      if (activeRequest.current === stream.requestId) {
+        // ★ 收尾即作废在途 id：结束后迟到的增量不能再追加到（此时可编辑的）最终文本上。
+        activeRequest.current = endStream();
+        setLoading(false);
+      }
     }
   }
 
-  /** 「复制」与「直接粘贴」是同一条通道（是否自动贴回由主进程按 autoPaste / 目标可用性决定）。 */
+  /** 「复制」：只写剪贴板，不贴回目标窗口（★ 与「直接粘贴」拆分，原先是同一个动作）。 */
   async function copyOut(): Promise<void> {
-    if (optimized === '') return;
-    const res = await onCopyAndPaste(optimized);
+    if (output === '') return;
+    try {
+      await onCopyToClipboard(output);
+      const toast = copiedToast();
+      onToast(toast.text, toast.tone);
+    } catch (err) {
+      // 剪贴板写失败也要出声，不假装复制成功。
+      const toast = copyFailedToast(err);
+      onToast(toast.text, toast.tone);
+    }
+  }
+
+  /** 「直接粘贴」：写剪贴板 + 按 autoPaste / 目标可用性决定是否贴回（由主进程判断）。 */
+  async function copyAndPasteOut(): Promise<void> {
+    if (output === '') return;
+    const res = await onCopyAndPaste(output);
     const toast = pasteToast(res);
     onToast(toast.text, toast.tone);
   }
@@ -218,22 +290,30 @@ export function OptimizeView({ source, providers, onScenes, onOptimize, onCopyAn
 
           <div className="flex min-h-0 flex-col gap-tight">
             <span className="text-[12px] font-semibold text-ink">优化后</span>
-            <div className="cc-scroll min-h-0 flex-1 overflow-y-auto rounded-input border border-line bg-surface px-snug py-tight">
-              {loading ? (
+            {loading ? (
+              <span className="shrink-0 text-[11px] text-ink-3">优化中：内容会实时显示在下面，结束后可直接修改</span>
+            ) : null}
+            {error !== null ? (
+              <div className="cc-scroll flex min-h-0 flex-1 flex-col gap-snug overflow-y-auto rounded-input border border-line bg-surface px-snug py-tight">
+                <p className="text-[11px] leading-[1.6] text-red-400">{error}</p>
+                <button type="button" className={GHOST_BUTTON_CLASS} onClick={() => void run()}>
+                  重试
+                </button>
+              </div>
+            ) : loading && output === '' ? (
+              <div className="cc-scroll min-h-0 flex-1 overflow-y-auto rounded-input border border-line bg-surface px-snug py-tight">
                 <Skeleton />
-              ) : error !== null ? (
-                <div className="flex flex-col gap-snug">
-                  <p className="text-[11px] leading-[1.6] text-red-400">{error}</p>
-                  <button type="button" className={GHOST_BUTTON_CLASS} onClick={() => void run()}>
-                    重试
-                  </button>
-                </div>
-              ) : optimized !== '' ? (
-                <p className="whitespace-pre-wrap break-all text-[12px] leading-[1.7] text-ink">{optimized}</p>
-              ) : (
-                <p className="text-[11px] leading-[1.6] text-ink-3">选好场景与模式，点「优化」生成。</p>
-              )}
-            </div>
+              </div>
+            ) : (
+              /* ★ 从只读 <p> 改成 textarea：生成完可以直接改，改完再复制/直接粘贴。 */
+              <textarea
+                value={output}
+                readOnly={loading}
+                onChange={(event) => setOutput(event.target.value)}
+                placeholder="选好场景与模式，点「优化」生成；生成后可以在这里直接修改再复制。"
+                className="cc-scroll min-h-0 flex-1 resize-none rounded-input border border-line bg-surface px-snug py-tight text-[12px] leading-[1.7] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-primary)]"
+              />
+            )}
           </div>
         </div>
       )}
@@ -248,11 +328,18 @@ export function OptimizeView({ source, providers, onScenes, onOptimize, onCopyAn
             ))}
           </ul>
         ) : null}
+        {/* ★ 三个按钮常显（不折叠、不悬停才出现）；无文本时 disabled。
+            ★ 「复制」只写剪贴板，「直接粘贴」才贴回目标窗口——原先是同一个动作。 */}
         <div className="flex items-center gap-snug">
-          <button type="button" className={GHOST_BUTTON_CLASS} disabled={optimized === ''} onClick={() => void copyOut()}>
+          <button type="button" className={GHOST_BUTTON_CLASS} disabled={output === ''} onClick={() => void copyOut()}>
             复制
           </button>
-          <button type="button" className={GHOST_BUTTON_CLASS} disabled={optimized === ''} onClick={() => void copyOut()}>
+          <button
+            type="button"
+            className={GHOST_BUTTON_CLASS}
+            disabled={output === ''}
+            onClick={() => void copyAndPasteOut()}
+          >
             直接粘贴
           </button>
           <button type="button" className={GHOST_BUTTON_CLASS} disabled={!canRun} onClick={() => void run()}>

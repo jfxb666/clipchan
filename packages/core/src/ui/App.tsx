@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LayoutGrid, List, Settings2, Sparkles } from 'lucide-react';
-import type { AiError, AiProvider, AiProviderInput, OptimizeRequest, Settings } from '../types';
+import type { AiError, AiProvider, AiProviderInput, OptimizeDelta, OptimizeRequest, Settings } from '../types';
 import { getPlatform } from '../platform/adapter';
 import { bindClipStore, useClipStore, type AppMode, type View } from '../state/store';
 import { ListPanel } from './ListPanel';
@@ -216,10 +216,20 @@ export function App() {
     }
   }, []);
 
-  // 优化面板的三个平台动作：组件不碰 getPlatform，一律由 App 注入（与设置页一致）。
+  // 优化面板的平台动作：组件不碰 getPlatform，一律由 App 注入（与设置页一致）。
   const loadScenes = useCallback(() => getPlatform().ai.scenes(), []);
   const runOptimize = useCallback((req: OptimizeRequest) => getPlatform().ai.optimize(req), []);
   const copyAndPaste = useCallback((text: string) => getPlatform().ai.copyAndPaste(text), []);
+  /** 「复制」只写剪贴板（不贴回），与「直接粘贴」是两条路径。 */
+  const writeClipboard = useCallback((text: string) => getPlatform().clipboard.writeText(text), []);
+  /**
+   * 流式增量订阅：取消函数原样交给面板（面板的 useEffect 返回它，
+   * 切换视图卸载面板时就地清理），App 不额外持有订阅句柄。
+   */
+  const subscribeOptimizeDelta = useCallback(
+    (cb: (delta: OptimizeDelta) => void) => getPlatform().ai.onOptimizeDelta(cb),
+    [],
+  );
   const toast = useCallback((text: string, tone?: ToastTone) => useClipStore.getState().toast(text, tone), []);
 
   const openWordCloud = useCallback(() => {
@@ -417,6 +427,8 @@ export function App() {
               onScenes={loadScenes}
               onOptimize={runOptimize}
               onCopyAndPaste={copyAndPaste}
+              onCopyToClipboard={writeClipboard}
+              onOptimizeDelta={subscribeOptimizeDelta}
               onToast={toast}
               onGoSettings={() => useClipStore.getState().setView('settings')}
             />
