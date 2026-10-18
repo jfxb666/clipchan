@@ -25,6 +25,13 @@ export function pasteToast(result: PasteResult): { text: string; tone: ToastTone
   return { text: pasteHintOf(result), tone: result.ok ? 'ok' : 'warn' };
 }
 
+/** 「只复制」的文案：与粘贴区分开，不提示 Ctrl+V（用户要的是复制本身）。 */
+export function copyToast(result: PasteResult): { text: string; tone: ToastTone } {
+  return result.ok
+    ? { text: '已复制到剪贴板', tone: 'ok' }
+    : { text: '复制失败，请重试', tone: 'warn' };
+}
+
 /** 拼接结果 → 提示文案。count 为选中条数，skippedImages 为被跳过的图片条数。 */
 export function mergeToast(
   result: { ok: boolean; id?: string; reason?: string },

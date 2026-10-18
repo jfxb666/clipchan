@@ -30,6 +30,8 @@ export const PAGE_SIZE = 200;
 export const QUERY_DEBOUNCE_MS = 300;
 /** 浮层提示停留时长。 */
 export const TOAST_TTL_MS = 3000;
+/** Ctrl+Delete 待确认态的存活时间：超时未再按就作废（与设置页 3 秒复位一致）。 */
+export const CLEAR_CONFIRM_TTL_MS = 3000;
 
 /** 顶层视图：列表 / 设置 / 今日词云 / 优化面板（spec §6.9 词云是应用内视图）。 */
 export type View = 'list' | 'settings' | 'wordcloud' | 'optimize';
@@ -59,6 +61,8 @@ export interface ClipStoreState {
   selectedIds: string[];
   hoveredId: string | null;
   hasMore: boolean;
+  /** 当前分类/搜索词下的真实总数（不是已加载条数）：状态栏「共 N 条」用它。 */
+  total: number;
   loading: boolean;
   settings: Settings;
   ghost: GhostState;
@@ -66,6 +70,8 @@ export interface ClipStoreState {
   hotkeys: HotkeyStatus;
   toasts: Toast[];
   mergeHint: MergeHint | null;
+  /** Ctrl+Delete 第一次按下后的待确认态（3 秒内再按才真的清空）。 */
+  confirmClear: boolean;
   wordcloud: WordCloudData | null;
   /** 优化面板的原文初值：由卡片「优化」按钮带出（计划 Task 7 Step 3）。 */
   optimizeSource: string;
@@ -95,7 +101,11 @@ export interface ClipStoreActions {
   pasteSelected(): Promise<void>;
   mergeSelected(): Promise<void>;
   clearUnpinned(): Promise<void>;
+  /** 键盘 Ctrl+Delete：第一次只提示，3 秒内再按一次才执行（与设置页的两次点击确认对齐）。 */
+  pressClearUnpinned(): void;
   clearAll(): Promise<void>;
+  /** 导出全部记录为 JSON（设置页「数据」区）。 */
+  exportAll(): Promise<void>;
   updateSettings(patch: Partial<Settings>): Promise<void>;
   setWidgetSize(px: number): Promise<void>;
   setGhost(minutes: number): Promise<void>;
@@ -149,6 +159,7 @@ function listQuery(kind: KindFilter, q: string, offset: number): ListQuery {
 
 // 防抖定时器与请求序号放在模块作用域：同一个渲染进程只应有一份。
 let queryTimer: ReturnType<typeof setTimeout> | null = null;
+let confirmTimer: ReturnType<typeof setTimeout> | null = null;
 let loadSeq = 0;
 let toastSeq = 0;
 let unsubscribers: (() => void)[] = [];
@@ -180,6 +191,7 @@ function initialState(): ClipStoreState {
     selectedIds: [],
     hoveredId: null,
     hasMore: false,
+    total: 0,
     loading: false,
     settings: { ...DEFAULT_SETTINGS },
     ghost: { ...INITIAL_GHOST },
@@ -187,6 +199,7 @@ function initialState(): ClipStoreState {
     hotkeys: { ...INITIAL_HOTKEYS },
     toasts: [],
     mergeHint: null,
+    confirmClear: false,
     wordcloud: null,
     optimizeSource: '',
   };
@@ -198,6 +211,10 @@ export function resetClipStore(): void {
   if (queryTimer) {
     clearTimeout(queryTimer);
     queryTimer = null;
+  }
+  if (confirmTimer) {
+    clearTimeout(confirmTimer);
+    confirmTimer = null;
   }
   loadSeq = 0;
   useClipStore.setState(initialState());
@@ -234,13 +251,21 @@ export const useClipStore = create<ClipStore>((set, get) => ({
     const seq = ++loadSeq;
     set({ loading: true });
     try {
-      const items = await getPlatform().items.list(listQuery(kind, q, 0));
+      const platform = getPlatform();
+      const query = listQuery(kind, q, 0);
+      // 列表与总数必须同一套条件：分开算会出现「共 3 条」但列表有 5 张卡片。
+      const [items, counted] = await Promise.all([
+        platform.items.list(query),
+        // 取不到总数就退回已加载条数（宁可少一个准确数字，也不让整页加载失败）。
+        platform.items.count(query).catch(() => -1),
+      ]);
       if (seq !== loadSeq) return;
       const ids = new Set(items.map((it) => it.id));
       const kept = get().selectedIds.filter((id) => ids.has(id));
       set({
         // 收藏置顶再入列表：与 SQL 的 ORDER BY pinned DESC, created_at DESC 对齐。
         items: sortItems(items),
+        total: counted >= 0 ? counted : items.length,
         hasMore: items.length >= PAGE_SIZE,
         selectedIds: kept,
         selectedId: kept[0] ?? null,
@@ -248,7 +273,7 @@ export const useClipStore = create<ClipStore>((set, get) => ({
       });
     } catch (err) {
       if (seq !== loadSeq) return;
-      set({ loading: false, hasMore: false });
+      set({ loading: false, hasMore: false, total: 0 });
       get().toast(errorText(err), 'error');
     }
   },
@@ -321,6 +346,8 @@ export const useClipStore = create<ClipStore>((set, get) => ({
     const kept = get().selectedIds.filter((x) => !gone.has(x));
     set({
       items: before.filter((it) => !gone.has(it.id)),
+      // 删除是本地已确定的减法：同步减总数，否则状态栏会停在旧数字直到下次 load。
+      total: Math.max(0, get().total - ids.length),
       selectedIds: kept,
       selectedId: kept[0] ?? null,
     });
@@ -380,6 +407,11 @@ export const useClipStore = create<ClipStore>((set, get) => ({
   },
 
   clearUnpinned: async () => {
+    if (confirmTimer) {
+      clearTimeout(confirmTimer);
+      confirmTimer = null;
+    }
+    set({ confirmClear: false });
     try {
       await getPlatform().items.clearUnpinned();
       await get().load();
@@ -388,10 +420,42 @@ export const useClipStore = create<ClipStore>((set, get) => ({
     }
   },
 
+  /**
+   * 键盘 Ctrl+Delete 的两次确认（与设置页「再点一次确认」同一语义）。
+   * 键盘路径没有按钮可以变字，所以第一次按下改成弹一条提示，3 秒内再按才真的清空。
+   */
+  pressClearUnpinned: () => {
+    if (get().confirmClear) {
+      void get().clearUnpinned();
+      return;
+    }
+    set({ confirmClear: true });
+    get().toast('再按一次 Ctrl+Delete 清空未收藏（3 秒内有效）', 'warn');
+    if (confirmTimer) clearTimeout(confirmTimer);
+    confirmTimer = setTimeout(() => {
+      confirmTimer = null;
+      set({ confirmClear: false });
+    }, CLEAR_CONFIRM_TTL_MS);
+    unref(confirmTimer);
+  },
+
   clearAll: async () => {
     try {
       await getPlatform().items.clearAll();
       await get().load();
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  exportAll: async () => {
+    try {
+      const result = await getPlatform().items.exportAll();
+      if (result.ok) {
+        get().toast('已导出到数据目录：' + (result.path ?? ''), 'ok');
+        return;
+      }
+      get().toast('导出失败，请检查数据目录是否可写', 'warn');
     } catch (err) {
       get().toast(errorText(err), 'error');
     }

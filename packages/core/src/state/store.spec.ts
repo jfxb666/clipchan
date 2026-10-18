@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BurstHint, ClipItemDTO, ClipchanApi, GhostState, ListQuery, NavigateTarget, Settings } from '../types';
 import { DEFAULT_SETTINGS } from '../types';
 import { setPlatform } from '../platform/adapter';
-import { PAGE_SIZE, QUERY_DEBOUNCE_MS, bindClipStore, resetClipStore, useClipStore } from './store';
+import {
+  CLEAR_CONFIRM_TTL_MS,
+  PAGE_SIZE,
+  QUERY_DEBOUNCE_MS,
+  bindClipStore,
+  resetClipStore,
+  useClipStore,
+} from './store';
 
 /**
  * store 的单测全部用假平台适配器注入（setPlatform），不真连 Electron。
@@ -31,6 +38,12 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
   const pinCalls: string[] = [];
   const ghostCalls: number[] = [];
   const settingCalls: Partial<Settings>[] = [];
+  const countCalls: ListQuery[] = [];
+  const exportCalls: number[] = [];
+  /** 让 count 失败/成功由用例决定：null = 用 seed.length。 */
+  let countResult: number | null = null;
+  let countThrows = false;
+  let exportResult: { ok: boolean; path?: string } = { ok: true, path: 'C:/tmp/export.json' };
   const unsubscribed: string[] = [];
   let itemChanged: (() => void) | null = null;
   let settingsChanged: ((s: Settings) => void) | null = null;
@@ -59,7 +72,17 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       clearUnpinned: async () => {},
       clearAll: async () => {},
       mergeSelected: async () => ({ ok: true, id: 'merged-1' }),
+      copy: async () => ({ ok: false, reason: 'no-target' }),
       getFullImage: async () => '',
+      count: async (q: ListQuery) => {
+        countCalls.push(q);
+        if (countThrows) throw new Error('count 失败');
+        return countResult === null ? seed.length : countResult;
+      },
+      exportAll: async () => {
+        exportCalls.push(1);
+        return exportResult;
+      },
       getText: async () => '',
       onChanged: (cb: () => void) => {
         itemChanged = cb;
@@ -141,6 +164,7 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       listModels: async () => [],
       test: async () => ({ ok: false }),
       optimize: async () => ({ optimized: '', notes: [], degraded: false }),
+      cancel: async () => {},
       scenes: async () => [],
       copyAndPaste: async () => ({ ok: false, reason: 'send-failed' }),
       onChanged: () => () => {},
@@ -162,7 +186,18 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
     pinCalls,
     ghostCalls,
     settingCalls,
+    countCalls,
+    exportCalls,
     unsubscribed,
+    setCountResult: (n: number | null) => {
+      countResult = n;
+    },
+    setCountThrows: (v: boolean) => {
+      countThrows = v;
+    },
+    setExportResult: (v: { ok: boolean; path?: string }) => {
+      exportResult = v;
+    },
     fireItemChanged: () => itemChanged?.(),
     fireSettingsChanged: (s: Settings) => settingsChanged?.(s),
     fireGhostChanged: (g: GhostState) => ghostChanged?.(g),
@@ -416,5 +451,168 @@ describe('设置 / 幽灵模式 / 订阅', () => {
     expect(useClipStore.getState().ghost.active).toBe(false);
     expect(useClipStore.getState().toasts.at(-1)?.text).toContain('监听已恢复');
     unbind();
+  });
+});
+
+describe('total 是真实总数（不是已加载条数）', () => {
+  it('load() 用 items.count 的结果，而不是 list 回来的条数', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b')]);
+    fake.setCountResult(417);
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().load();
+
+    expect(useClipStore.getState().total).toBe(417);
+    expect(useClipStore.getState().items).toHaveLength(2);
+  });
+
+  it('count 与 list 用同一套条件（分类 + 搜索词）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().load();
+    const listQuery = fake.listCalls.at(-1);
+    const countQuery = fake.countCalls.at(-1);
+
+    expect(countQuery?.kind).toBe(listQuery?.kind);
+    expect(countQuery?.q).toBe(listQuery?.q);
+    expect(countQuery?.limit).toBe(listQuery?.limit);
+  });
+
+  it('count 抛错时退回已加载条数，整页仍加载成功', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b'), item('c')]);
+    fake.setCountThrows(true);
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().load();
+
+    expect(useClipStore.getState().items).toHaveLength(3);
+    expect(useClipStore.getState().total).toBe(3);
+    expect(useClipStore.getState().loading).toBe(false);
+  });
+
+  it('remove 之后 total 跟着减，不留在旧数字', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b'), item('c')]);
+    fake.setCountResult(3);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    expect(useClipStore.getState().total).toBe(3);
+
+    await useClipStore.getState().remove(['a', 'b']);
+
+    expect(useClipStore.getState().total).toBe(1);
+  });
+
+  it('remove 不会把 total 减成负数', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    fake.setCountResult(0);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+
+    await useClipStore.getState().remove(['a']);
+
+    expect(useClipStore.getState().total).toBe(0);
+  });
+});
+
+describe('pressClearUnpinned 二次确认', () => {
+  it('第一次按只提示，不调用主进程', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+    let cleared = 0;
+    const original = fake.adapter.items.clearUnpinned;
+    fake.adapter.items.clearUnpinned = async () => {
+      cleared += 1;
+      await original();
+    };
+
+    useClipStore.getState().pressClearUnpinned();
+
+    expect(cleared).toBe(0);
+    expect(useClipStore.getState().confirmClear).toBe(true);
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('再按一次');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('warn');
+  });
+
+  it('第二次按真正清空并复位 confirmClear', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+    let cleared = 0;
+    fake.adapter.items.clearUnpinned = async () => {
+      cleared += 1;
+    };
+
+    useClipStore.getState().pressClearUnpinned();
+    useClipStore.getState().pressClearUnpinned();
+    await vi.waitFor(() => expect(cleared).toBe(1));
+
+    expect(useClipStore.getState().confirmClear).toBe(false);
+  });
+
+  it('超过确认窗口后回到未确认状态', async () => {
+    vi.useFakeTimers();
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().pressClearUnpinned();
+    expect(useClipStore.getState().confirmClear).toBe(true);
+
+    vi.advanceTimersByTime(CLEAR_CONFIRM_TTL_MS);
+    expect(useClipStore.getState().confirmClear).toBe(false);
+  });
+
+  it('确认窗口过期后再按一次仍然只是提示（不误清空）', async () => {
+    vi.useFakeTimers();
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+    let cleared = 0;
+    fake.adapter.items.clearUnpinned = async () => {
+      cleared += 1;
+    };
+
+    useClipStore.getState().pressClearUnpinned();
+    vi.advanceTimersByTime(CLEAR_CONFIRM_TTL_MS + 1);
+    useClipStore.getState().pressClearUnpinned();
+
+    expect(cleared).toBe(0);
+    expect(useClipStore.getState().confirmClear).toBe(true);
+  });
+});
+
+describe('exportAll', () => {
+  it('成功时提示导出路径', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setExportResult({ ok: true, path: 'C:/data/export-20260101.json' });
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().exportAll();
+
+    expect(fake.exportCalls).toHaveLength(1);
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('C:/data/export-20260101.json');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('ok');
+  });
+
+  it('失败时如实提示，不假装成功', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setExportResult({ ok: false });
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().exportAll();
+
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('导出失败');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('warn');
+  });
+
+  it('主进程抛错时把错误文案带出来', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.adapter.items.exportAll = async () => {
+      throw new Error('磁盘只读');
+    };
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().exportAll();
+
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('磁盘只读');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('error');
   });
 });
