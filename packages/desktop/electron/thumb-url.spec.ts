@@ -6,7 +6,14 @@
  *   这个文件钉死翻译与解析两侧，防止再退化。
  */
 import { describe, expect, it } from 'vitest';
-import { THUMB_SCHEME, mapThumbUrl, resolveThumbRequest, thumbUrlFor } from './thumb-url';
+import {
+  THUMB_SCHEME,
+  imageUrlFor,
+  mapThumbUrl,
+  resolveImageRequest,
+  resolveThumbRequest,
+  thumbUrlFor,
+} from './thumb-url';
 
 const DATA_DIR = 'C:\\Users\\me\\AppData\\Roaming\\Clipchan';
 
@@ -63,6 +70,48 @@ describe('resolveThumbRequest：协议 URL → 磁盘路径', () => {
   it('★ 只允许 thumbs/ 顶层目录', () => {
     expect(resolveThumbRequest('clipchan-img://thumb/images/i1.jpg', DATA_DIR)).toBeNull();
     expect(resolveThumbRequest('clipchan-img://thumb/thumbs', DATA_DIR)).toBeNull();
+  });
+});
+
+describe('原图协议（image 主机）：查看大图', () => {
+  it('images/<id>.png 翻成 clipchan-img://image/images/<id>.png', () => {
+    expect(imageUrlFor('images/i1.png')).toBe('clipchan-img://image/images/i1.png');
+  });
+
+  it('★ 与缩略图分属两个主机，不能互相冒充', () => {
+    expect(imageUrlFor('thumbs/i1.png')).toBeUndefined();
+    expect(thumbUrlFor('images/i1.png')).toBeUndefined();
+    const thumbUrl = 'clipchan-img://thumb/thumbs/i1.png';
+    const imgUrl = 'clipchan-img://image/images/i1.png';
+    expect(resolveImageRequest(thumbUrl, DATA_DIR)).toBeNull();
+    expect(resolveThumbRequest(imgUrl, DATA_DIR)).toBeNull();
+  });
+
+  it('解析到 <dataDir>/images/<id>.png', () => {
+    expect(resolveImageRequest('clipchan-img://image/images/i1.png', DATA_DIR)).toBe(
+      DATA_DIR + '\\images\\i1.png',
+    );
+  });
+
+  it('★ 路径穿越与非法 scheme 一律拒绝', () => {
+    expect(resolveImageRequest('clipchan-img://image/images/../../evil.png', DATA_DIR)).toBeNull();
+    expect(resolveImageRequest('clipchan-img://image/images/%2e%2e/evil.png', DATA_DIR)).toBeNull();
+    expect(resolveImageRequest('file:///C:/x/images/i1.png', DATA_DIR)).toBeNull();
+    expect(resolveImageRequest('clipchan-img://image/thumbs/i1.png', DATA_DIR)).toBeNull();
+    expect(resolveImageRequest('', DATA_DIR)).toBeNull();
+  });
+
+  it('文件名含中文与空格时编码后仍能解析回原路径', () => {
+    const url = imageUrlFor('images/我的 图.jpg');
+    expect(resolveImageRequest(url!, DATA_DIR)).toBe(DATA_DIR + '\\images\\我的 图.jpg');
+  });
+
+  it('空值与穿越输入 → undefined（宁可不显示，也不给坏 URL）', () => {
+    expect(imageUrlFor('')).toBeUndefined();
+    expect(imageUrlFor(null)).toBeUndefined();
+    expect(imageUrlFor(undefined)).toBeUndefined();
+    expect(imageUrlFor('images/../evil.png')).toBeUndefined();
+    expect(imageUrlFor('images')).toBeUndefined();
   });
 });
 

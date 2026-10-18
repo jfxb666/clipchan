@@ -110,6 +110,8 @@ export interface AiApi {
   listModels(id: string): Promise<string[]>;
   test(id: string): Promise<{ ok: boolean; error?: AiError; model?: string }>;
   optimize(req: OptimizeRequest): Promise<OptimizeResult>;
+  /** 中断在途请求（按 requestId）；没有在途请求时静默返回（重复点「停止」不该报错）。 */
+  cancel(requestId: string): Promise<void>;
   scenes(): Promise<{ id: string; name: string; description: string }[]>;
   /** IPC 处理器表片段（main.ts 直接展开进 buildHandlers 的表里）。 */
   handlers(): Record<string, (event: unknown, ...args: any[]) => unknown>;
@@ -123,6 +125,14 @@ export function createAi(deps: AiDeps): AiApi {
   const { kv, adapterFor, optimize, onChanged, onDelta, onDeltaEnd } = deps;
 
   const list = (): AiProvider[] => readProviders(kv).map((cfg) => toPublic(kv, cfg));
+
+  /**
+   * 在途请求的取消器：requestId → AbortController。
+   *
+   * ★ 只在内存里：进程重启就没有在途请求了，没必要持久化。
+   * ★ 用 requestId 而不是 providerId 做键：同一个 provider 可以并发两次优化。
+   */
+  const inflight = new Map<string, AbortController>();
   const changed = (): void => {
     if (onChanged) onChanged();
   };
@@ -196,6 +206,9 @@ export function createAi(deps: AiDeps): AiApi {
       if (!scene) throw err('未知的优化场景：' + req.sceneId);
       // 只有"有 onDelta 且有 requestId"才走流式增量；否则退回整段返回（界面照样能显示结果）。
       const canStream = typeof onDelta === 'function' && typeof req.requestId === 'string' && req.requestId !== '';
+      const rid = typeof req.requestId === 'string' ? req.requestId : '';
+      const ctrl = new AbortController();
+      if (rid !== '') inflight.set(rid, ctrl);
       try {
         // 场景规则由 buildMetaPrompt 注入，这层只做"取 Key + 选适配器"。
         return await optimize(adapterFor(cfg.protocol), cfg, key, {
@@ -203,6 +216,7 @@ export function createAi(deps: AiDeps): AiApi {
           scene,
           mode: req.mode,
           extra: req.extra,
+          signal: ctrl.signal,
           // ★ 增量只带 requestId 与"已可展示"的成品文本：渲染层按 id 配对，过期即丢。
           //   requestId 为空时不接 onPreview：没有配对键的增量发出去只会被界面当过期丢掉。
           onPreview: canStream ? (preview: string) => onDelta!(req.requestId, preview) : undefined,
@@ -211,9 +225,19 @@ export function createAi(deps: AiDeps): AiApi {
         // ★ 抛结构化错误给渲染层（它只认 kind/status/message）。
         throw toAiError(e, { timeoutMs: DEFAULT_TIMEOUT_MS });
       } finally {
+        if (rid !== '') inflight.delete(rid);
         // 成功失败都要收尾：否则节流器里的最后一段永远发不出去（用户看到的是半截）。
         if (onDeltaEnd) onDeltaEnd(req.requestId);
       }
+    },
+
+    cancel: async (requestId) => {
+      const rid = typeof requestId === 'string' ? requestId : '';
+      if (rid === '') return;
+      const ctrl = inflight.get(rid);
+      if (!ctrl) return;
+      inflight.delete(rid);
+      ctrl.abort();
     },
 
     // 只投影三字段：rules 与 example 留在主进程。
@@ -227,6 +251,7 @@ export function createAi(deps: AiDeps): AiApi {
         [CH.ai.listModels]: (_e: unknown, id: string) => api.listModels(String(id)),
         [CH.ai.test]: (_e: unknown, id: string) => api.test(String(id)),
         [CH.ai.optimize]: (_e: unknown, req: OptimizeRequest) => api.optimize(req),
+        [CH.ai.cancel]: (_e: unknown, requestId: string) => api.cancel(String(requestId)),
         [CH.ai.scenes]: () => api.scenes(),
       };
     },

@@ -45,7 +45,10 @@ const api = {
     clearAll: (): Promise<void> => ipcRenderer.invoke(CH.items.clearAll),
     mergeSelected: (ids: string[]): Promise<{ ok: boolean; id?: string; reason?: string }> =>
       ipcRenderer.invoke(CH.items.mergeSelected, ids),
+    copy: (id: string): Promise<PasteResult> => ipcRenderer.invoke(CH.items.copy, id),
     getFullImage: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getFullImage, id),
+    count: (q: ListQuery): Promise<number> => ipcRenderer.invoke(CH.items.count, q),
+    exportAll: (): Promise<{ ok: boolean; path?: string }> => ipcRenderer.invoke(CH.items.exportAll),
     getText: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getText, id),
     onChanged: (cb: () => void): (() => void) => on(EV.itemsChanged, cb),
     onBurstHint: (cb: (hint: BurstHint) => void): (() => void) => on(EV.burstHint, cb),
@@ -90,6 +93,7 @@ const api = {
     test: (id: string): Promise<{ ok: boolean; error?: AiError; model?: string }> =>
       ipcRenderer.invoke(CH.ai.test, id),
     optimize: (req: OptimizeRequest): Promise<OptimizeResult> => ipcRenderer.invoke(CH.ai.optimize, req),
+    cancel: (requestId: string): Promise<void> => ipcRenderer.invoke(CH.ai.cancel, requestId),
     scenes: (): Promise<{ id: string; name: string; description: string }[]> => ipcRenderer.invoke(CH.ai.scenes),
     copyAndPaste: (text: string): Promise<PasteResult> => ipcRenderer.invoke(CH.ai.copyAndPaste, text),
     onChanged: (cb: () => void): (() => void) => on(EV.aiChanged, cb),

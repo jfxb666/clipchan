@@ -591,3 +591,133 @@ describe('PasteService.pasteText 编排（与 pasteItem 同构，但不查库、
     expect(events).not.toContain('touch');
   });
 });
+
+describe('PasteService.copyItem（只复制，不粘贴）', () => {
+  it('只写剪贴板：不 touch、不 consume、不调助手', async () => {
+    const events: string[] = [];
+    const writer = fakeWriter(events);
+    const helper = fakeHelper({ ok: true });
+    const svc = new PasteService({
+      db: fakeDb(textRow('a1', '你好'), events),
+      helper,
+      tracker: fakeTracker(0x5555, events),
+      getSettings: () => ({ autoPaste: true }),
+      writer,
+    });
+
+    const r = await svc.copyItem('a1');
+
+    expect(r).toEqual({ ok: true });
+    expect(events).toEqual(['getRow', 'writeText']);
+    expect(writer.texts).toEqual(['你好']);
+    expect(helper.calls).toEqual([]);
+  });
+
+  it('成功回 {ok:true} 而不是 COPY_ONLY（no-target 是粘贴语义，不能混用）', async () => {
+    const svc = new PasteService({
+      db: fakeDb(textRow('a1', 'x')),
+      helper: fakeHelper({ ok: true }),
+      tracker: fakeTracker(null),
+      getSettings: () => ({ autoPaste: false }),
+      writer: fakeWriter(),
+    });
+
+    const r = await svc.copyItem('a1');
+
+    expect(r.ok).toBe(true);
+    expect(r).not.toEqual({ ok: false, reason: 'no-target' });
+  });
+
+  it('自动粘贴开着也照样只复制（copyItem 不看 autoPaste）', async () => {
+    const helper = fakeHelper({ ok: true });
+    const svc = new PasteService({
+      db: fakeDb(textRow('a1', 'x')),
+      helper,
+      tracker: fakeTracker(0x5555),
+      getSettings: () => ({ autoPaste: true }),
+      writer: fakeWriter(),
+    });
+
+    await svc.copyItem('a1');
+
+    expect(helper.calls).toEqual([]);
+  });
+
+  it('图片记录：写图片字节，不写文本', async () => {
+    const writer = fakeWriter();
+    const svc = new PasteService({
+      db: fakeDb(imageRow('i1', 'images/a.png')),
+      helper: fakeHelper({ ok: true }),
+      tracker: fakeTracker(null),
+      getSettings: () => ({ autoPaste: true }),
+      writer,
+      dataDir: 'C:/data',
+      readImage: () => Buffer.from([1, 2, 3]),
+    });
+
+    const r = await svc.copyItem('i1');
+
+    expect(r).toEqual({ ok: true });
+    expect(writer.images).toHaveLength(1);
+    expect(writer.texts).toEqual([]);
+  });
+
+  it('记录不存在 → {no-target}，不写剪贴板', async () => {
+    const writer = fakeWriter();
+    const svc = new PasteService({
+      db: fakeDb(null),
+      helper: fakeHelper({ ok: true }),
+      tracker: fakeTracker(null),
+      getSettings: () => ({ autoPaste: true }),
+      writer,
+    });
+
+    expect(await svc.copyItem('gone')).toEqual({ ok: false, reason: 'no-target' });
+    expect(writer.texts).toEqual([]);
+  });
+
+  it('空 id → {send-failed}，不碰 db', async () => {
+    const events: string[] = [];
+    const svc = new PasteService({
+      db: fakeDb(textRow('a1', 'x'), events),
+      helper: fakeHelper({ ok: true }),
+      tracker: fakeTracker(null),
+      getSettings: () => ({ autoPaste: true }),
+      writer: fakeWriter(events),
+    });
+
+    expect(await svc.copyItem('')).toEqual({ ok: false, reason: 'send-failed' });
+    expect(events).toEqual([]);
+  });
+
+  it('剪贴板被占用（writer 抛）→ {send-failed}，不假装成功', async () => {
+    const svc = new PasteService({
+      db: fakeDb(textRow('a1', 'x')),
+      helper: fakeHelper({ ok: true }),
+      tracker: fakeTracker(null),
+      getSettings: () => ({ autoPaste: true }),
+      writer: {
+        writeText: () => {
+          throw new Error('剪贴板被锁');
+        },
+        writeImage: () => {},
+      },
+    });
+
+    expect(await svc.copyItem('a1')).toEqual({ ok: false, reason: 'send-failed' });
+  });
+
+  it('空文本记录 → {send-failed}（不把空串塞进剪贴板）', async () => {
+    const writer = fakeWriter();
+    const svc = new PasteService({
+      db: fakeDb(textRow('a1', '')),
+      helper: fakeHelper({ ok: true }),
+      tracker: fakeTracker(null),
+      getSettings: () => ({ autoPaste: true }),
+      writer,
+    });
+
+    expect(await svc.copyItem('a1')).toEqual({ ok: false, reason: 'send-failed' });
+    expect(writer.texts).toEqual([]);
+  });
+});

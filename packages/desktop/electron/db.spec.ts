@@ -145,6 +145,73 @@ describe('分页、图片搜索与 text-group', () => {
   });
 });
 
+describe('count：状态栏「共 N 条」用真实总数', () => {
+  /** 造一批混合记录：文本/图片/链接/收藏。 */
+  function seed(db: Db) {
+    db.insertText('hello alpha', { now: 1000 });
+    db.insertText('https://example.com', { now: 2000 });
+    db.insertText('C:\\Users\\me\\file.txt', { now: 3000 });
+    const pinned = db.insertText('收藏的 alpha', { now: 4000, pinned: true });
+    db.insertImage(
+      { imagePath: 'images/i1.jpg', thumbPath: 'thumbs/i1.png', width: 1920, height: 1080, bytes: 1024, hash: 'h1' },
+      { now: 5000 },
+    );
+    return pinned;
+  }
+
+  it('不带条件时等于总条数，且不受 limit/offset 影响', () => {
+    const db = mem();
+    seed(db);
+
+    expect(db.count()).toBe(5);
+    expect(db.list({ limit: 2, offset: 0 })).toHaveLength(2);
+    // ★ 关键：分页只影响 list，不能影响总数（否则「共 N 条」会跟着翻页变）。
+    expect(db.count({ limit: 2, offset: 0 })).toBe(5);
+  });
+
+  it('★ 与 list 同一套条件：分类 / 搜索词 / 收藏都一样', () => {
+    const db = mem();
+    seed(db);
+
+    const cases = [
+      {},
+      { kind: 'image' as const },
+      { kind: 'text-group' as const },
+      { kind: 'link' as const },
+      { kind: 'favorite' as const },
+      { q: 'alpha' },
+      { q: '1920' },
+      { kind: 'text' as const, q: 'alpha' },
+      { q: '不存在的词' },
+    ];
+    for (const q of cases) {
+      expect(db.count(q)).toBe(db.list(q).length);
+    }
+  });
+
+  it('搜索词为空串时等同不带 q（界面清空搜索框的情况）', () => {
+    const db = mem();
+    seed(db);
+
+    expect(db.count({ q: '' })).toBe(5);
+    expect(db.count({ q: '   ' })).toBe(5);
+  });
+
+  it('收藏分类只数收藏项', () => {
+    const db = mem();
+    const pinned = seed(db);
+
+    expect(db.count({ kind: 'favorite' })).toBe(1);
+    expect(db.list({ kind: 'favorite' })[0]!.id).toBe(pinned.id);
+  });
+
+  it('空库返回 0（不是 undefined）', () => {
+    const db = mem();
+
+    expect(db.count()).toBe(0);
+  });
+});
+
 describe('settings 持久化', () => {
   it('默认值来自 DEFAULT_SETTINGS，setSettings 合并并返回完整对象', () => {
     const db = mem();

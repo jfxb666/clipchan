@@ -154,6 +154,8 @@ export interface Db {
   insertText(text: string, opts?: InsertTextOpts): InsertResult;
   insertImage(meta: ImageMeta, opts?: InsertImageOpts): InsertResult;
   list(q?: ListQuery): ClipItemDTO[];
+  /** 与 list 同条件的总条数（分页时界面显示"共 N 条"）。 */
+  count(q?: ListQuery): number;
   remove(id: string): ItemRow | null;
   removeMany(ids: string[]): ItemRow[];
   togglePin(id: string): boolean;
@@ -289,7 +291,8 @@ const KIND_GROUPS: Record<KindFilter, Kind[]> = {
 const IMAGE_DESC_SQL =
   "('图片 ' || width || '×' || height || ' · ' || CAST(bytes / 1024 AS INTEGER) || ' KB')";
 
-function buildListSql(q: ListQuery): { sql: string; params: unknown[] } {
+/** 只拼 WHERE：list 与 count 必须用同一套条件，否则「共 N 条」和列表对不上。 */
+function buildWhere(q: ListQuery): { where: string; params: unknown[] } {
   const params: unknown[] = [];
   const where: string[] = ['1 = 1'];
 
@@ -304,6 +307,11 @@ function buildListSql(q: ListQuery): { sql: string; params: unknown[] } {
     where.push(`(content LIKE '%' || ? || '%' OR (kind = 'image' AND ${IMAGE_DESC_SQL} LIKE '%' || ? || '%'))`);
     params.push(term, term);
   }
+  return { where: where.join(' AND '), params };
+}
+
+function buildListSql(q: ListQuery): { sql: string; params: unknown[] } {
+  const { where, params } = buildWhere(q);
 
   const rawLimit = typeof q.limit === 'number' && Number.isFinite(q.limit) ? Math.floor(q.limit) : DEFAULT_LIMIT;
   const limit = Math.min(MAX_LIMIT, Math.max(1, rawLimit));
@@ -311,7 +319,7 @@ function buildListSql(q: ListQuery): { sql: string; params: unknown[] } {
   const offset = Math.max(0, rawOffset);
 
   const sql =
-    'SELECT * FROM items WHERE ' + where.join(' AND ') +
+    'SELECT * FROM items WHERE ' + where +
     ' ORDER BY pinned DESC, created_at DESC, seq DESC LIMIT ? OFFSET ?';
   params.push(limit, offset);
   return { sql, params };
@@ -474,6 +482,14 @@ export function openDb(file: string): Db {
       const { sql, params } = buildListSql(q);
       const rows = raw.prepare(sql).all(...params) as ItemRow[];
       return rows.map(rowToDto);
+    },
+
+    count(q: ListQuery = {}): number {
+      const { where, params } = buildWhere(q);
+      const row = raw.prepare('SELECT COUNT(*) AS n FROM items WHERE ' + where).get(...params) as
+        | { n: number }
+        | undefined;
+      return row ? row.n : 0;
     },
 
     remove(id: string): ItemRow | null {

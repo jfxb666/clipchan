@@ -165,7 +165,17 @@ export interface ClipchanApi {
     clearUnpinned(): Promise<void>;
     clearAll(): Promise<void>;
     mergeSelected(ids: string[]): Promise<{ ok: boolean; id?: string; reason?: string }>;
+    /** 只复制到剪贴板，不贴回原窗口、不消耗目标窗口（右键「复制到剪贴板」）。 */
+    copy(id: string): Promise<PasteResult>;
+    /**
+     * 原图的可展示 URL（桌面端是 clipchan-img://image/... 协议 URL，手机端是 data URL）。
+     * 没有原图（文本行 / id 不存在 / 文件已丢）→ ''，不抛。
+     */
     getFullImage(id: string): Promise<string>;
+    /** 与 list 同条件的总条数（分页时界面要显示"共 N 条"而不是"已加载 N 条"）。 */
+    count(q: ListQuery): Promise<number>;
+    /** 导出全部记录为 JSON 文件，返回落盘路径；失败回 ok:false（不假装成功）。 */
+    exportAll(): Promise<{ ok: boolean; path?: string }>;
     /** 正文全文（列表预览是截断的）；图片行或 id 不存在 → ''。 */
     getText(id: string): Promise<string>;
     onChanged(cb: () => void): () => void;
@@ -219,6 +229,8 @@ export interface ClipchanApi {
     listModels(id: string): Promise<string[]>;
     test(id: string): Promise<{ ok: boolean; error?: AiError; model?: string }>;
     optimize(req: OptimizeRequest): Promise<OptimizeResult>;
+    /** 中断一次在途的优化请求（按 requestId）；没有在途请求时静默返回。 */
+    cancel(requestId: string): Promise<void>;
     /** 只投影 id/name/description（rules 不出主进程）。 */
     scenes(): Promise<{ id: string; name: string; description: string }[]>;
     /** 把优化结果写进剪贴板并贴回目标窗口（不进历史、不刷新排序）。 */

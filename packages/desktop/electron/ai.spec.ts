@@ -58,11 +58,46 @@ function fakeAdapter(): ProviderAdapter & { chatCalls: number } {
   return adapter;
 }
 
-function makeAi(seed: Record<string, unknown> = {}) {
+/** 假适配器：一直挂着，直到 signal 被 abort（用来测「停止」）。 */
+function hangingAdapter() {
+  return {
+    async chat(): Promise<string> {
+      throw new Error('这条用例只走流式');
+    },
+    chatStream(
+      _cfg: ProviderConfig,
+      _key: string,
+      _messages: unknown,
+      opts?: { signal?: AbortSignal },
+    ): Promise<string> {
+      return new Promise<string>((_resolve, reject) => {
+        const signal = opts?.signal;
+        if (!signal) {
+          reject(new Error('用例必须传 signal'));
+          return;
+        }
+        if (signal.aborted) {
+          reject(new Error('已中止'));
+          return;
+        }
+        signal.addEventListener('abort', () => reject(new Error('已中止')), { once: true });
+      });
+    },
+    async listModels(): Promise<string[]> {
+      return ['fake-model'];
+    },
+    async test(): Promise<{ ok: true; model: string }> {
+      return { ok: true, model: 'fake-model' };
+    },
+  } as unknown as ProviderAdapter;
+}
+
+function makeAi(seed: Record<string, unknown> = {}, adapterOverride?: ProviderAdapter) {
   const kv = fakeKv(seed);
-  const adapter = fakeAdapter();
+  const adapter = adapterOverride ?? fakeAdapter();
   const onChanged = vi.fn();
   const onDelta = vi.fn();
+  const onDeltaEnd = vi.fn();
   const api = createAi({
     kv,
     adapterFor: () => adapter,
@@ -70,8 +105,9 @@ function makeAi(seed: Record<string, unknown> = {}) {
     optimize: runOptimize,
     onChanged,
     onDelta,
+    onDeltaEnd,
   });
-  return { api, kv, adapter, onChanged, onDelta };
+  return { api, kv, adapter, onChanged, onDelta, onDeltaEnd };
 }
 
 const row = (over: Partial<AiProviderInput> = {}): AiProviderInput => ({
@@ -178,5 +214,58 @@ describe('ai IPC 主进程桥', () => {
     // 协议三值两边必须一致，否则界面选得出、主进程认不出。
     expect(p.protocol).toBe('anthropic');
     expect(PROVIDERS_KEY).toBe('aiProviders');
+  });
+});
+
+describe('ai.cancel：停止在途优化', () => {
+  const req = (requestId: string) => ({
+    providerId: 'p1',
+    text: '帮我写个周报',
+    sceneId: 'general',
+    mode: 'user' as const,
+    requestId,
+  });
+
+  it('★ cancel 让在途请求真的中止（不是只把界面上的 loading 关掉）', async () => {
+    const { api, onDeltaEnd } = makeAi({}, hangingAdapter());
+    await api.saveProvider(row({ apiKey: FULL_KEY }));
+
+    const pending = api.optimize(req('req-stop'));
+    // 让 optimize 真正进到 chatStream 挂住的状态，再发取消。
+    await new Promise((r) => setTimeout(r, 0));
+    await api.cancel('req-stop');
+
+    await expect(pending).rejects.toBeTruthy();
+    // 失败也要冲尾包：否则节流器里最后一段永远发不出去。
+    expect(onDeltaEnd).toHaveBeenCalledWith('req-stop');
+  });
+
+  it('cancel 未知 requestId 静默返回（重复点「停止」不报错）', async () => {
+    const { api } = makeAi();
+    await expect(api.cancel('从来没有过的 id')).resolves.toBeUndefined();
+  });
+
+  it('cancel 空串静默返回，不抛', async () => {
+    const { api } = makeAi();
+    await expect(api.cancel('')).resolves.toBeUndefined();
+  });
+
+  it('请求结束后取消器被清掉：再 cancel 同一个 id 不会误伤后来的请求', async () => {
+    const { api } = makeAi();
+    await api.saveProvider(row({ apiKey: FULL_KEY }));
+    await api.optimize(req('req-done'));
+
+    // 请求已结束，表里不该还留着这个 id；cancel 应当是 no-op 而不是抛。
+    await expect(api.cancel('req-done')).resolves.toBeUndefined();
+  });
+
+  it('已结束的请求被 cancel 不会把结果变成失败（幂等）', async () => {
+    const { api } = makeAi();
+    await api.saveProvider(row({ apiKey: FULL_KEY }));
+    const res = await api.optimize(req('req-ok'));
+
+    await api.cancel('req-ok');
+
+    expect(res.optimized).toBe('你是资深编辑，请把这段改清楚。');
   });
 });

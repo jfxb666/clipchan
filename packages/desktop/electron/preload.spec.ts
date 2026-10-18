@@ -10,7 +10,20 @@ import { ALL_INVOKE_CHANNELS, CH, EV } from './channels';
 
 /** core 的 ClipchanApi 上所有"会发请求"的方法名（按 spec §8.1 / types.ts）。 */
 const EXPECTED = {
-  items: ['list', 'paste', 'remove', 'togglePin', 'clearUnpinned', 'clearAll', 'mergeSelected', 'getFullImage', 'getText'],
+  items: [
+    'list',
+    'paste',
+    'remove',
+    'togglePin',
+    'clearUnpinned',
+    'clearAll',
+    'mergeSelected',
+    'copy',
+    'getFullImage',
+    'count',
+    'exportAll',
+    'getText',
+  ],
   settings: ['get', 'set'],
   ghost: ['get', 'set'],
   app: [
@@ -27,7 +40,17 @@ const EXPECTED = {
   ],
   clipboard: ['writeText'],
   wordcloud: ['today', 'exportPng'],
-  ai: ['listProviders', 'saveProvider', 'removeProvider', 'listModels', 'test', 'optimize', 'scenes', 'copyAndPaste'],
+  ai: [
+    'listProviders',
+    'saveProvider',
+    'removeProvider',
+    'listModels',
+    'test',
+    'optimize',
+    'cancel',
+    'scenes',
+    'copyAndPaste',
+  ],
 } as const;
 
 describe('channels 契约', () => {

@@ -174,23 +174,27 @@ export function addImage(dataUrl: string): ClipItemDTO {
  * core 的 getPlatform() 也能探测到（core 的探测顺序：注入 > globalThis.clipchan > 报错桩）。
  */
 export function createMobileAdapter(): PlatformAdapter {
+  /** list 与 count 共用的筛选：两边必须同一套条件，否则「共 N 条」和列表对不上。 */
+  const pickRecords = (q: ListQuery): MobileRecord[] => {
+    const kind = q.kind ?? 'all';
+    const needle = (q.q ?? '').trim().toLowerCase();
+    let picked = sortRecords(records).filter((r) => kindMatches(r.kind, kind));
+    if (needle.length > 0) {
+      // 大小写不敏感，同时匹配展示文本与原始内容（与桌面端 SQL 的 LIKE 行为一致）。
+      picked = picked.filter((r) => {
+        const hay = ((r.content ?? '') + ' ' + (r.kind === 'image' ? '图片' : '')).toLowerCase();
+        return hay.includes(needle);
+      });
+    }
+    return picked;
+  };
+
   const adapter: PlatformAdapter = {
     items: {
       async list(q: ListQuery): Promise<ClipItemDTO[]> {
-        const kind = q.kind ?? 'all';
-        const needle = (q.q ?? '').trim().toLowerCase();
         const offset = q.offset ?? 0;
         const limit = q.limit ?? 200;
-
-        let picked = sortRecords(records).filter((r) => kindMatches(r.kind, kind));
-        if (needle.length > 0) {
-          // 大小写不敏感，同时匹配展示文本与原始内容（与桌面端 SQL 的 LIKE 行为一致）。
-          picked = picked.filter((r) => {
-            const hay = ((r.content ?? '') + ' ' + (r.kind === 'image' ? '图片' : '')).toLowerCase();
-            return hay.includes(needle);
-          });
-        }
-        return picked.slice(offset, offset + limit).map(toDTO);
+        return pickRecords(q).slice(offset, offset + limit).map(toDTO);
       },
 
       async paste(id: string): Promise<PasteResult> {
@@ -242,6 +246,38 @@ export function createMobileAdapter(): PlatformAdapter {
       async clearAll(): Promise<void> {
         records.length = 0;
         emit(itemsSubs);
+      },
+
+      async copy(id: string): Promise<PasteResult> {
+        // 手机端没有"贴回原窗口"这回事，复制就是写系统剪贴板。
+        const rec = records.find((r) => r.id === id);
+        if (!rec) return { ok: false, reason: 'no-target' };
+        try {
+          if (rec.kind === 'image' && rec.dataUrl) {
+            const nav = globalThis.navigator as Navigator | undefined;
+            if (!nav?.clipboard || typeof ClipboardItem === 'undefined') {
+              throw new Error('当前环境不支持写图片到剪贴板');
+            }
+            const blob = await (await fetch(rec.dataUrl)).blob();
+            await nav.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+            return { ok: true };
+          }
+          const nav = globalThis.navigator as Navigator | undefined;
+          if (!nav?.clipboard?.writeText) throw new Error('当前环境不支持写剪贴板');
+          await nav.clipboard.writeText(rec.content ?? '');
+          return { ok: true };
+        } catch {
+          return { ok: false, reason: 'send-failed' };
+        }
+      },
+
+      async count(q: ListQuery): Promise<number> {
+        return pickRecords(q).length;
+      },
+
+      async exportAll(): Promise<{ ok: boolean; path?: string }> {
+        // 手机端没有文件系统落盘能力，如实报失败（不假装导出成功）。
+        return { ok: false };
       },
 
       async mergeSelected(ids: string[]): Promise<{ ok: boolean; id?: string; reason?: string }> {
@@ -445,6 +481,9 @@ export function createMobileAdapter(): PlatformAdapter {
         throw new Error('手机端暂不支持 AI 提示词优化');
       },
       async optimize(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async cancel(): Promise<never> {
         throw new Error('手机端暂不支持 AI 提示词优化');
       },
       async copyAndPaste(): Promise<never> {

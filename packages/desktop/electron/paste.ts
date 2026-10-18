@@ -165,6 +165,39 @@ export class PasteService {
   }
 
   /**
+   * 只把一条记录复制进剪贴板：不注入、不消耗目标窗口、不刷新排序。
+   *
+   * 与 pasteItem 的差别只在第 ③④⑤⑥ 步全跳过 —— 用户明确要"复制"而不是"粘贴"，
+   * 这时候去 touch（把它顶到最前）会打乱他自己排的顺序。
+   */
+  async copyItem(id: string): Promise<PasteResult> {
+    const itemId = typeof id === 'string' ? id : '';
+    if (itemId.length === 0) return SEND_FAILED;
+
+    const row = this.db.getRow(itemId);
+    if (!row) return COPY_ONLY;
+
+    try {
+      if (row.kind === 'image') {
+        const rel = row.image_path;
+        if (!rel || this.dataDir.length === 0) return SEND_FAILED;
+        const bytes = this.readImage(imageAbs(this.dataDir, rel));
+        if (!bytes || bytes.length === 0) return SEND_FAILED;
+        this.writer.writeImage(bytes);
+      } else {
+        const text = row.content ?? '';
+        if (text.length === 0) return SEND_FAILED;
+        this.writer.writeText(text);
+      }
+    } catch {
+      return SEND_FAILED;
+    }
+    // ★ 只复制成功回 ok:true。COPY_ONLY 是"粘贴时没有目标窗口"的语义，
+    //   用它表示复制成功会让上层分不清「复制好了」和「复制没成」。
+    return { ok: true };
+  }
+
+  /**
    * 把一段现成的文本复制进剪贴板并尝试自动贴回目标窗口（优化面板「复制并粘贴」）。
    *
    * 与 pasteItem 的第 ②③④⑤⑥ 步同构，唯一区别是内容来自入参：

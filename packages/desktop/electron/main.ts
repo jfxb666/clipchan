@@ -12,7 +12,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_SETTINGS } from '@clipchan/core';
-import type { Capabilities, GhostState, NavigateTarget, Settings } from '@clipchan/core';
+import type { Capabilities, GhostState, ListQuery, NavigateTarget, Settings } from '@clipchan/core';
 import { adapterFor } from '@clipchan/ai';
 import { optimize as runOptimize } from '@clipchan/ai';
 import { CH, EV } from './channels';
@@ -25,7 +25,7 @@ import { runLegacyMigration } from './migrate-runner';
 import { clearUnpinnedWithFiles, deleteImageFiles, enforceImageBudget, removeItemsWithFiles } from './images';
 import { sweepOrphans } from './images-policy';
 import { imageAbs, imagesDir, thumbsDir, dbFile, resolveDataDir } from './paths';
-import { THUMB_SCHEME, mapThumbUrl, resolveThumbRequest } from './thumb-url';
+import { THUMB_SCHEME, imageUrlFor, mapThumbUrl, resolveImageRequest, resolveThumbRequest } from './thumb-url';
 import { registerHotkeys, unregisterHotkeys } from './hotkeys';
 import { makeBroadcaster, registerIpc, registeredChannels } from './ipc';
 import type { IpcHandler } from './ipc';
@@ -229,7 +229,9 @@ function setupDataDir(): string {
  */
 function registerThumbProtocol(dataDir: string): void {
   protocol.handle(THUMB_SCHEME, (request) => {
-    const abs = resolveThumbRequest(request.url, dataDir);
+    // ★ 同一个 scheme 两个 host：thumb 读 thumbs/，image 读 images/，各自白名单独立。
+    const abs =
+      resolveThumbRequest(request.url, dataDir) ?? resolveImageRequest(request.url, dataDir);
     if (!abs || !fs.existsSync(abs)) {
       return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
     }
@@ -435,11 +437,51 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       broadcast.itemsChanged();
       return removed;
     },
+    // ★ 原图给的是**协议 URL**，不是磁盘绝对路径：渲染层的 <img src> 认不了 file://，
+    //   而且绝对路径一旦离开主进程就再也收不回来（spec §9.2 的边界）。
     [CH.items.getFullImage]: (_e, id: string) => {
       const row = needDb().getImageRow(String(id));
       if (!row || !row.image_path) return '';
       const abs = imageAbs(rt.dataDir, row.image_path);
-      return fs.existsSync(abs) ? abs : '';
+      if (!fs.existsSync(abs)) return '';
+      return imageUrlFor(row.image_path) ?? '';
+    },
+    [CH.items.count]: (_e, q: ListQuery) => needDb().count(q ?? {}),
+    // ★ 导出：写成 JSON 落到数据目录，只回路径。图片只导相对路径（不把二进制塞进 JSON）。
+    [CH.items.exportAll]: () => {
+      try {
+        const rows = needDb().raw
+          .prepare('SELECT * FROM items ORDER BY created_at DESC, seq DESC')
+          .all() as Record<string, unknown>[];
+        const payload = {
+          app: 'Clipchan',
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          items: rows,
+        };
+        // 文件名带本地时间戳（导出可能一天做多次，同名会互相覆盖）。
+        const d = new Date();
+        const pad = (n: number): string => String(n).padStart(2, '0');
+        const stamp =
+          d.getFullYear() +
+          pad(d.getMonth() + 1) +
+          pad(d.getDate()) +
+          '-' +
+          pad(d.getHours()) +
+          pad(d.getMinutes()) +
+          pad(d.getSeconds());
+        const file = path.join(rt.dataDir, 'export-' + stamp + '.json');
+        fs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8');
+        return { ok: true, path: file };
+      } catch (e) {
+        console.warn('[export] 导出失败：' + String(e));
+        return { ok: false };
+      }
+    },
+    [CH.items.copy]: (_e, id: string) => {
+      const svc = pasteSvc;
+      if (!svc) return { ok: false, reason: 'send-failed' };
+      return Promise.resolve(svc.copyItem(String(id)));
     },
     // ★ 正文全文（列表预览是截断的）：优化面板要原文，图片行/不存在一律空串。
     [CH.items.getText]: (_e, id: string) => needDb().getText(String(id)),

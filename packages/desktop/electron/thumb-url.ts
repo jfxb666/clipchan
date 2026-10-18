@@ -11,12 +11,19 @@
  * ★ 只放行 `thumbs/` 前缀，且拒绝 `..` 与 NUL：原图目录不通过这个协议暴露。
  */
 import * as path from 'node:path';
-import { THUMBS_DIR_NAME, thumbsDir } from './paths';
+import { IMAGES_DIR_NAME, THUMBS_DIR_NAME, imagesDir, thumbsDir } from './paths';
 
 /** 自定义协议名（与 index.html 的 CSP `img-src ... clipchan-img:` 对应）。 */
 export const THUMB_SCHEME = 'clipchan-img';
 /** URL 主机名固定为 thumb，用作「这条 URL 是缩略图」的标记。 */
 export const THUMB_HOST = 'thumb';
+/**
+ * 原图主机名。
+ *
+ * ★ 与 thumb 分成两个主机而不是一个：协议处理器按 hostname 决定读哪个目录，
+ *   缩略图与原图各有各的目录白名单，一条 URL 只能命中其中一个。
+ */
+export const IMAGE_HOST = 'image';
 
 /** 相对路径 → 安全路径段；非法输入返回 null（空、含 `..`/`.`、含 NUL）。 */
 function safeSegments(rel: string): string[] | null {
@@ -83,6 +90,46 @@ export function resolveThumbRequest(url: string, dataDir: string): string | null
  * - 已经是协议 URL 的原样返回（幂等）；
  * - 相对路径非法 → thumbUrl 置空（界面回落到占位图标，而不是破图）。
  */
+/** 原图相对路径 → `clipchan-img://image/images/<id>.jpg`；非法输入返回 undefined。 */
+export function imageUrlFor(relPath: string | null | undefined): string | undefined {
+  if (typeof relPath !== 'string') return undefined;
+  const parts = safeSegments(relPath);
+  if (!parts) return undefined;
+  if (parts[0] !== IMAGES_DIR_NAME) return undefined;
+  if (parts.length < 2) return undefined;
+  return THUMB_SCHEME + '://' + IMAGE_HOST + '/' + parts.map(encodeURIComponent).join('/');
+}
+
+/**
+ * 协议 URL → 原图磁盘绝对路径；只接受 `clipchan-img://image/images/...`。
+ * 与 resolveThumbRequest 同一套双重防线（目录前缀 + 解析结果必须落在目录内部）。
+ */
+export function resolveImageRequest(url: string, dataDir: string): string | null {
+  if (typeof url !== 'string' || url.length === 0) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== THUMB_SCHEME + ':') return null;
+  if (parsed.hostname !== IMAGE_HOST) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(parsed.pathname);
+  } catch {
+    return null;
+  }
+  const parts = safeSegments(decoded.replace(/^\/+/, ''));
+  if (!parts) return null;
+  if (parts[0] !== IMAGES_DIR_NAME) return null;
+  if (parts.length < 2) return null;
+  const base = path.resolve(imagesDir(dataDir));
+  const abs = path.resolve(base, ...parts.slice(1));
+  if (!abs.startsWith(base + path.sep)) return null;
+  return abs;
+}
+
 export function mapThumbUrl<T extends object>(dto: T): T {
   const rel = (dto as { thumbUrl?: unknown } | null | undefined)?.thumbUrl;
   if (typeof rel !== 'string' || rel.length === 0) return dto;
