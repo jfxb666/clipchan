@@ -25,6 +25,7 @@ Electron + React + SQLite，界面代码与手机端壳共用一份。
 | `clipchan.db` | SQLite 库（历史记录 + 设置）。WAL 模式，强杀进程也不会整份丢历史 |
 | `images\` | 原图（JPEG q80 或 PNG，长边 ≤ 2560） |
 | `thumbs\` | 缩略图（PNG，长边 128） |
+| `export-<日期>-<时间>.json` | 设置 → 数据 →「导出 JSON」写出的全量备份 |
 | `history.json.migrated` | 旧版数据导入后的留档（改名即表示已迁移） |
 | `settings.json` | 旧版设置文件。**新版只读不改**，设置存在 `clipchan.db` 里 |
 
@@ -34,18 +35,28 @@ Electron + React + SQLite，界面代码与手机端壳共用一份。
 
 | 按键 | 作用 |
 | --- | --- |
-| `Ctrl+`` | 唤起/隐藏主面板 |
-| `Alt+C` | 唤起/隐藏小组件 |
+| `Ctrl+`` | 唤起/隐藏主面板（可在设置里改成别的组合） |
+| `Alt+C` | 唤起/隐藏小组件（同上） |
 | `↑` / `↓` | 在列表里上下选择 |
 | `Enter` | 粘贴选中项（开了自动粘贴就直接贴进原窗口） |
 | `Ctrl+D` | 收藏 / 取消收藏 |
 | `Ctrl+M` | 把当前选中的多条拼接成一条 |
 | `Delete` | 删除选中项 |
-| `Ctrl+Delete` | 清空所有未收藏项 |
+| `Ctrl+Delete` | 清空所有未收藏项（按两次才执行，3 秒内有效） |
 | `Ctrl+F` | 聚焦搜索框 |
 | `Esc` | 隐藏面板 |
 
 搜索框里按 `↓` 跳到列表、按 `↑` 回到搜索框；在搜索框里打字不会被快捷键拦。
+
+「唤起面板」与「切换小组件」两个热键可以在 **设置 → 快捷键** 里点「修改」重新录制；按 Esc 取消、按 Backspace 恢复默认。不带 Ctrl/Alt/Shift 的裸键（字母、空格）会被拒绝——那会抢占正常打字。
+
+## 右键菜单与查看全文
+
+在任意卡片上点右键，菜单从上到下是：**查看全文 / 查看大图**（图片、被截断的长文本才有）→ **复制到剪贴板**（只写剪贴板，不贴回原窗口，也不改动记录顺序）→ **复制并粘贴**（等于双击）→ **优化提示词**（图片没有）→ **收藏** → **删除**。
+
+长文本在列表里只显示前 200 字，库里最多存 10 万字；「查看全文」打开浮层看完整内容并可「复制全文」。图片卡片右键「查看大图」按原图分辨率显示，不是 64×64 缩略图。
+
+搜索词在列表里会高亮命中片段。
 
 ## AI 提示词优化
 
@@ -107,7 +118,7 @@ Key 只在主进程读取，界面上只回显掩码（`sk-…abcd`）；编辑�
 pnpm install      # pnpm 11 的构建脚本许可写在 pnpm-workspace.yaml 的 allowBuilds 里；老版本 pnpm 才需要 --allow-build=electron --allow-build=esbuild --allow-build=better-sqlite3
 pnpm dev          # 开发模式（Vite + Electron 热重载）
 pnpm typecheck    # tsc -b
-pnpm test         # vitest run，39 个文件 / 360 个用例（缺真实助手 exe 时另有 4 条跳过）
+pnpm test         # vitest run，47 个文件 / 501 个用例（缺真实助手 exe 时另有 4 条跳过）
 pnpm build:helper # 编译 C# 原生助手 → packages/desktop/helper/dist/clipchan-helper.exe
 pnpm smoke:main   # 主进程冒烟（13 项断言）
 pnpm build        # 打包 → release/Clipchan.exe 与 release/Clipchan-Setup-<版本>.exe
