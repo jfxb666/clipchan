@@ -3,9 +3,9 @@
 Windows 剪贴板历史工具。Ctrl+` 唤起面板，选中即粘贴回刚才那个窗口。
 Electron + React + SQLite，界面代码与手机端壳共用一份。
 
-- **下载**：[Releases · v0.1.0](https://github.com/jfxb666/clipchan/releases/tag/v0.1.0)
+- **下载**：[Releases · v0.2.0](https://github.com/jfxb666/clipchan/releases/tag/v0.2.0)
   - 免安装版 `Clipchan.exe`（单文件，双击即用，不要求装任何运行时）
-  - 安装版 `Clipchan-Setup-0.1.0.exe`
+  - 安装版 `Clipchan-Setup-0.2.0.exe`
 - **源码**：本仓库（私有）。构建产物不进版本库，由 `pnpm build` 生成到 `release\`。
 
 ## 安装与首次运行
