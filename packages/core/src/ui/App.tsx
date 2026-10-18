@@ -10,7 +10,11 @@ import { SettingsView } from './SettingsView';
 import { Sidebar } from './Sidebar';
 import { TitleBar } from './TitleBar';
 import { ToastStack } from './Toast';
-import { pasteToast, type ToastTone } from './toastText';
+import { copyToast, pasteToast, type ToastTone } from './toastText';
+import { ContextMenu } from './ContextMenuView';
+import { menuItemsFor, type MenuAction } from './contextMenu';
+import { TextViewer } from './TextViewer';
+import { viewerKindOf, viewerTitleOf } from './viewer';
 import { WidgetView, WIDGET_PREVIEW_COUNT } from './WidgetView';
 import { widgetWindowHeight } from './widgetFit';
 import { OptimizeView } from './OptimizeViewCard';
@@ -28,6 +32,23 @@ import { cn } from './util';
 /** 连续复制提示条的存活时间（spec §7.5：5 秒后淡出，选中保持不动）。 */
 const MERGE_HINT_TTL_MS = 5000;
 
+/** 右键菜单的落点（屏幕坐标，由 ClipCard 的 clientX/clientY 带出）。 */
+interface MenuAnchor {
+  id: string;
+  x: number;
+  y: number;
+}
+
+/** 全文 / 大图浮层的状态：内容异步取，取之前先开壳显示「正在读取…」。 */
+interface ViewerState {
+  id: string;
+  kind: 'text' | 'image';
+  title: string;
+  text?: string;
+  imageUrl?: string;
+  loading: boolean;
+}
+
 export function App() {
   const view = useClipStore((s) => s.view);
   const mode = useClipStore((s) => s.mode);
@@ -36,6 +57,7 @@ export function App() {
   const items = useClipStore((s) => s.items);
   const selectedIds = useClipStore((s) => s.selectedIds);
   const loading = useClipStore((s) => s.loading);
+  const total = useClipStore((s) => s.total);
   const settings = useClipStore((s) => s.settings);
   const ghost = useClipStore((s) => s.ghost);
   const capabilities = useClipStore((s) => s.capabilities);
@@ -54,6 +76,11 @@ export function App() {
    * 这里不放进 store —— 只有设置页用得到，也没必要跟着全局状态走。
    */
   const [aiProviders, setAiProviders] = useState<AiProvider[]>([]);
+
+  /** 右键菜单落点；null = 不显示。 */
+  const [menu, setMenu] = useState<MenuAnchor | null>(null);
+  /** 全文 / 大图浮层；null = 关闭。 */
+  const [viewer, setViewer] = useState<ViewerState | null>(null);
 
   /** 小组件形态下收起侧栏，把宽度让给内容（spec §6.6 切形态改布局）。 */
   const widgetCompact = mode === 'widget';
@@ -149,7 +176,8 @@ export function App() {
           void store.togglePin(action.id);
           return;
         case 'clear-unpinned':
-          void store.clearUnpinned();
+          // 键盘路径也要二次确认（设置页是「再点一次」，这里改成 3 秒内再按一次）。
+          store.pressClearUnpinned();
           return;
         case 'remove-selected':
           void store.removeSelected();
@@ -215,6 +243,89 @@ export function App() {
       useClipStore.getState().toast('读取全文失败，请重试', 'warn');
     }
   }, []);
+
+  /** 只复制不粘贴（右键菜单 / 与双击粘贴区分开）：不刷新排序、不贴回前台窗口。 */
+  const copyItem = useCallback(async (id: string) => {
+    useClipStore.getState().select(id);
+    try {
+      const { text, tone } = copyToast(await getPlatform().items.copy(id));
+      useClipStore.getState().toast(text, tone);
+    } catch (err) {
+      useClipStore.getState().toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  }, []);
+
+  /**
+   * 查看全文 / 大图：先开壳再取内容（取图是异步的，空壳比空白更可解释）。
+   * 图片走协议 URL（主进程不出磁盘路径），文本走 items.getText 拿未截断的原文。
+   */
+  const openViewer = useCallback(async (id: string) => {
+    const item = useClipStore.getState().items.find((it) => it.id === id);
+    const kind = viewerKindOf(item);
+    if (kind === 'none') return;
+    const title = viewerTitleOf(item);
+    if (kind === 'image') {
+      setViewer({ id, kind, title, loading: true });
+      try {
+        const url = await getPlatform().items.getFullImage(id);
+        setViewer((cur) => (cur && cur.id === id ? { ...cur, imageUrl: url, loading: false } : cur));
+      } catch {
+        setViewer((cur) => (cur && cur.id === id ? { ...cur, loading: false } : cur));
+      }
+      return;
+    }
+    setViewer({ id, kind, title, loading: true });
+    try {
+      const text = await getPlatform().items.getText(id);
+      setViewer((cur) =>
+        cur && cur.id === id
+          ? { ...cur, text: text === '' ? (item?.preview ?? '') : text, loading: false }
+          : cur,
+      );
+    } catch {
+      // 取全文失败就退回卡片上已有的预览，不让用户面对一个空壳。
+      setViewer((cur) => (cur && cur.id === id ? { ...cur, text: item?.preview ?? '', loading: false } : cur));
+    }
+  }, []);
+
+  const menuItems = useCallback((id: string) => {
+    const item = useClipStore.getState().items.find((it) => it.id === id);
+    if (!item) return [];
+    return menuItemsFor({
+      kind: item.kind,
+      pinned: item.pinned,
+      truncated: item.truncated,
+      // 文本记录一律给「查看全文」：列表预览固定截到 200 字，库里最多 10 万字。
+      hasFullText: item.kind !== 'image',
+    });
+  }, []);
+
+  const pickMenu = useCallback(
+    (action: MenuAction, id: string) => {
+      setMenu(null);
+      switch (action) {
+        case 'copy':
+          void copyItem(id);
+          return;
+        case 'paste':
+          void paste(id);
+          return;
+        case 'view':
+          void openViewer(id);
+          return;
+        case 'optimize':
+          void openOptimize(id);
+          return;
+        case 'pin':
+          void useClipStore.getState().togglePin(id);
+          return;
+        case 'remove':
+          void useClipStore.getState().remove(id);
+          return;
+      }
+    },
+    [copyItem, openOptimize, openViewer, paste],
+  );
 
   // 优化面板的平台动作：组件不碰 getPlatform，一律由 App 注入（与设置页一致）。
   const loadScenes = useCallback(() => getPlatform().ai.scenes(), []);
@@ -377,12 +488,14 @@ export function App() {
                 onTogglePin={(id) => void useClipStore.getState().togglePin(id)}
                 onOptimize={(id) => void openOptimize(id)}
                 onLoadMore={() => void useClipStore.getState().loadMore()}
+                onContextMenu={(id, x, y) => setMenu({ id, x, y })}
               />
 
               <div className="flex shrink-0 items-center gap-tight border-t border-line px-base py-[6px] text-[11px] text-ink-3">
-                <span>共 {items.length} 条</span>
+                {/* 真实总数（不是已加载条数）：列表分页 200 条一页，用 items.length 会少报。 */}
+                <span>共 {total} 条</span>
                 <span>·</span>
-                <span>单击选中 · 双击粘贴</span>
+                <span>单击选中 · 双击粘贴 · 右键更多</span>
                 <div className="flex-1" />
                 <button
                   type="button"
@@ -410,6 +523,7 @@ export function App() {
               onClearUnpinned={clearUnpinned}
               onClearAll={clearAll}
               onOpenDataFolder={openDataFolder}
+              onExportAll={() => void useClipStore.getState().exportAll()}
               onSetAutoStart={setAutoStart}
               onToggleMode={toggleMode}
               aiProviders={aiProviders}
@@ -430,6 +544,7 @@ export function App() {
               onCopyToClipboard={writeClipboard}
               onOptimizeDelta={subscribeOptimizeDelta}
               onToast={toast}
+              onCancel={(requestId) => void getPlatform().ai.cancel(requestId)}
               onGoSettings={() => useClipStore.getState().setView('settings')}
             />
           ) : null}
@@ -449,6 +564,27 @@ export function App() {
         mode={mode}
         onResizeBy={(dw, dh, shape) => void getPlatform().app.resizeBy(dw, dh, shape)}
         onWidgetWidth={(px) => void useClipStore.getState().setWidgetSize(px)}
+      />
+
+      {/* 右键菜单与查看器都渲染在最后：它们要盖住所有视图（含小组件形态）。 */}
+      {menu ? (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems(menu.id)}
+          onPick={(action) => pickMenu(action, menu.id)}
+          onClose={() => setMenu(null)}
+        />
+      ) : null}
+
+      <TextViewer
+        open={viewer !== null}
+        title={viewer?.title ?? ''}
+        text={viewer?.text}
+        imageUrl={viewer?.imageUrl}
+        loading={viewer?.loading}
+        onCopy={(text) => void writeClipboard(text).then(() => toast('已复制到剪贴板', 'ok'))}
+        onClose={() => setViewer(null)}
       />
 
       <ToastStack toasts={toasts} onDismiss={(id) => useClipStore.getState().dismissToast(id)} />

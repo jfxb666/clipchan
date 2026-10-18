@@ -1,0 +1,88 @@
+import { describe, expect, it } from 'vitest';
+import { clampMenuPosition, menuItemsFor } from './contextMenu';
+
+const actions = (item: Parameters<typeof menuItemsFor>[0]) => menuItemsFor(item).map((entry) => entry.action);
+const labels = (item: Parameters<typeof menuItemsFor>[0]) => menuItemsFor(item).map((entry) => entry.label);
+
+describe('menuItemsFor', () => {
+  it('图片没有 optimize', () => {
+    expect(actions({ kind: 'image', pinned: false })).not.toContain('optimize');
+  });
+
+  it('图片有 view，文案是「查看大图」', () => {
+    const view = menuItemsFor({ kind: 'image', pinned: false }).find((entry) => entry.action === 'view');
+    expect(view?.label).toBe('查看大图');
+  });
+
+  it('文本 truncated 有 view，文案是「查看全文」', () => {
+    const view = menuItemsFor({ kind: 'text', pinned: false, truncated: true }).find(
+      (entry) => entry.action === 'view',
+    );
+    expect(view?.label).toBe('查看全文');
+  });
+
+  it('hasFullText 也算有 view', () => {
+    expect(actions({ kind: 'code', pinned: false, hasFullText: true })).toContain('view');
+  });
+
+  it('普通文本没有 view', () => {
+    expect(actions({ kind: 'text', pinned: false })).not.toContain('view');
+    expect(actions({ kind: 'link', pinned: false, truncated: false })).not.toContain('view');
+  });
+
+  it('pinned 切换「收藏 / 取消收藏」', () => {
+    expect(labels({ kind: 'text', pinned: false })).toContain('收藏');
+    expect(labels({ kind: 'text', pinned: true })).toContain('取消收藏');
+    expect(labels({ kind: 'text', pinned: true })).not.toContain('收藏');
+  });
+
+  it('顺序：view → copy → paste → optimize → pin → remove', () => {
+    expect(actions({ kind: 'text', pinned: false, truncated: true })).toEqual([
+      'view',
+      'copy',
+      'paste',
+      'optimize',
+      'pin',
+      'remove',
+    ]);
+    expect(actions({ kind: 'image', pinned: true })).toEqual(['view', 'copy', 'paste', 'pin', 'remove']);
+  });
+
+  it('remove 带 danger，pin 带 Ctrl+D 提示，其余不带', () => {
+    const items = menuItemsFor({ kind: 'text', pinned: false });
+    expect(items.find((entry) => entry.action === 'remove')?.danger).toBe(true);
+    expect(items.find((entry) => entry.action === 'pin')?.hint).toBe('Ctrl+D');
+    expect(items.find((entry) => entry.action === 'copy')?.danger).toBeUndefined();
+  });
+});
+
+describe('clampMenuPosition', () => {
+  const size = { width: 200, height: 100 };
+  const viewport = { width: 800, height: 600 };
+
+  it('右下越界时上翻并右钳', () => {
+    expect(clampMenuPosition(790, 590, size, viewport)).toEqual({ x: 592, y: 490 });
+  });
+
+  it('不越左上界（负坐标被钳到 margin）', () => {
+    expect(clampMenuPosition(-40, -40, size, viewport)).toEqual({ x: 8, y: 8 });
+  });
+
+  it('空间充足时原样返回', () => {
+    expect(clampMenuPosition(300, 200, size, viewport)).toEqual({ x: 300, y: 200 });
+  });
+
+  it('上翻后仍为负时钳到 margin', () => {
+    const tall = { width: 200, height: 400 };
+    expect(clampMenuPosition(100, 250, tall, viewport).y).toBe(8);
+  });
+
+  it('margin 可自定义', () => {
+    expect(clampMenuPosition(0, 0, size, viewport, 20)).toEqual({ x: 20, y: 20 });
+  });
+
+  it('视口比菜单还小时不让左上角出屏', () => {
+    const huge = { width: 900, height: 700 };
+    expect(clampMenuPosition(500, 500, huge, { width: 400, height: 300 })).toEqual({ x: 8, y: 8 });
+  });
+});

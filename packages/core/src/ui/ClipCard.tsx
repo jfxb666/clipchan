@@ -1,9 +1,14 @@
 import type { CSSProperties } from 'react';
+import { Fragment } from 'react';
 import { motion } from 'framer-motion';
 import { ImageIcon, Sparkles, Star } from 'lucide-react';
 import type { ClipItemDTO } from '../types';
 import { TypeBadge } from './TypeBadge';
+import { highlightSegments } from './highlight';
 import { cn, formatTime } from './util';
+
+/** 搜索命中片段：用 accent-soft 底衬，暗色主题下同一个变量会自己变深。 */
+const HIT_CLASS = 'rounded-sm bg-[var(--cc-accent-soft)] px-0.5 text-[var(--cc-accent)]';
 
 /**
  * 列表卡片（spec §6.3 / §6.5）。
@@ -12,25 +17,34 @@ import { cn, formatTime } from './util';
  *
  * 长列表裁剪用 CSS content-visibility，不引虚拟滚动库（spec §8.1）。
  */
-export function ClipCard({
-  item,
-  selected,
-  onSelect,
-  onPaste,
-  onTogglePin,
-  onHover,
-  onOptimize,
-}: {
+export interface ClipCardProps {
   item: ClipItemDTO;
   selected: boolean;
+  /** 当前搜索词：命中的片段加底衬，空串表示不高亮。 */
+  term?: string;
   onSelect: (id: string, opts?: { multi?: boolean }) => void;
   onPaste: (id: string) => void;
   onTogglePin: (id: string) => void;
   onHover?: (id: string | null) => void;
   /** 打开优化面板并带出全文；未传则不渲染「优化」按钮。 */
   onOptimize?: (id: string) => void;
-}) {
+  /** 右键菜单入口：回调里带出屏幕坐标，菜单由上层定位。 */
+  onContextMenu?: (id: string, x: number, y: number) => void;
+}
+
+export function ClipCard({
+  item,
+  selected,
+  term = '',
+  onSelect,
+  onPaste,
+  onTogglePin,
+  onHover,
+  onOptimize,
+  onContextMenu,
+}: ClipCardProps) {
   const isCode = item.kind === 'code';
+  const segments = highlightSegments(item.preview, term);
   return (
     <motion.div
       layout
@@ -41,6 +55,10 @@ export function ClipCard({
         onSelect(item.id, multi ? { multi: true } : undefined);
       }}
       onDoubleClick={() => onPaste(item.id)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onContextMenu?.(item.id, event.clientX, event.clientY);
+      }}
       onMouseEnter={() => onHover?.(item.id)}
       onMouseLeave={() => onHover?.(null)}
       title="单击选中 · 双击粘贴"
@@ -76,7 +94,15 @@ export function ClipCard({
             isCode && 'font-mono text-[12px]',
           )}
         >
-          {item.preview}
+          {segments.map((segment, index) =>
+            segment.hit ? (
+              <mark key={index} className={HIT_CLASS}>
+                {segment.text}
+              </mark>
+            ) : (
+              <Fragment key={index}>{segment.text}</Fragment>
+            ),
+          )}
         </p>
         <div className="mt-tight flex items-center gap-tight text-[11px] text-ink-3">
           <span>{formatTime(item.createdAt)}</span>

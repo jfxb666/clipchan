@@ -61,11 +61,30 @@ export {
   validateProvider,
 } from './aiProviderForm';
 export { badgeOf, filterKindOf, emptyHintOf, type Badge, type BadgeIcon } from './badges';
+export { highlightSegments, type HighlightSegment } from './highlight';
+export {
+  clampMenuPosition,
+  menuItemsFor,
+  type MenuAction,
+  type MenuItem,
+  type MenuSource,
+} from './contextMenu';
+export { ContextMenu, type ContextMenuProps } from './ContextMenuView';
+export { viewerKindOf, viewerTitleOf, type ViewerKind, type ViewerSource } from './viewer';
+export { TextViewer } from './TextViewer';
+export {
+  acceleratorLabel,
+  isValidAccelerator,
+  keyEventToAccelerator,
+  type HotkeyKeyEvent,
+} from './settingsHotkey';
+export { HotkeyRecorder } from './HotkeyRecorder';
 export {
   GHOST_RESUME_TOAST,
   GHOST_SKIP_TOAST,
   ghostOnToast,
   mergeToast,
+  copyToast,
   pasteToast,
   type ToastTone,
 } from './toastText';

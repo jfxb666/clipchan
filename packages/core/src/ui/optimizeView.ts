@@ -109,6 +109,65 @@ export function endStream(): null {
   return null;
 }
 
+/**
+ * 优化面板的草稿：面板切走会被卸载（App 条件渲染），已输入的原文、场景、模式、
+ * 模型与已生成结果靠它续上。模块级状态——同一次会话里只有一块面板。
+ */
+export interface OptimizeDraft {
+  /** 打开面板时的原文：用来判断草稿属于哪条记录。 */
+  source: string;
+  sceneId: string;
+  mode: 'user' | 'system';
+  providerId: string;
+  /** 「原文」框里用户改过的内容（可能与 source 不同）。 */
+  input: string;
+  /** 已生成的结果，流式期间的半成品也算。 */
+  output: string;
+  notes: string[];
+}
+
+let draft: OptimizeDraft | null = null;
+
+/**
+ * 入参是组件状态，形状不对（非对象 / 字段类型不符）就整份忽略：
+ * 宁可少恢复一点，也不把脏数据摊到面板上，更不抛错打断渲染。
+ */
+function sanitizeDraft(raw: unknown): OptimizeDraft | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const value = raw as Record<string, unknown>;
+  const { source, sceneId, mode, providerId, input, output } = value;
+  if (typeof source !== 'string' || typeof sceneId !== 'string' || typeof providerId !== 'string') return null;
+  if (typeof input !== 'string' || typeof output !== 'string') return null;
+  if (mode !== 'user' && mode !== 'system') return null;
+  const notesValue = value.notes;
+  if (!Array.isArray(notesValue)) return null;
+  const notes: string[] = [];
+  for (const note of notesValue as unknown[]) {
+    if (typeof note !== 'string') return null;
+    notes.push(note);
+  }
+  return { source, sceneId, mode, providerId, input, output, notes };
+}
+
+/** 存草稿：脏入参被忽略（已有草稿保持不变）。 */
+export function saveDraft(d: OptimizeDraft): void {
+  const clean = sanitizeDraft(d);
+  if (clean === null) return;
+  draft = clean;
+}
+
+/** 取出并清空：草稿只恢复一次，免得下次挂载把更旧的内容又盖回来。 */
+export function takeDraft(): OptimizeDraft | null {
+  const current = draft;
+  draft = null;
+  if (current === null) return null;
+  return { ...current, notes: [...current.notes] };
+}
+
+export function clearDraft(): void {
+  draft = null;
+}
+
 /** 「复制」成功后的固定文案：只写剪贴板，不贴回目标窗口。 */
 export const COPIED_TOAST = '已复制到剪贴板';
 
@@ -129,4 +188,11 @@ function failureDetail(err: unknown): string {
 export function copyFailedToast(err: unknown): { text: string; tone: ToastTone } {
   const detail = failureDetail(err);
   return { text: detail === '' ? COPY_FAILED_TOAST : COPY_FAILED_TOAST + '：' + detail, tone: 'error' };
+}
+
+/** 用户主动「停止」不是失败，色调用 ok。 */
+export const STOPPED_TOAST = '已停止';
+
+export function stoppedToast(): { text: string; tone: ToastTone } {
+  return { text: STOPPED_TOAST, tone: 'ok' };
 }

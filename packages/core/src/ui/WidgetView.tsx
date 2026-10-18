@@ -72,7 +72,9 @@ function WidgetRow({
         onDoubleClick={(event) => event.stopPropagation()}
         className={cn(
           'shrink-0 rounded-full p-[2px] transition-colors',
-          item.pinned ? 'text-[var(--cc-warm)]' : 'text-ink-3 opacity-0 group-hover:opacity-100',
+          item.pinned
+            ? 'text-[var(--cc-warm)]'
+            : 'text-ink-3 opacity-60 transition-colors group-hover:opacity-100',
         )}
       >
         <Star size={11} fill={item.pinned ? 'currentColor' : 'none'} aria-hidden />

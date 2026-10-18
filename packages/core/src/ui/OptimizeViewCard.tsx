@@ -12,7 +12,11 @@ import {
   endStream,
   mergeDelta,
   newRequestId,
+  saveDraft,
+  stoppedToast,
+  takeDraft,
 } from './optimizeView';
+import type { OptimizeDraft } from './optimizeView';
 import { pasteToast } from './toastText';
 import { cn } from './util';
 
@@ -56,6 +60,8 @@ export interface OptimizeViewProps {
   onCopyToClipboard: (text: string) => Promise<void>;
   /** 订阅主进程的流式增量（App 注入 ai.onOptimizeDelta）；返回值用于取消订阅。 */
   onOptimizeDelta: (cb: (delta: OptimizeDelta) => void) => () => void;
+  /** 按 requestId 中断在途请求（App 注入 ai.cancelOptimize）；不传时只清本地状态。 */
+  onCancel?: (requestId: string) => void;
   onToast: (text: string, tone?: ToastTone) => void;
   onGoSettings: () => void;
 }
@@ -107,22 +113,38 @@ export function OptimizeView({
   onCopyAndPaste,
   onCopyToClipboard,
   onOptimizeDelta,
+  onCancel,
   onToast,
   onGoSettings,
 }: OptimizeViewProps) {
+  // 切走再回来（App 条件渲染会卸载本组件）：先取回上次的草稿，没有才用传入的原文。
+  // ★ 用 ref 守卫而不是 useState 惰性初始化：StrictMode 下渲染函数会跑两遍，
+  //   而 takeDraft 取过就清空了，第二遍会拿到 null 把草稿丢掉。
+  const restoredRef = useRef<OptimizeDraft | null | undefined>(undefined);
+  if (restoredRef.current === undefined) restoredRef.current = takeDraft();
+  const restored = restoredRef.current;
   const [scenes, setScenes] = useState<OptimizeScene[]>([]);
-  const [sceneId, setSceneId] = useState('');
+  const [sceneId, setSceneId] = useState(restored?.sceneId ?? '');
   const [sceneFailed, setSceneFailed] = useState(false);
-  const [mode, setMode] = useState<OptimizeRequest['mode']>('user');
-  const [providerId, setProviderId] = useState(providers[0]?.id ?? '');
-  const [text, setText] = useState(source);
+  const [mode, setMode] = useState<OptimizeRequest['mode']>(restored?.mode ?? 'user');
+  const [providerId, setProviderId] = useState(() =>
+    restored !== null && providers.some((p) => p.id === restored.providerId)
+      ? restored.providerId
+      : (providers[0]?.id ?? ''),
+  );
+  // ★ 恢复时以草稿为准：用户没写完的原文不该被传入的 source 覆盖。
+  const [text, setText] = useState(restored?.input ?? source);
   const [result, setResult] = useState<OptimizeResult | null>(null);
   /** 优化后的文本：流式期间是增量预览（只读），结束后是最终结果（可改后再复制）。 */
-  const [output, setOutput] = useState('');
+  const [output, setOutput] = useState(restored?.output ?? '');
+  /** 结果提示：独立于 result 存活（那个对象只活在一次请求里，草稿恢复时已经没有它了）。 */
+  const [notes, setNotes] = useState<string[]>(restored?.output ? restored.notes : []);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   /** 在途请求的 requestId：只认它的增量，过期请求的 delta 一律丢弃。 */
   const activeRequest = useRef<string | null>(null);
+  /** 草稿挂靠的原文：跟着当前记录走，切到别的记录时才换。 */
+  const draftSource = useRef(restored?.source ?? source);
 
   // 场景目录：主进程投影，失败时把错误摊在工具条上，不静默留个空下拉。
   useEffect(() => {
@@ -161,14 +183,27 @@ export function OptimizeView({
 
   // 换一条记录重新打开面板：原文与上一次的输出一起换掉（不留旧结果），
   // 在途请求一并作废（它的增量与结果都不该落到新记录上）。
+  // ★ 挂载那次跳过：此时文本来自草稿（或本来就是 source），再覆盖一次就把草稿冲掉了。
+  const mountedRef = useRef(false);
   useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
     activeRequest.current = null;
+    draftSource.current = source;
     setText(source);
     setResult(null);
     setOutput('');
+    setNotes([]);
     setError(null);
     setLoading(false);
   }, [source]);
+
+  // 切走就丢的状态全部落进草稿：输入、场景、模式、模型、已生成结果与提示。
+  useEffect(() => {
+    saveDraft({ source: draftSource.current, sceneId, mode, providerId, input: text, output, notes });
+  }, [sceneId, mode, providerId, text, output, notes]);
 
   const degraded = result ? degradedHint(result.degraded) : null;
   const canRun = !loading && providerId !== '' && sceneId !== '' && text.trim().length > 0;
@@ -180,13 +215,15 @@ export function OptimizeView({
     activeRequest.current = stream.requestId;
     setOutput(stream.text);
     setResult(null);
+    setNotes([]);
     setError(null);
     setLoading(true);
     try {
       const res = await onOptimize({ providerId, text, sceneId, mode, requestId: stream.requestId });
-      if (activeRequest.current !== stream.requestId) return; // 途中换了记录：这次结果作废
+      if (activeRequest.current !== stream.requestId) return; // 途中换了记录 / 已被停止：这次结果作废
       setResult(res);
       setOutput(res.optimized);
+      setNotes(res.notes);
     } catch (err) {
       if (activeRequest.current !== stream.requestId) return;
       // 失败不白屏：把结构化错误翻成中文摊在右栏，原结果保留可重试。
@@ -198,6 +235,21 @@ export function OptimizeView({
         setLoading(false);
       }
     }
+  }
+
+  /**
+   * 「停止」：通知主进程按 requestId 中断，再就地收尾。
+   * ★ 先作废在途 id（endStream）再置 loading=false：迟到的增量与结果都不会再落到
+   *   已经保留下来、且马上变成可编辑的文本上。
+   */
+  function stop(): void {
+    const requestId = activeRequest.current;
+    if (requestId === null) return;
+    onCancel?.(requestId);
+    activeRequest.current = endStream();
+    setLoading(false);
+    const toast = stoppedToast();
+    onToast(toast.text, toast.tone);
   }
 
   /** 「复制」：只写剪贴板，不贴回目标窗口（★ 与「直接粘贴」拆分，原先是同一个动作）。 */
@@ -260,6 +312,12 @@ export function OptimizeView({
           <Sparkles size={13} aria-hidden />
           {loading ? '优化中…' : '优化'}
         </button>
+        {/* 慢模型单次要 20-60 秒：生成中必须有出口，点了保留已生成的文本。 */}
+        {loading ? (
+          <button type="button" className={GHOST_BUTTON_CLASS} onClick={stop}>
+            停止
+          </button>
+        ) : null}
         {sceneFailed ? <span className="text-[11px] text-red-400">场景加载失败，重开面板再试</span> : null}
       </div>
 
@@ -319,9 +377,9 @@ export function OptimizeView({
       )}
 
       <div className="flex shrink-0 flex-col gap-tight border-t border-line px-base py-snug">
-        {result && result.notes.length > 0 ? (
+        {notes.length > 0 ? (
           <ul className="flex flex-col gap-[2px]">
-            {result.notes.map((note, index) => (
+            {notes.map((note, index) => (
               <li key={index} className="text-[11px] leading-[1.6] text-ink-2">
                 · {note}
               </li>

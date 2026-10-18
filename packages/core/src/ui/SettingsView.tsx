@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { FolderOpen, Ghost } from 'lucide-react';
+import { Download, FolderOpen, Ghost } from 'lucide-react';
 import type {
   AiError,
   AiProvider,
@@ -10,8 +10,10 @@ import type {
   Settings,
   ThemeMode,
 } from '../types';
+import { DEFAULT_SETTINGS } from '../types';
 import { cn, formatClock, formatRemaining } from './util';
 import { autoStartClick, autoStartSettle, initialAutoStartToggle } from './autoStartToggle';
+import { HotkeyRecorder } from './HotkeyRecorder';
 import { AiProviderForm } from './AiProviderFormCard';
 import { aiErrorMessage, protocolLabel } from './aiProviderForm';
 
@@ -126,6 +128,7 @@ export function SettingsView({
   onClearUnpinned,
   onClearAll,
   onOpenDataFolder,
+  onExportAll,
   onSetAutoStart,
   onToggleMode,
   mode,
@@ -146,6 +149,8 @@ export function SettingsView({
   onClearUnpinned: () => void;
   onClearAll: () => void;
   onOpenDataFolder: () => void;
+  /** 导出全部记录为 JSON；结果（含失败）由 store 统一 toast。 */
+  onExportAll: () => void;
   /** 返回 false 表示写入没成功（例如注册表被拒），此时开关要回滚，不能假装成功。 */
   onSetAutoStart: (on: boolean) => void | Promise<boolean>;
   onToggleMode: () => void;
@@ -225,19 +230,31 @@ export function SettingsView({
                 : '注册失败'
           }
         >
-          <kbd className="rounded-input border border-line bg-surface-2 px-snug py-[3px] font-mono text-[11px] text-ink-2">
-            {settings.hotkeyActivate}
-          </kbd>
+          <HotkeyRecorder
+            label="唤起面板"
+            value={settings.hotkeyActivate}
+            defaultValue={DEFAULT_SETTINGS.hotkeyActivate}
+            onChange={(v) => onUpdate({ hotkeyActivate: v === '' ? DEFAULT_SETTINGS.hotkeyActivate : v })}
+          />
         </Row>
         <Row label="切换小组件" hint={hotkeys.widget ? '已生效' : '注册失败'}>
-          <kbd className="rounded-input border border-line bg-surface-2 px-snug py-[3px] font-mono text-[11px] text-ink-2">
-            {settings.hotkeyWidget}
-          </kbd>
+          <HotkeyRecorder
+            label="切换小组件"
+            value={settings.hotkeyWidget}
+            defaultValue={DEFAULT_SETTINGS.hotkeyWidget}
+            onChange={(v) => onUpdate({ hotkeyWidget: v === '' ? DEFAULT_SETTINGS.hotkeyWidget : v })}
+          />
         </Row>
         <Row label="拼接选中项" hint="按住 Ctrl 或 Shift 多选几条后按下">
           <kbd className="rounded-input border border-line bg-surface-2 px-snug py-[3px] font-mono text-[11px] text-ink-2">
             Ctrl+M
           </kbd>
+        </Row>
+        <Row
+          label="Enter 自动粘贴"
+          hint="关闭后双击记录只复制到剪贴板，不自动贴回原窗口"
+        >
+          <Toggle on={settings.autoPaste} onChange={(autoPaste) => onUpdate({ autoPaste })} />
         </Row>
         <Row label="开机自启动" hint="登录 Windows 后自动在托盘运行">
           <Toggle
@@ -528,6 +545,17 @@ export function SettingsView({
             幽灵模式会彻底停止剪贴板监听：期间复制的内容不会记录，结束后也不会补录；重启后不保留。
           </p>
         </div>
+
+        <Row label="导出备份" hint="把全部记录写成 JSON 文件，存到数据目录">
+          <button
+            type="button"
+            onClick={onExportAll}
+            className="flex shrink-0 items-center gap-[4px] rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
+          >
+            <Download size={12} aria-hidden />
+            导出 JSON
+          </button>
+        </Row>
 
         <Row label="存储位置" hint="数据库与图片缓存的存放目录">
           <button
