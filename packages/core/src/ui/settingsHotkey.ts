@@ -51,6 +51,8 @@ function mainKeyOf(key: string): string {
   if (/^[A-Za-z]$/.test(key)) return key.toUpperCase();
   if (/^[0-9]$/.test(key)) return key;
   if (isFunctionKey(key)) return key;
+  // ★ 标点也要能录：默认热键本身就是 Ctrl+`，只认字母/数字会让用户改不回默认值。
+  if (isPrintableKey(key)) return key;
   return '';
 }
 

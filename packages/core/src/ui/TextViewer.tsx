@@ -47,7 +47,7 @@ export function TextViewer({
 
   return createPortal(
     <div
-      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-[var(--cc-glass-fallback)] p-comfortable"
+      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-[var(--cc-scrim)] p-comfortable"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}

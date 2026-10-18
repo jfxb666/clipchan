@@ -56,6 +56,13 @@ describe('keyEventToAccelerator', () => {
     expect(keyEventToAccelerator(evt('F9'))).toBe('F9');
   });
 
+  it('★ 标点可以录（默认热键本身就是 Ctrl+反引号）', () => {
+    expect(keyEventToAccelerator(evt(String.fromCharCode(96), { ctrlKey: true }))).toBe(
+      'Control+' + String.fromCharCode(96),
+    );
+    expect(keyEventToAccelerator(evt('/', { ctrlKey: true, shiftKey: true }))).toBe('Control+Shift+/');
+  });
+
   it('未支持的标点与未知键返回空串', () => {
     expect(keyEventToAccelerator(evt('+', { ctrlKey: true }))).toBe('');
     expect(keyEventToAccelerator(evt('Dead', { ctrlKey: true }))).toBe('');
