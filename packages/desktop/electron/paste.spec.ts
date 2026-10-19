@@ -30,6 +30,8 @@ function textRow(id: string, content: string, createdAt = 1000): ItemRow {
     truncated: 0,
     created_at: createdAt,
     seq: createdAt,
+    deleted_at: null,
+    source_app: null,
   };
 }
 

@@ -20,6 +20,7 @@ export type HelperMessage =
   | { kind: 'RESULT'; hwnd: number; code: number; note: string }
   | { kind: 'BLUR'; hwnd: number; code: number }
   | { kind: 'FG'; hwnd: number }
+  | { kind: 'FGEXE'; hwnd: number; exe: string }
   | { kind: 'PONG'; tag: string }
   | { kind: 'UNKNOWN'; raw: string };
 
@@ -34,6 +35,7 @@ const DECIMAL = /^\d+$/;
  *   RESULT <句柄> <码> <说明>
  *   BLUR <句柄> <码>
  *   FG <十进制句柄>
+ *   FGEXE <十进制句柄> <exe名>   取不到时是 "FGEXE 0 -"
  *   PONG <标记>
  */
 export function parseHelperLine(line: string): HelperMessage {
@@ -74,6 +76,15 @@ export function parseHelperLine(line: string): HelperMessage {
       const hwnd = parts[1];
       if (!hwnd || !DECIMAL.test(hwnd)) return { kind: 'UNKNOWN', raw };
       return { kind: 'FG', hwnd: Number(hwnd) };
+    }
+    case 'FGEXE': {
+      // ★ 严格三段。exe 名里带空格时（"My App.exe"）助手会发出 4 段，这里判 UNKNOWN
+      //   而不是把名字截成 "My"——宁可没有来源，也不要记一个错的来源。
+      if (parts.length !== 3) return { kind: 'UNKNOWN', raw };
+      const hwnd = parts[1];
+      const exe = parts[2];
+      if (!hwnd || !exe || !DECIMAL.test(hwnd)) return { kind: 'UNKNOWN', raw };
+      return { kind: 'FGEXE', hwnd: Number(hwnd), exe };
     }
     case 'PONG': {
       if (parts.length !== 2) return { kind: 'UNKNOWN', raw };
@@ -215,6 +226,22 @@ export class HelperClient {
       (m) => m.kind === 'FG',
       0,
       (m) => (m.kind === 'FG' ? m.hwnd : 0),
+    );
+  }
+
+  /**
+   * 查前台窗口所属进程的 exe 文件名（只记文件名，如 `Code.exe`）。
+   *
+   * 助手取不到时（没有前台窗口 / 窗口失效 / 目标提权 / 助手不可用 / 超时）返回 null：
+   * 调用方据此**不记来源**，但记录本身必须照常写入。
+   */
+  foregroundExe(): Promise<string | null> {
+    return this.request<string | null>(
+      'FGEXE\n',
+      (m) => m.kind === 'FGEXE',
+      null,
+      // 助手用 "0 -" 表示"取不到"，与解析层的宽松保持分层：这里才决定它等价于 null。
+      (m) => (m.kind === 'FGEXE' && m.hwnd > 0 && m.exe !== '-' ? m.exe : null),
     );
   }
 

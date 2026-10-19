@@ -10,9 +10,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDb, type Db } from './db';
-import { Recorder } from './recorder';
+import { Recorder, normalizeSourceApp } from './recorder';
 import { ClipboardWatcher, type ClipboardLike } from './watcher';
-import { removeItemsWithFiles, type NativeImageLike } from './images';
+import { purgeItemsWithFiles, type NativeImageLike } from './images';
 import { imagesDir, thumbsDir } from './paths';
 
 let db: Db;
@@ -160,7 +160,16 @@ describe('Recorder.recordImage 图片落盘 + 落库', () => {
     expect(readdirSync(imagesDir(dataDir))).toEqual([id + '.jpg']);
     expect(readdirSync(thumbsDir(dataDir))).toEqual([id + '.png']);
 
-    removeItemsWithFiles(db, dataDir, [id], (m) => logs.push(m));
+    // v0.3.0 §1.1：删除分两族——软删（remove，不删盘）与硬删（purgeItemsWithFiles，删盘）。
+    // 这里钉两件事：软删后行进回收站且**文件仍在**；硬删后文件才消失。
+    db.remove(id);
+    expect(db.list({ limit: 50 }).some((r) => r.id === id)).toBe(false);
+    expect(db.listTrash({}).some((r) => r.id === id)).toBe(true);
+    expect(existsSync(join(imagesDir(dataDir), id + '.jpg'))).toBe(true);
+    expect(existsSync(join(thumbsDir(dataDir), id + '.png'))).toBe(true);
+
+    const out = purgeItemsWithFiles(db, dataDir, [id], (m: string) => logs.push(m));
+    expect(out.removed).toBe(1);
     expect(db.getImageRow(id)).toBeNull();
     expect(existsSync(join(imagesDir(dataDir), id + '.jpg'))).toBe(false);
     expect(existsSync(join(thumbsDir(dataDir), id + '.png'))).toBe(false);
@@ -216,23 +225,125 @@ describe('上限淘汰（historyLimit）', () => {
     expect(after.some((r) => r.id === pinnedId && r.pinned)).toBe(true);
   });
 
-  it('按上限淘汰掉图片记录时，磁盘文件一并删除', () => {
+  it('按上限淘汰掉图片记录时进回收站，文件留在盘上（软删不删盘）', () => {
     db.setSettings({ historyLimit: 2 });
     const rec = makeRecorder();
     const a = rec.recordImage(fakeImage(10, 10, 1, 128))!;
     const b = rec.recordImage(fakeImage(10, 10, 2, 128))!;
     expect(db.allImageRows().length).toBe(2);
 
-    // 再插一条文本：上限淘汰按**全表行数**算，最旧的图片行（a）被裸 DELETE
+    // 再插一条文本：上限淘汰按**全表行数**算，最旧的图片行（a）被软删（v0.3.0 §1.1）
     rec.recordText('文本一');
 
-    expect(db.getImageRow(a.id)).toBeNull();
-    expect(existsSync(join(imagesDir(dataDir), a.id + '.jpg'))).toBe(false);
-    expect(existsSync(join(thumbsDir(dataDir), a.id + '.png'))).toBe(false);
-    // 较新的那张还在，文件也在
-    expect(db.getImageRow(b.id)).not.toBeNull();
-    expect(existsSync(join(imagesDir(dataDir), b.id + '.jpg'))).toBe(true);
-    expect(existsSync(join(thumbsDir(dataDir), b.id + '.png'))).toBe(true);
+    // 活跃列表里没有它了，但行还在回收站（v0.3.0 §1.1：上限淘汰也走软删）。
+    expect(db.list({ limit: 50 }).some((r) => r.id === a.id)).toBe(false);
+    expect(db.listTrash({}).some((r) => r.id === a.id)).toBe(true);
+    // 较新的那张还在活跃列表里
+    expect(db.list({ limit: 50 }).some((r) => r.id === b.id)).toBe(true);
+  });
+});
+
+describe('来源应用（sourceApp）', () => {
+  it('normalizeSourceApp：空白 / 空串 / null / undefined 一律当"未知"', () => {
+    expect(normalizeSourceApp('notepad.exe')).toBe('notepad.exe');
+    expect(normalizeSourceApp('  code.exe  ')).toBe('code.exe');
+    expect(normalizeSourceApp('')).toBeUndefined();
+    expect(normalizeSourceApp('   ')).toBeUndefined();
+    expect(normalizeSourceApp(null)).toBeUndefined();
+    expect(normalizeSourceApp(undefined)).toBeUndefined();
+  });
+
+  it('带来源的文本照常落库，来源确实写进 source_app；来源未知时也不影响记录本身', () => {
+    const rec = makeRecorder();
+    const a = rec.recordText('来自记事本', 'notepad.exe');
+    const b = rec.recordText('来源未知');
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    const rows = db.list({});
+    expect(rows.length).toBe(2);
+    // 「未知」只有一种表示法：DTO 上是 undefined（不是空串、不是 "__unknown__"）
+    expect(rows.find((r) => r.id === a!.id)?.sourceApp).toBe('notepad.exe');
+    expect(rows.find((r) => r.id === b!.id)?.sourceApp).toBeUndefined();
+  });
+
+  it('空串来源被归一化成"未知"（绝不写空字符串），记录照样成功', () => {
+    const rec = makeRecorder();
+    const res = rec.recordText('空串来源', '   ');
+    expect(res).not.toBeNull();
+    expect(db.list({}).length).toBe(1);
+  });
+
+  it('图片也接受来源参数，照常落盘落库且来源写进 source_app', () => {
+    const rec = makeRecorder();
+    const res = rec.recordImage(fakeImage(20, 20, 5, 64), null, 'mspaint.exe');
+    expect(res).not.toBeNull();
+    expect(db.getImageRow(res!.id)).not.toBeNull();
+    expect(db.list({}).find((r) => r.id === res!.id)?.sourceApp).toBe('mspaint.exe');
+  });
+
+  it('同一内容第二次带不同来源：仍命中去重（不产生第二行）', () => {
+    const rec = makeRecorder();
+    const first = rec.recordText('同一份内容', 'notepad.exe')!;
+    const second = rec.recordText('同一份内容', 'code.exe')!;
+    expect(second.id).toBe(first.id);
+    expect(second.touched).toBe(true);
+    expect(db.list({}).length).toBe(1);
+  });
+});
+
+/**
+ * ★ 端到端可达性（T5 最容易"类型全绿、功能全死"的一段）：
+ *   watcher 取前台 exe → 交给 sink（真正的 Recorder）→ db 落 source_app → DTO 带 sourceApp。
+ *   全程用真 Recorder + 真 db + 假剪贴板，只有"前台 exe"是注入的。
+ */
+describe('来源应用端到端：watcher → recorder → db', () => {
+  it('从"记事本"复制文本：source_app 一路落库并出现在 DTO 上', async () => {
+    const clip = makeClip('', ['text/plain']);
+    const rec = makeRecorder(clip);
+    rec.baseline();
+
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: rec,
+      intervalMs: 5,
+      foregroundExe: async () => 'notepad.exe',
+      onTrace: () => {},
+    });
+    w.start();
+    clip.state.text = '从记事本复制的内容';
+    await sleep(40);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    const rows = db.list({});
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.sourceApp).toBe('notepad.exe');
+    // 落库的那一列也要对（不只是 DTO 投影）
+    expect(db.getRow(rows[0]!.id)!.source_app).toBe('notepad.exe');
+  });
+
+  it('前台是 clipchan 自己时不记来源（面板内粘贴回写不产生自引用）', async () => {
+    const clip = makeClip('', ['text/plain']);
+    const rec = makeRecorder(clip);
+    rec.baseline();
+
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: rec,
+      intervalMs: 5,
+      foregroundExe: async () => 'clipchan.exe',
+      onTrace: () => {},
+    });
+    w.start();
+    clip.state.text = '面板里粘贴回写的';
+    await sleep(40);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    const rows = db.list({});
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.sourceApp).toBeUndefined();
+    expect(db.getRow(rows[0]!.id)!.source_app).toBeNull();
   });
 });
 

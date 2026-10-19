@@ -1,6 +1,6 @@
 {
   "name": "@clipchan/desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "commonjs",
   "main": "dist-electron/main.js",
@@ -11,6 +11,7 @@
   "dependencies": {
     "@clipchan/ai": "workspace:*",
     "@clipchan/core": "workspace:*",
+    "adm-zip": "^0.6.1",
     "better-sqlite3": "^13.0.3",
     "clsx": "^2.1.1",
     "framer-motion": "^12.29.0",
@@ -24,11 +25,11 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
     "electron": "^37.6.0",
     "electron-builder": "^26.15.3",
-    "tailwindcss": "^3.4.19",
-    "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.19",
     "vite": "^6.0.7"
   }
 }

@@ -39,7 +39,27 @@ const MAX_LIMIT = 500;
 /** 库里的来源标记（spec §9.2 用的是 'clip'，core 的 DTO 用的是 'capture'）。 */
 type DbSource = 'clip' | 'merge';
 
-/** 建表 SQL —— ★ 逐字抄 spec §9.2，不要"顺手优化"。 */
+/**
+ * 两个唯一索引的 DDL。
+ *
+ * ★ 谓词必须带 `deleted_at IS NULL`：回收站里的行不该再占住哈希。两处必须同时改——
+ *   去重 SELECT 加了条件而索引没改 → 同内容再复制撞 UNIQUE；索引改了而 SELECT 没改 →
+ *   刷新一条已删记录的排序，用户复制完列表里什么都不出现。
+ *   抽成常量是因为迁移要 drop 后按**同一段文本**重建（SQLite 不支持 ALTER INDEX）。
+ */
+const UNIQUE_INDEX_SQL = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash ON items(content_hash) WHERE content_hash IS NOT NULL AND deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_image_hash   ON items(image_hash)   WHERE image_hash   IS NOT NULL AND deleted_at IS NULL;`;
+
+/**
+ * 建表 SQL —— ★ 逐字抄 spec §9.2，不要"顺手优化"。
+ *
+ * ★ 这里**故意不建两个唯一索引**：它们的谓词引用 `deleted_at`，而 v0.2.0 的老库要等
+ *   ensureColumns 补完列才有这一列。把索引 DDL 放在建表段里，老库就会在
+ *   "索引恰好缺失 + 列也缺失"时抛 `no such column: deleted_at` 直接起不来
+ *   （`IF NOT EXISTS` 只在索引已存在时静默跳过，索引不存在时照样校验谓词）。
+ *   索引统一由 migrateTrashSchema 在建列之后创建，全新库同样一步到位。
+ */
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS items (
   id           TEXT PRIMARY KEY,
@@ -54,10 +74,10 @@ CREATE TABLE IF NOT EXISTS items (
   pinned       INTEGER NOT NULL DEFAULT 0,
   truncated    INTEGER NOT NULL DEFAULT 0,
   created_at   INTEGER NOT NULL,
-  seq          INTEGER NOT NULL
+  seq          INTEGER NOT NULL,
+  deleted_at   INTEGER,
+  source_app   TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash ON items(content_hash) WHERE content_hash IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_image_hash   ON items(image_hash)   WHERE image_hash   IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_order ON items(pinned DESC, created_at DESC, seq DESC);
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
@@ -82,6 +102,10 @@ export interface ItemRow {
   truncated: number;
   created_at: number;
   seq: number;
+  /** 进回收站的时间戳；活跃行为 null。 */
+  deleted_at: number | null;
+  /** 来源 exe 名（如 Code.exe）；未知为 null —— 不写任何兜底串。 */
+  source_app: string | null;
 }
 
 /** 图片记录在库里的那几列（Task 6 的 getFullImage、Task 8 的清理都用它）。 */
@@ -100,6 +124,8 @@ export interface ImageRow {
   pinned: boolean;
   truncated: boolean;
   source: 'capture' | 'merge';
+  /** 回收站时间戳；预算淘汰要按「回收站行优先」排序，所以必须带出去。 */
+  deleted_at: number | null;
 }
 
 /** insertText 的可选参数。 */
@@ -115,6 +141,8 @@ export interface InsertTextOpts {
   /** 指定序号（迁移用）；缺省取下一个自增序号。 */
   seq?: number;
   source?: 'capture' | 'merge';
+  /** 来源 exe 名；未知就不传（不落兜底串）。去重命中时不覆盖已有来源。 */
+  sourceApp?: string;
 }
 
 /** insertImage 的元数据。 */
@@ -140,6 +168,8 @@ export interface InsertImageOpts {
   now?: number;
   seq?: number;
   source?: 'capture' | 'merge';
+  /** 来源 exe 名；未知就不传。 */
+  sourceApp?: string;
 }
 
 /** 插入/去重命中后的返回值。touched=true 表示命中了已有条目（被提到最前）。 */
@@ -161,6 +191,16 @@ export interface Db {
   togglePin(id: string): boolean;
   clearUnpinned(): ItemRow[];
   clearAll(): number;
+  /** 回收站列表（按删除时间倒序）。谓词与 buildWhere 相反，所以不复用它。 */
+  listTrash(q?: { limit?: number; offset?: number }): ClipItemDTO[];
+  countTrash(): number;
+  /** 从回收站恢复一条：created_at 与 seq 原样保留，记录回到原本的时间位置。 */
+  restore(id: string): boolean;
+  restoreMany(ids: string[]): number;
+  /** 硬删指定行，返回实际删除条数。调用方负责先取图片相对路径再删文件。 */
+  purge(ids: string[]): number;
+  /** 硬删超出 trashLimit 的最旧回收站行，返回被删 id（供调用方删盘）。 */
+  purgeTrashOverLimit(): string[];
   getSettings(): Settings;
   setSettings(patch: Partial<Settings>): Settings;
   /**
@@ -203,6 +243,13 @@ function sourceToDb(s: 'capture' | 'merge' | undefined): DbSource {
   return s === 'merge' ? 'merge' : 'clip';
 }
 
+/** 来源 exe 名归一：空/非字符串一律 null —— 库里不存兜底串，缺来源就是"没有"。 */
+function sourceAppToDb(v: string | undefined): string | null {
+  if (typeof v !== 'string') return null;
+  const trimmed = v.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function sourceToDto(s: string): 'capture' | 'merge' {
   return s === 'merge' ? 'merge' : 'capture';
 }
@@ -220,11 +267,17 @@ function kbLabel(bytes: number): string {
   return Math.floor(bytes / 1024) + ' KB';
 }
 
-/** 行 → 给界面看的投影。原图磁盘路径与哈希不出主进程（spec §8.1）。 */
+/**
+ * 行 → 给界面看的投影。原图磁盘路径与哈希不出主进程（spec §8.1）。
+ * 回收站字段按"有才给"的写法投影：NULL 就是 undefined，绝不编一个兜底串出来。
+ */
 function rowToDto(row: ItemRow): ClipItemDTO {
   const kind = toKind(row.kind);
   const pinned = row.pinned === 1;
   const source = sourceToDto(row.source);
+  const extra: Pick<ClipItemDTO, 'sourceApp' | 'deletedAt'> = {};
+  if (row.source_app) extra.sourceApp = row.source_app;
+  if (typeof row.deleted_at === 'number') extra.deletedAt = row.deleted_at;
   if (kind === 'image') {
     const w = row.width ?? 0;
     const h = row.height ?? 0;
@@ -238,6 +291,7 @@ function rowToDto(row: ItemRow): ClipItemDTO {
       pinned,
       sizeLabel: kbLabel(bytes),
       source,
+      ...extra,
     };
   }
   return {
@@ -248,6 +302,7 @@ function rowToDto(row: ItemRow): ClipItemDTO {
     pinned,
     truncated: row.truncated === 1,
     source,
+    ...extra,
   };
 }
 
@@ -267,6 +322,7 @@ function rowToImageRow(row: ItemRow): ImageRow {
     pinned: row.pinned === 1,
     truncated: row.truncated === 1,
     source: sourceToDto(row.source),
+    deleted_at: row.deleted_at,
   };
 }
 
@@ -294,7 +350,8 @@ const IMAGE_DESC_SQL =
 /** 只拼 WHERE：list 与 count 必须用同一套条件，否则「共 N 条」和列表对不上。 */
 function buildWhere(q: ListQuery): { where: string; params: unknown[] } {
   const params: unknown[] = [];
-  const where: string[] = ['1 = 1'];
+  // ★ 回收站排除只写这一处：list 与 count 共用它，分别改才是「列表和共 N 条打架」的源头。
+  const where: string[] = ['1 = 1', 'deleted_at IS NULL'];
 
   const kinds = KIND_GROUPS[q.kind ?? 'all'] ?? KIND_GROUPS.all;
   where.push(`kind IN (${kinds.map(() => '?').join(', ')})`);
@@ -352,6 +409,7 @@ function sanitizeSettings(input: Partial<Settings>): Settings {
     autoPaste: input.autoPaste === undefined ? d.autoPaste : !!input.autoPaste,
     hotkeyActivate: typeof input.hotkeyActivate === 'string' && input.hotkeyActivate.length > 0 ? input.hotkeyActivate : d.hotkeyActivate,
     hotkeyWidget: typeof input.hotkeyWidget === 'string' && input.hotkeyWidget.length > 0 ? input.hotkeyWidget : d.hotkeyWidget,
+    trashLimit: input.trashLimit === undefined ? d.trashLimit : clampInt(input.trashLimit, 1, 9999, d.trashLimit),
   };
 }
 
@@ -380,6 +438,9 @@ export function openDb(file: string): Db {
 
   // 老库可能缺列：用 PRAGMA 检查后补，避免"升级即崩"。
   ensureColumns(raw);
+  // ★ 顺序不能换：索引谓词引用 deleted_at，必须等 ensureColumns 补完列才建；
+  //   同时 SQLite 没有 ALTER INDEX，旧谓词的索引只能 drop 后重建。
+  migrateTrashSchema(raw);
 
   const settingsCache: Settings = loadSettings(raw);
 
@@ -397,17 +458,67 @@ export function openDb(file: string): Db {
   /**
    * 按 Settings.historyLimit 淘汰**未收藏**记录：只保留最新的 limit 条未收藏，
    * 收藏记录不参与、不计入上限（计划 Task 2 第 5 步 / legacy Store.Trim）。
+   *
+   * ★ v0.3.0 起淘汰 = 进回收站（软删），不删盘：上限淘汰不该是唯一一条"删了就没"的路径。
+   *   子查询也必须只数**活跃**行，否则回收站行会占住名额、把活跃记录多淘汰出去。
    */
   function evictOverLimit(): void {
     const limit = settingsCache.historyLimit;
     if (!Number.isFinite(limit) || limit <= 0) return;
     raw.prepare(
-      `DELETE FROM items
-        WHERE pinned = 0
+      `UPDATE items SET deleted_at = ?
+        WHERE deleted_at IS NULL
+          AND pinned = 0
           AND id NOT IN (
-            SELECT id FROM items WHERE pinned = 0 ORDER BY created_at DESC, seq DESC LIMIT ?
+            SELECT id FROM items WHERE deleted_at IS NULL AND pinned = 0 ORDER BY created_at DESC, seq DESC LIMIT ?
           )`,
-    ).run(Math.floor(limit));
+    ).run(Date.now(), Math.floor(limit));
+    purgeTrashOverLimit();
+  }
+
+  /**
+   * 恢复一条：清掉 deleted_at，created_at / seq 保持原值（位置回到原处）。
+   *
+   * ★ 冲突时返回 0 而不是抛：删掉一条内容后，用户很可能又复制了同样的东西，
+   *   此时活跃行已占住这个 content_hash，而唯一索引的谓词是「活跃行唯一」。
+   *   直接 UPDATE 会撞 SQLITE_CONSTRAINT_UNIQUE，把整条 IPC 调用炸掉——
+   *   恢复是用户点的"撤销"，不该因为内容重复就报错崩界面。跳过它、由调用方
+   *   回报"实际恢复了几条"更合适。
+   */
+  function restoreOne(conn: Database.Database, id: string): number {
+    try {
+      return conn.prepare('UPDATE items SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL').run(id).changes;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return 0;
+      throw err;
+    }
+  }
+
+  /**
+   * 回收站独立上限：超出 Settings.trashLimit 的最旧回收站行**硬删**（这一族才删盘）。
+   *
+   * 返回被删 id 让调用方去删文件——db 层不认识文件系统。这里是全表唯一的硬删入口，
+   * 所以它不受 historyLimit 影响，两条上限各管各的。
+   */
+  function purgeTrashOverLimit(): string[] {
+    const limit = settingsCache.trashLimit;
+    if (!Number.isFinite(limit) || limit <= 0) return [];
+    const rows = raw
+      .prepare(
+        `SELECT id FROM items
+          WHERE deleted_at IS NOT NULL
+          ORDER BY deleted_at DESC, seq DESC LIMIT -1 OFFSET ?`,
+      )
+      .all(Math.floor(limit)) as { id: string }[];
+    if (rows.length === 0) return [];
+    const ids = rows.map((r) => r.id);
+    const del = raw.prepare('DELETE FROM items WHERE id = ?');
+    const tx = raw.transaction((list: string[]) => {
+      for (const id of list) del.run(id);
+    });
+    tx(ids);
+    return ids;
   }
 
   const api: Db = {
@@ -426,7 +537,10 @@ export function openDb(file: string): Db {
       }
 
       const hash = hashText(content);
-      const hit = raw.prepare('SELECT id FROM items WHERE content_hash = ?').get(hash) as { id: string } | undefined;
+      // ★ 去重只认活跃行：命中回收站里的行会刷新一条已删记录的排序，用户复制完什么都不出现。
+      const hit = raw.prepare('SELECT id FROM items WHERE content_hash = ? AND deleted_at IS NULL').get(hash) as
+        | { id: string }
+        | undefined;
       if (hit) {
         touchRow(hit.id, typeof opts.now === 'number' ? opts.now : undefined);
         return { id: hit.id, touched: true };
@@ -439,9 +553,12 @@ export function openDb(file: string): Db {
       const seq = typeof opts.seq === 'number' ? opts.seq : nextSeq();
       const kind = opts.kind ?? classify(content);
       raw.prepare(
-        `INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(id, kind, content, hash, sourceToDb(opts.source), opts.pinned ? 1 : 0, truncated ? 1 : 0, createdAt, seq);
+        `INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq, source_app)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id, kind, content, hash, sourceToDb(opts.source), opts.pinned ? 1 : 0, truncated ? 1 : 0, createdAt, seq,
+        sourceAppToDb(opts.sourceApp),
+      );
       evictOverLimit();
       return { id, touched: false };
     },
@@ -450,7 +567,9 @@ export function openDb(file: string): Db {
       if (!meta || typeof meta.hash !== 'string' || meta.hash.length === 0) {
         throw new Error('insertImage: 缺少 hash');
       }
-      const hit = raw.prepare('SELECT id FROM items WHERE image_hash = ?').get(meta.hash) as { id: string } | undefined;
+      const hit = raw.prepare('SELECT id FROM items WHERE image_hash = ? AND deleted_at IS NULL').get(meta.hash) as
+        | { id: string }
+        | undefined;
       if (hit) {
         const explicit = opts.now ?? opts.createdAt ?? meta.createdAt;
         touchRow(hit.id, typeof explicit === 'number' ? explicit : undefined);
@@ -467,12 +586,12 @@ export function openDb(file: string): Db {
       const source = sourceToDb(opts.source ?? meta.source);
       raw.prepare(
         `INSERT INTO items (id, kind, content, content_hash, image_path, image_hash, thumb_path,
-                            width, height, bytes, source, pinned, truncated, created_at, seq)
-         VALUES (?, 'image', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+                            width, height, bytes, source, pinned, truncated, created_at, seq, source_app)
+         VALUES (?, 'image', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       ).run(
         id, meta.imagePath, meta.hash, meta.thumbPath,
         Math.max(0, Math.round(meta.width)), Math.max(0, Math.round(meta.height)), Math.max(0, Math.round(meta.bytes)),
-        source, pinned ? 1 : 0, createdAt, seq,
+        source, pinned ? 1 : 0, createdAt, seq, sourceAppToDb(opts.sourceApp),
       );
       evictOverLimit();
       return { id, touched: false };
@@ -492,28 +611,37 @@ export function openDb(file: string): Db {
       return row ? row.n : 0;
     },
 
+    /**
+     * 软删一条：只盖 deleted_at，不删行、不删盘。
+     * 返回盖戳前的行（调用方拿图片相对路径用），已经删除过的 id 返回 null。
+     */
     remove(id: string): ItemRow | null {
-      const row = raw.prepare('SELECT * FROM items WHERE id = ?').get(id) as ItemRow | undefined;
+      const row = raw.prepare('SELECT * FROM items WHERE id = ? AND deleted_at IS NULL').get(id) as
+        | ItemRow
+        | undefined;
       if (!row) return null;
-      raw.prepare('DELETE FROM items WHERE id = ?').run(id);
+      raw.prepare('UPDATE items SET deleted_at = ? WHERE id = ?').run(Date.now(), id);
+      purgeTrashOverLimit();
       return row;
     },
 
     removeMany(ids: string[]): ItemRow[] {
       if (!ids || ids.length === 0) return [];
-      const sel = raw.prepare('SELECT * FROM items WHERE id = ?');
-      const del = raw.prepare('DELETE FROM items WHERE id = ?');
+      const sel = raw.prepare('SELECT * FROM items WHERE id = ? AND deleted_at IS NULL');
+      const upd = raw.prepare('UPDATE items SET deleted_at = ? WHERE id = ?');
       const out: ItemRow[] = [];
+      const at = Date.now();
       const tx = raw.transaction((list: string[]) => {
         for (const id of list) {
           const row = sel.get(id) as ItemRow | undefined;
           if (row) {
-            del.run(id);
+            upd.run(at, id);
             out.push(row);
           }
         }
       });
       tx(ids);
+      purgeTrashOverLimit();
       return out;
     },
 
@@ -523,13 +651,71 @@ export function openDb(file: string): Db {
     },
 
     clearUnpinned(): ItemRow[] {
-      const rows = raw.prepare('SELECT * FROM items WHERE pinned = 0').all() as ItemRow[];
-      raw.prepare('DELETE FROM items WHERE pinned = 0').run();
+      const rows = raw.prepare('SELECT * FROM items WHERE pinned = 0 AND deleted_at IS NULL').all() as ItemRow[];
+      raw.prepare('UPDATE items SET deleted_at = ? WHERE pinned = 0 AND deleted_at IS NULL').run(Date.now());
+      purgeTrashOverLimit();
       return rows;
     },
 
     clearAll(): number {
-      return raw.prepare('DELETE FROM items').run().changes;
+      // ★ 只清**活跃**行：已在回收站里的记录不该被这次操作改写删除时间
+      //   （那会让"清空列表"顺手把回收站的排序也搅乱）。
+      const n = raw
+        .prepare('UPDATE items SET deleted_at = ? WHERE deleted_at IS NULL')
+        .run(Date.now()).changes;
+      purgeTrashOverLimit();
+      return n;
+    },
+
+    listTrash(q: { limit?: number; offset?: number } = {}): ClipItemDTO[] {
+      // 谓词与 buildWhere 相反（只取已删），所以不复用它——复用只会让两边一起改坏。
+      const rawLimit = typeof q.limit === 'number' && Number.isFinite(q.limit) ? Math.floor(q.limit) : DEFAULT_LIMIT;
+      const limit = Math.min(MAX_LIMIT, Math.max(1, rawLimit));
+      const rawOffset = typeof q.offset === 'number' && Number.isFinite(q.offset) ? Math.floor(q.offset) : 0;
+      const offset = Math.max(0, rawOffset);
+      const rows = raw
+        .prepare(
+          `SELECT * FROM items WHERE deleted_at IS NOT NULL
+            ORDER BY deleted_at DESC, seq DESC LIMIT ? OFFSET ?`,
+        )
+        .all(limit, offset) as ItemRow[];
+      return rows.map(rowToDto);
+    },
+
+    countTrash(): number {
+      const row = raw.prepare('SELECT COUNT(*) AS n FROM items WHERE deleted_at IS NOT NULL').get() as
+        | { n: number }
+        | undefined;
+      return row ? row.n : 0;
+    },
+
+    restore(id: string): boolean {
+      return restoreOne(raw, id) > 0;
+    },
+
+    restoreMany(ids: string[]): number {
+      if (!ids || ids.length === 0) return 0;
+      const tx = raw.transaction((list: string[]) => {
+        let n = 0;
+        for (const id of list) n += restoreOne(raw, id);
+        return n;
+      });
+      return tx(ids);
+    },
+
+    purge(ids: string[]): number {
+      if (!ids || ids.length === 0) return 0;
+      const del = raw.prepare('DELETE FROM items WHERE id = ?');
+      const tx = raw.transaction((list: string[]) => {
+        let n = 0;
+        for (const id of list) n += del.run(id).changes;
+        return n;
+      });
+      return tx(ids);
+    },
+
+    purgeTrashOverLimit(): string[] {
+      return purgeTrashOverLimit();
     },
 
     getSettings(): Settings {
@@ -624,6 +810,38 @@ function loadSettings(raw: Database.Database): Settings {
   return sanitizeSettings(stored as Partial<Settings>);
 }
 
+/** 当前 schema 版本（PRAGMA user_version 的值）。 */
+export const SCHEMA_VERSION = 1;
+
+/**
+ * v0.2.0 → v0.3.0 的 schema 迁移：重建两个唯一索引，把谓词补成 `AND deleted_at IS NULL`。
+ *
+ * 为什么用 PRAGMA user_version 而不是看索引是否存在：索引**存在但谓词是旧的**才是要修的状态，
+ * 靠"存在性"判断会漏掉——这正是升级用户最可能踩的那条路径。
+ *
+ * 幂等性：整个迁移放在一个事务里，user_version 也随事务一起提交/回滚（实测），
+ * 所以中途崩溃不会留下"版本已升但索引没改"的中间态；重复调用直接早退。
+ */
+function migrateTrashSchema(raw: Database.Database): void {
+  const current = Number(raw.pragma('user_version', { simple: true }));
+
+  if (current < SCHEMA_VERSION) {
+    const tx = raw.transaction(() => {
+      // DROP 再建：谓词是索引定义的一部分，SQLite 不支持原地改。
+      raw.exec('DROP INDEX IF EXISTS idx_content_hash');
+      raw.exec('DROP INDEX IF EXISTS idx_image_hash');
+      raw.exec(UNIQUE_INDEX_SQL);
+      raw.pragma('user_version = ' + SCHEMA_VERSION);
+    });
+    tx();
+    return;
+  }
+
+  // 版本已是新版但索引被外部删掉了（手工修库、备份恢复）：补建但不重复改谓词。
+  // 这一步同时也是全新库拿到索引的地方（建表段故意不建，见 SCHEMA_SQL 注释）。
+  raw.exec(UNIQUE_INDEX_SQL);
+}
+
 /** 旧库补列（本轮 schema 是新库，留一个最小自愈入口）。 */
 function ensureColumns(raw: Database.Database): void {
   const cols = new Set(
@@ -634,6 +852,9 @@ function ensureColumns(raw: Database.Database): void {
     ['source', "TEXT NOT NULL DEFAULT 'clip'"],
     ['seq', 'INTEGER NOT NULL DEFAULT 0'],
     ['thumb_path', 'TEXT'],
+    // v0.3.0：回收站时间戳与来源 exe 名。都允许 NULL —— 活跃行与"来源未知"都是 NULL。
+    ['deleted_at', 'INTEGER'],
+    ['source_app', 'TEXT'],
   ];
   for (const [name, decl] of wanted) {
     if (!cols.has(name)) raw.exec(`ALTER TABLE items ADD COLUMN ${name} ${decl}`);

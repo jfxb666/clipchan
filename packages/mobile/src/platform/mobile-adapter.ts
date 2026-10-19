@@ -33,10 +33,13 @@ import {
   buildWordCloud,
   classify,
   previewOfText,
+  type AppToast,
   type BurstHint,
   type Capabilities,
   type ClipItemDTO,
+  type ExportResult,
   type GhostState,
+  type ImportResult,
   type HotkeyStatus,
   type Kind,
   type KindFilter,
@@ -44,7 +47,10 @@ import {
   type NavigateTarget,
   type PasteResult,
   type PlatformAdapter,
+  type PurgeResult,
+  type RestoreResult,
   type Settings,
+  type TrashQuery,
   type WordCloudData,
 } from '@clipchan/core';
 
@@ -275,9 +281,14 @@ export function createMobileAdapter(): PlatformAdapter {
         return pickRecords(q).length;
       },
 
-      async exportAll(): Promise<{ ok: boolean; path?: string }> {
+      async exportAll(): Promise<ExportResult> {
         // 手机端没有文件系统落盘能力，如实报失败（不假装导出成功）。
-        return { ok: false };
+        return { ok: false, reason: '手机端没有文件系统落盘能力' };
+      },
+
+      async importAll(): Promise<ImportResult> {
+        // 手机端既不能选 zip 也不能解压落盘 —— 与回收站五方法同样明确抛错，不返回假成功。
+        throw new Error('手机端暂不支持导入备份包');
       },
 
       async mergeSelected(ids: string[]): Promise<{ ok: boolean; id?: string; reason?: string }> {
@@ -336,6 +347,28 @@ export function createMobileAdapter(): PlatformAdapter {
         const rec = records.find((r) => r.id === id);
         // 手机端记录本来就存全文（内存数组里没有"截断的预览"这回事），原样返回。
         return rec && rec.kind !== 'image' ? (rec.content ?? '') : '';
+      },
+
+      // ★ 手机端没有回收站（内存数组里没有 deleted_at 这层）。如实 reject 而不是返回
+      //   空数组/假成功：界面据此显示"当前平台不支持回收站"，而不是一个永远空的面板。
+      async trashList(_q: TrashQuery): Promise<ClipItemDTO[]> {
+        throw new Error('手机端暂不支持回收站');
+      },
+
+      async trashCount(): Promise<number> {
+        throw new Error('手机端暂不支持回收站');
+      },
+
+      async restore(_id: string): Promise<RestoreResult> {
+        throw new Error('手机端暂不支持回收站');
+      },
+
+      async purge(_ids: string[]): Promise<PurgeResult> {
+        throw new Error('手机端暂不支持回收站');
+      },
+
+      async emptyTrash(): Promise<PurgeResult> {
+        throw new Error('手机端暂不支持回收站');
       },
 
       onChanged(cb: () => void): Unsub {
@@ -437,6 +470,11 @@ export function createMobileAdapter(): PlatformAdapter {
 
       onNavigate(cb: (target: NavigateTarget) => void): Unsub {
         return subscribe(navSubs, cb);
+      },
+
+      onToast(_cb: (t: AppToast) => void): Unsub {
+        // 手机端没有主进程推提示这条路（提示都在本进程内直接发）：订阅即空转，不 throw。
+        return () => {};
       },
     },
 

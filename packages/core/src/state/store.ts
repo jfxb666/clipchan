@@ -11,7 +11,19 @@ import type {
 } from '../types';
 import { DEFAULT_SETTINGS } from '../types';
 import { getPlatform } from '../platform/adapter';
-import { GHOST_RESUME_TOAST, ghostOnToast, mergeToast, pasteToast, type ToastTone } from '../ui/toastText';
+import {
+  GHOST_RESUME_TOAST,
+  UNDO_LABEL,
+  appToastTone,
+  ghostOnToast,
+  mergeToast,
+  pasteToast,
+  removeToast,
+  undoToast,
+  type ToastAction,
+  type ToastTone,
+} from '../ui/toastText';
+import { TRASH_PAGE_SIZE, nextTrashOffset } from '../ui/trashViewLogic';
 
 /**
  * 界面状态中心（spec §5：core 不认宿主，系统能力一律走 getPlatform()）。
@@ -33,8 +45,12 @@ export const TOAST_TTL_MS = 3000;
 /** Ctrl+Delete 待确认态的存活时间：超时未再按就作废（与设置页 3 秒复位一致）。 */
 export const CLEAR_CONFIRM_TTL_MS = 3000;
 
-/** 顶层视图：列表 / 设置 / 今日词云 / 优化面板（spec §6.9 词云是应用内视图）。 */
-export type View = 'list' | 'settings' | 'wordcloud' | 'optimize';
+/**
+ * 顶层视图：列表 / 设置 / 今日词云 / 优化面板 / 回收站（spec §6.9 词云是应用内视图）。
+ *
+ * ★ 回收站也在这里，但**不持久化**：view 只是内存状态，重启回 'list'（既有行为，别顺手改）。
+ */
+export type View = 'list' | 'settings' | 'wordcloud' | 'optimize' | 'trash';
 /** 窗口形态：主面板 900×620 / 小组件 280×420（spec §6.6）。 */
 export type AppMode = 'main' | 'widget';
 
@@ -42,6 +58,8 @@ export interface Toast {
   id: number;
   text: string;
   tone: ToastTone;
+  /** 可选的按钮式动作；渲染成提示条右侧的小按钮（Toast.tsx 里与文案是兄弟节点）。 */
+  action?: ToastAction;
 }
 
 /** 连续复制的预选提示（spec §7.5：只预选，不自动合并）。 */
@@ -72,6 +90,16 @@ export interface ClipStoreState {
   mergeHint: MergeHint | null;
   /** Ctrl+Delete 第一次按下后的待确认态（3 秒内再按才真的清空）。 */
   confirmClear: boolean;
+  /** 回收站列表（按删除时间倒序，独立分页，与主列表的 kind/搜索无关）。 */
+  trashItems: ClipItemDTO[];
+  /** 回收站真实总条数（trashCount）；取不到时为 -1。 */
+  trashTotal: number;
+  trashLoading: boolean;
+  /**
+   * 最近一次删除的 id，供「撤销」用。
+   * ★ 只在删除成功后才写、3 秒后清空：失败回滚时这些行还在列表里，给撤销只会撤出个空。
+   */
+  lastDeletedIds: string[];
   wordcloud: WordCloudData | null;
   /** 优化面板的原文初值：由卡片「优化」按钮带出（计划 Task 7 Step 3）。 */
   optimizeSource: string;
@@ -98,14 +126,38 @@ export interface ClipStoreActions {
   togglePin(id: string): Promise<void>;
   remove(id: string | string[]): Promise<void>;
   removeSelected(): Promise<void>;
+  /** 撤销最近一次删除：逐条 restore + 重新 load；部分失败时如实报数。 */
+  undoRemove(): Promise<void>;
+  /**
+   * 记录刚删掉的 id 并弹出带「撤销」的提示（3 秒窗口）。
+   * 内部动作，但导出到 actions 上便于单测直接驱动。
+   */
+  armUndo(ids: string[]): void;
   pasteSelected(): Promise<void>;
   mergeSelected(): Promise<void>;
   clearUnpinned(): Promise<void>;
   /** 键盘 Ctrl+Delete：第一次只提示，3 秒内再按一次才执行（与设置页的两次点击确认对齐）。 */
   pressClearUnpinned(): void;
   clearAll(): Promise<void>;
-  /** 导出全部记录为 JSON（设置页「数据」区）。 */
+  /** 拉回收站第一页（替换列表）。 */
+  loadTrash(): Promise<void>;
+  /** 打开回收站并拉第一页（侧栏入口 / 托盘导航）。 */
+  openTrash(): Promise<void>;
+  /** 回收站滚到底加载下一页。 */
+  loadMoreTrash(): Promise<void>;
+  /** 从回收站恢复一条；失败（duplicate/missing）时**不移除**这一条，如实提示。 */
+  restoreFromTrash(id: string): Promise<void>;
+  /** 永久删除回收站里的一条（删盘）。 */
+  purgeFromTrash(id: string): Promise<void>;
+  /** 清空回收站（全部硬删 + 删盘）。破坏性，调用方负责二次确认。 */
+  emptyTrash(): Promise<void>;
+  /** 导出全部记录为 zip（设置页「数据」区）。用户取消不算失败，静默返回。 */
   exportAll(): Promise<void>;
+  /**
+   * 从 zip 备份包导入（设置页「数据」区）。纯加法：重复 id / 哈希一律跳过，绝不覆盖。
+   * 成功后的汇总提示由主进程发（它知道四类计数），这里只刷新列表，不重复 toast。
+   */
+  importAll(): Promise<void>;
   updateSettings(patch: Partial<Settings>): Promise<void>;
   setWidgetSize(px: number): Promise<void>;
   setGhost(minutes: number): Promise<void>;
@@ -115,8 +167,13 @@ export interface ClipStoreActions {
   exportWordCloud(): Promise<void>;
   setAutoStart(on: boolean): Promise<boolean>;
   openDataFolder(): Promise<void>;
-  /** 弹一条浮层提示。 */
-  toast(text: string, tone?: ToastTone): void;
+  /** 弹一条浮层提示。action 给了就在提示条上渲染成可点按钮（撤销用）。 */
+  toast(text: string, tone?: ToastTone, action?: ToastAction): void;
+  /**
+   * 主进程推来的提示（app:toast）。与本地 toast 共用同一套渲染与自动消失，
+   * 单独开一个名字是为了让调用点看得出"这条不是我发的"，将来要改行为（比如去重）也好改。
+   */
+  pushToast(text: string, tone: ToastTone): void;
   dismissToast(id: number): void;
   setMergeHint(hint: MergeHint | null): void;
   /** 主进程发来连续复制提示：预选这几条 + 浮出提示条（**不合并**，spec §7.5）。 */
@@ -160,9 +217,20 @@ function listQuery(kind: KindFilter, q: string, offset: number): ListQuery {
 // 防抖定时器与请求序号放在模块作用域：同一个渲染进程只应有一份。
 let queryTimer: ReturnType<typeof setTimeout> | null = null;
 let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+/** 撤销窗口（删除后 3 秒内可反悔）的到期定时器。 */
+let undoWindowTimer: ReturnType<typeof setTimeout> | null = null;
 let loadSeq = 0;
 let toastSeq = 0;
 let unsubscribers: (() => void)[] = [];
+
+/** 收起撤销窗口：清定时器 + 丢掉待撤销的 id（幂等）。 */
+function clearUndoWindow(): void {
+  if (undoWindowTimer) {
+    clearTimeout(undoWindowTimer);
+    undoWindowTimer = null;
+  }
+  useClipStore.setState({ lastDeletedIds: [] });
+}
 
 /** 定时器在 Node 里 unref，避免单测被挂住的定时器拖住。 */
 function unref(timer: ReturnType<typeof setTimeout>): void {
@@ -200,6 +268,10 @@ function initialState(): ClipStoreState {
     toasts: [],
     mergeHint: null,
     confirmClear: false,
+    trashItems: [],
+    trashTotal: -1,
+    trashLoading: false,
+    lastDeletedIds: [],
     wordcloud: null,
     optimizeSource: '',
   };
@@ -215,6 +287,10 @@ export function resetClipStore(): void {
   if (confirmTimer) {
     clearTimeout(confirmTimer);
     confirmTimer = null;
+  }
+  if (undoWindowTimer) {
+    clearTimeout(undoWindowTimer);
+    undoWindowTimer = null;
   }
   loadSeq = 0;
   useClipStore.setState(initialState());
@@ -298,6 +374,23 @@ export const useClipStore = create<ClipStore>((set, get) => ({
     }
   },
 
+  loadTrash: async () => {
+    set({ trashLoading: true });
+    try {
+      const platform = getPlatform();
+      // 列表与总数同一轮取：分开算会出现「回收站（3 条）」下面却挂着 5 张卡片。
+      const [items, counted] = await Promise.all([
+        platform.items.trashList({ limit: TRASH_PAGE_SIZE, offset: 0 }),
+        // 取不到总数退回 -1（nextTrashOffset 对 -1 有专门的保守处理）。
+        platform.items.trashCount().catch(() => -1),
+      ]);
+      set({ trashItems: items, trashTotal: counted, trashLoading: false });
+    } catch (err) {
+      set({ trashLoading: false, trashItems: [], trashTotal: 0 });
+      get().toast(errorText(err), 'error');
+    }
+  },
+
   select: (id, opts) => {
     if (!id) {
       set({ selectedId: null, selectedIds: [], mergeHint: null });
@@ -355,6 +448,124 @@ export const useClipStore = create<ClipStore>((set, get) => ({
       for (const one of ids) await getPlatform().items.remove(one);
     } catch (err) {
       set({ items: before });
+      get().toast(errorText(err), 'error');
+      return;
+    }
+    // ★ 只在**全部删成功**后才开撤销窗口：中途抛错已回滚，那些行还在列表里，
+    //   此时给「撤销」会撤出个空操作，用户会以为撤销坏了。
+    get().armUndo(ids);
+  },
+
+  armUndo: (ids) => {
+    if (ids.length === 0) return;
+    clearUndoWindow();
+    set({ lastDeletedIds: [...ids] });
+    const { text, tone } = removeToast(ids.length);
+    get().toast(text, tone, {
+      label: UNDO_LABEL,
+      onClick: () => {
+        void get().undoRemove();
+      },
+    });
+    undoWindowTimer = setTimeout(() => {
+      undoWindowTimer = null;
+      // 窗口过期只清撤销能力，不回收提示条本身（它由 toast 自己的 TTL 管）。
+      set({ lastDeletedIds: [] });
+    }, TOAST_TTL_MS);
+    unref(undoWindowTimer);
+  },
+
+  undoRemove: async () => {
+    const ids = get().lastDeletedIds;
+    if (ids.length === 0) return;
+    // 先收起窗口再恢复：连点两次「撤销」不应该把同一批 restore 两遍。
+    clearUndoWindow();
+    let restored = 0;
+    let failed = 0;
+    try {
+      const platform = getPlatform();
+      for (const one of ids) {
+        // restore 失败是**结果**不是异常（同内容已在列表 → ok:false）。
+        const result = await platform.items.restore(one);
+        if (result.ok) restored += 1;
+        else failed += 1;
+      }
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+      return;
+    }
+    await get().load();
+    const { text, tone } = undoToast(restored, failed);
+    get().toast(text, tone);
+  },
+
+  openTrash: async () => {
+    set({ view: 'trash' });
+    await get().loadTrash();
+  },
+
+  loadMoreTrash: async () => {
+    const { trashLoading, trashItems, trashTotal } = get();
+    if (trashLoading) return;
+    const offset = nextTrashOffset(trashItems.length, trashTotal);
+    if (offset === null) return;
+    set({ trashLoading: true });
+    try {
+      const next = await getPlatform().items.trashList({ limit: TRASH_PAGE_SIZE, offset });
+      // 逐页追加；万一主进程在两次请求之间又删了行导致同一 id 回来，按 id 去重。
+      const seen = new Set(get().trashItems.map((it) => it.id));
+      set({
+        trashItems: [...get().trashItems, ...next.filter((it) => !seen.has(it.id))],
+        trashLoading: false,
+      });
+    } catch (err) {
+      set({ trashLoading: false });
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  restoreFromTrash: async (id) => {
+    try {
+      const result = await getPlatform().items.restore(id);
+      if (result.ok) {
+        await get().loadTrash();
+        // 恢复成功会广播 itemsChanged，但那只驱动主列表；这里主动补一次 load，
+        // 让用户在回收站里就能看到主列表数字已经变了（不用等切回列表）。
+        await get().load();
+        get().toast('已恢复 1 条', 'ok');
+        return;
+      }
+      // ★ duplicate / missing 时**不能**把这条从回收站列表里摘掉：
+      //   主进程恢复失败、没有广播 itemsChanged，这一行仍在回收站里，摘掉就是骗人。
+      //   duplicate 的提示由主进程 toast 过了（main.ts 的 items:restore 分支），这里不重复。
+      if (result.reason !== 'duplicate') {
+        get().toast(result.reason === 'missing' ? '这条已经不在回收站里了' : '恢复失败，请重试', 'warn');
+        await get().loadTrash();
+      }
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  purgeFromTrash: async (id) => {
+    try {
+      await getPlatform().items.purge([id]);
+      await get().loadTrash();
+      // 硬删也动了主列表（回收站行本就不在主列表里，但总数/预算可能变），顺手对齐一次。
+      await get().load();
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  emptyTrash: async () => {
+    try {
+      const result = await getPlatform().items.emptyTrash();
+      set({ trashItems: [], trashTotal: 0 });
+      await get().loadTrash();
+      await get().load();
+      if (result.removed > 0) get().toast('已清空回收站（' + result.removed + ' 条）', 'ok');
+    } catch (err) {
       get().toast(errorText(err), 'error');
     }
   },
@@ -452,10 +663,30 @@ export const useClipStore = create<ClipStore>((set, get) => ({
     try {
       const result = await getPlatform().items.exportAll();
       if (result.ok) {
-        get().toast('已导出到数据目录：' + (result.path ?? ''), 'ok');
+        get().toast('已导出到：' + (result.path ?? ''), 'ok');
         return;
       }
-      get().toast('导出失败，请检查数据目录是否可写', 'warn');
+      // ★ 用户在保存对话框点「取消」不是失败：既没落盘也没出错，
+      //   弹「导出失败」会让人以为出了故障。静默返回。
+      if (result.cancelled) return;
+      get().toast('导出失败：' + (result.reason ?? '未知原因'), 'warn');
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  importAll: async () => {
+    try {
+      const result = await getPlatform().items.importAll();
+      // 取消是正常操作，静默（与导出同一套语义）。
+      if (result.cancelled) return;
+      if (!result.ok) {
+        get().toast('导入失败：' + (result.reason ?? '未知原因'), 'warn');
+        return;
+      }
+      // ★ 成功时不 toast：主进程已经用 importSummaryText 报过「导入 N 条 / 跳过 M 条重复」，
+      //   渲染层再弹一遍就是两条重复提示。这里只负责把新数据刷进列表。
+      await get().load();
     } catch (err) {
       get().toast(errorText(err), 'error');
     }
@@ -539,15 +770,19 @@ export const useClipStore = create<ClipStore>((set, get) => ({
     }
   },
 
-  toast: (text, tone = 'ok') => {
+  toast: (text, tone = 'ok', action) => {
     const id = ++toastSeq;
-    set({ toasts: [...get().toasts, { id, text, tone }] });
+    // action 只有给了才写进对象：否则 toEqual({id,text,tone}) 的既有断言会因为
+    // 多出一个 action: undefined 而失败。
+    set({ toasts: [...get().toasts, action ? { id, text, tone, action } : { id, text, tone }] });
     unref(
       setTimeout(() => {
         set({ toasts: get().toasts.filter((t) => t.id !== id) });
       }, TOAST_TTL_MS),
     );
   },
+
+  pushToast: (text, tone) => get().toast(text, tone),
 
   dismissToast: (id) => set({ toasts: get().toasts.filter((t) => t.id !== id) }),
 
@@ -602,6 +837,12 @@ export function bindClipStore(): () => void {
       // 托盘「设置…」与热键唤出：切视图；词云要先拉数据（spec §6.9）。
       set({ view: target });
       if (target === 'wordcloud') void get().loadWordCloud();
+    }),
+    // ★ 主进程主动推的提示（恢复遇重复 / 删盘失败 / 导入汇总）。
+    //   放在 bindClipStore 而不是 App 的 useEffect 里：这里已经幂等
+    //   （重复挂载返回同一个取消函数），挂两处会叠加监听、同一条提示弹两次。
+    platform.app.onToast((t) => {
+      get().pushToast(t?.message ?? '', appToastTone(t?.kind ?? 'info'));
     }),
   ];
   return unbindClipStore;

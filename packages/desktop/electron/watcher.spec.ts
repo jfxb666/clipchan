@@ -15,7 +15,9 @@ import {
   FAILURE_TRACE_THRESHOLD,
   IMAGE_SIG_HEAD_BYTES,
   LastSeen,
+  SOURCE_APP_TIMEOUT_MS,
   imageSignature,
+  isSelfExe,
   shouldSkipFormats,
   writeWatcherTrace,
 } from './watcher';
@@ -120,19 +122,31 @@ function makeClip(
 }
 
 /** 假记录器：只记下"被要求记录了什么"，不碰数据库。 */
-function makeSink(): { sink: RecordSink; texts: string[]; images: (string | null | undefined)[] } {
+function makeSink(): {
+  sink: RecordSink;
+  texts: string[];
+  images: (string | null | undefined)[];
+  /** 与 texts 一一对应的来源（undefined = 未知）。 */
+  textSources: (string | undefined)[];
+  /** 与 images 一一对应的来源。 */
+  imageSources: (string | undefined)[];
+} {
   const texts: string[] = [];
   const images: (string | null | undefined)[] = [];
+  const textSources: (string | undefined)[] = [];
+  const imageSources: (string | undefined)[] = [];
   const sink: RecordSink = {
     lastSeen: new LastSeen(),
-    recordText: (t: string) => {
+    recordText: (t: string, sourceApp?: string) => {
       texts.push(t);
+      textSources.push(sourceApp);
     },
-    recordImage: (_img: NativeImageLike, sig?: string | null) => {
+    recordImage: (_img: NativeImageLike, sig?: string | null, sourceApp?: string) => {
       images.push(sig);
+      imageSources.push(sourceApp);
     },
   };
-  return { sink, texts, images };
+  return { sink, texts, images, textSources, imageSources };
 }
 
 describe('shouldSkipFormats（纯函数）', () => {
@@ -304,6 +318,213 @@ describe('ClipboardWatcher.tick 两级读取', () => {
     await sleep(30);
     w1.stop();
     expect(texts).toEqual([]);
+  });
+});
+
+describe('isSelfExe（排除自身，避免自引用来源）', () => {
+  it('electron.exe / clipchan.exe / clipchan-helper.exe 都算自己（大小写不敏感）', () => {
+    expect(isSelfExe('electron.exe')).toBe(true);
+    expect(isSelfExe('Clipchan.exe')).toBe(true);
+    expect(isSelfExe('CLIPCHAN-HELPER.EXE')).toBe(true);
+  });
+
+  it('别的程序不算自己；null / undefined / 空串也不算', () => {
+    expect(isSelfExe('notepad.exe')).toBe(false);
+    expect(isSelfExe('code.exe')).toBe(false);
+    expect(isSelfExe(null)).toBe(false);
+    expect(isSelfExe(undefined)).toBe(false);
+    expect(isSelfExe('')).toBe(false);
+  });
+});
+
+describe('ClipboardWatcher 来源应用追踪（sourceApp）', () => {
+  it('检测到新内容时取前台 exe 名并随记录一起交给 sink', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '来自记事本' });
+    const { sink, texts, textSources } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => 'notepad.exe',
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['来自记事本']);
+    expect(textSources).toEqual(['notepad.exe']);
+  });
+
+  it('★ 助手不可用（foregroundExe 返回 null）时照常记录，sourceApp 为 undefined', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '没有来源也要记' });
+    const { sink, texts, textSources } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => null,
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['没有来源也要记']);
+    expect(textSources).toEqual([undefined]);
+  });
+
+  it('★ 取来源抛异常时照常记录，且异常不冒泡到轮询循环', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '助手炸了也要记' });
+    const { sink, texts, textSources } = makeSink();
+    const traces: string[] = [];
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => {
+        throw new Error('助手崩了');
+      },
+      onTrace: (m) => traces.push(m),
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['助手炸了也要记']);
+    expect(textSources).toEqual([undefined]);
+    expect(traces.some((t) => t.includes('取来源应用失败'))).toBe(true);
+    expect(w.failureCount).toBe(0); // 取来源失败不算剪贴板读取失败
+  });
+
+  it('★ 助手活着但不回包（超时）时照常记录，不被来源拖住', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '助手不回包' });
+    const { sink, texts, textSources } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      // 永不兑现：模拟助手活着但不回包
+      foregroundExe: () => new Promise<string | null>(() => {}),
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1, SOURCE_APP_TIMEOUT_MS + 2000);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['助手不回包']);
+    expect(textSources).toEqual([undefined]);
+  });
+
+  it('★ 前台是自己（面板内粘贴回写）时不记来源', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '面板里复制的内容' });
+    const { sink, texts, textSources } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => 'electron.exe',
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['面板里复制的内容']);
+    expect(textSources).toEqual([undefined]);
+  });
+
+  it('没注入 foregroundExe 时视为"来源未知"（向后兼容）', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: 'x' });
+    const { sink, texts, textSources } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(textSources).toEqual([undefined]);
+  });
+
+  it('图片也带来源', async () => {
+    const clip = makeClip({ formats: ['image/png'], imageBuf: Buffer.alloc(128, 3) });
+    const { sink, images, imageSources } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => 'mspaint.exe',
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => images.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(imageSources).toEqual(['mspaint.exe']);
+  });
+
+  it('同一内容连续多跳只问一次助手（不为重复内容反复取来源）', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '同一份' });
+    const { sink, texts } = makeSink();
+    let probes = 0;
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => {
+        probes += 1;
+        return 'notepad.exe';
+      },
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await sleep(40);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(probes).toBe(1);
+  });
+
+  it('内容按复制顺序落库（来源查询慢也不会让记录乱序）', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '第一' });
+    const { sink, texts } = makeSink();
+    let call = 0;
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      // 第一次慢、第二次快：串行链必须保证"第一"先落
+      foregroundExe: async () => {
+        call += 1;
+        if (call === 1) await sleep(60);
+        return 'notepad.exe';
+      },
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    clip.state.text = '第二';
+    await waitFor(() => texts.length === 2);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['第一', '第二']);
   });
 });
 

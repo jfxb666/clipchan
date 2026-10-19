@@ -37,6 +37,26 @@ describe('parseHelperLine', () => {
     expect(parseHelperLine('FG 131072')).toEqual({ kind: 'FG', hwnd: 131072 });
   });
 
+  it('FGEXE <句柄> <exe名>', () => {
+    expect(parseHelperLine('FGEXE 12345 Code.exe')).toEqual({
+      kind: 'FGEXE',
+      hwnd: 12345,
+      exe: 'Code.exe',
+    });
+  });
+
+  it('FGEXE 取不到时助手发 "FGEXE 0 -"，解析层照收（判 null 是客户端的事）', () => {
+    expect(parseHelperLine('FGEXE 0 -')).toEqual({ kind: 'FGEXE', hwnd: 0, exe: '-' });
+  });
+
+  it('FGEXE 畸形行返回 UNKNOWN：句柄非数字 / 少一段 / 多一段', () => {
+    // 多一段的情况是 exe 名里带空格（"My App.exe"）：宁可没有来源，
+    // 也不要把名字截成 "My" 记一个错的来源。
+    for (const line of ['FGEXE abc Code.exe', 'FGEXE 123', 'FGEXE 123 Code.exe extra', 'FGEXE']) {
+      expect(parseHelperLine(line)).toEqual({ kind: 'UNKNOWN', raw: line });
+    }
+  });
+
   it('PONG <标记>', () => {
     expect(parseHelperLine('PONG tag')).toEqual({ kind: 'PONG', tag: 'tag' });
   });
@@ -84,6 +104,7 @@ describe('HelperClient 降级（不假装）', () => {
     await expect(client.paste(65536)).resolves.toEqual({ ok: false, reason: 'send-failed' });
     await expect(client.blur(65536, true, 0xcc1a1a1a)).resolves.toBe(false);
     await expect(client.foreground()).resolves.toBe(0);
+    await expect(client.foregroundExe()).resolves.toBeNull();
     expect(() => client.prewarm()).not.toThrow();
     await expect(client.dispose()).resolves.toBeUndefined();
   });
@@ -135,12 +156,14 @@ describe('HelperClient 与假助手进程', () => {
     const { spawnImpl, children } = makeFake((line, child) => {
       if (line === 'PASTE 65536') child.stdout.emit('data', 'RESULT 65536 0 ok\n');
       if (line === 'FG') child.stdout.emit('data', 'FG 131072\n');
+      if (line === 'FGEXE') child.stdout.emit('data', 'FGEXE 131072 Code.exe\n');
       if (line === 'BLUR 65536 1 3424262682') child.stdout.emit('data', 'BLUR 65536 0\n');
     });
     const client = new HelperClient({ exePath: 'C:\\fake\\clipchan-helper.exe', spawnImpl });
     expect(client.available).toBe(true);
     await expect(client.paste(65536)).resolves.toEqual({ ok: true });
     await expect(client.foreground()).resolves.toBe(131072);
+    await expect(client.foregroundExe()).resolves.toBe('Code.exe');
     await expect(client.blur(65536, true, 0xcc1a1a1a)).resolves.toBe(true);
     expect(children.length).toBe(1);
     await client.dispose();
@@ -199,6 +222,25 @@ describe('HelperClient 与假助手进程', () => {
     await expect(client.paste(1)).resolves.toEqual({ ok: false, reason: 'send-failed' });
     await expect(client.blur(1, true)).resolves.toBe(false);
     await expect(client.foreground()).resolves.toBe(0);
+    await expect(client.foregroundExe()).resolves.toBeNull();
+    await client.dispose();
+  });
+
+  it('助手回 "FGEXE 0 -" → foregroundExe() 归一成 null（取不到来源）', async () => {
+    const { spawnImpl } = makeFake((line, child) => {
+      if (line === 'FGEXE') child.stdout.emit('data', 'FGEXE 0 -\n');
+    });
+    const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl });
+    await expect(client.foregroundExe()).resolves.toBeNull();
+    await client.dispose();
+  });
+
+  it('助手回畸形 FGEXE 行 → 超时兜底返回 null，不抛异常', async () => {
+    const { spawnImpl } = makeFake((line, child) => {
+      if (line === 'FGEXE') child.stdout.emit('data', 'FGEXE 123 Code.exe extra\n');
+    });
+    const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl, timeoutMs: 30 });
+    await expect(client.foregroundExe()).resolves.toBeNull();
     await client.dispose();
   });
 
@@ -239,6 +281,13 @@ describe.skipIf(!existsSync(realExe))('HelperClient 对接真实 exe', () => {
     const hwnd = await client.foreground();
     expect(Number.isInteger(hwnd)).toBe(true);
     expect(hwnd).toBeGreaterThan(0);
+    await client.dispose();
+  });
+
+  it('FGEXE 返回 exe 名或 null（取决于此刻前台是什么），且不抛异常', async () => {
+    const client = new HelperClient({ exePath: realExe });
+    const exe = await client.foregroundExe();
+    expect(exe === null || /^[^\\/]+\.exe$/i.test(exe)).toBe(true);
     await client.dispose();
   });
 

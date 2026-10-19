@@ -7,7 +7,7 @@
  *   —— 绝不返回 undefined 假装成功（Global Constraints：不假装）。
  */
 import { ipcMain, shell } from 'electron';
-import type { Capabilities } from '@clipchan/core';
+import type { Capabilities, RestoreResult } from '@clipchan/core';
 import { ALL_INVOKE_CHANNELS, CH, EV } from './channels';
 
 export type IpcHandler = (event: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown;
@@ -88,6 +88,27 @@ export function registerIpc(deps: IpcDeps = {}): string[] {
     void shell.openPath(String(target));
   });
   return registeredChannels();
+}
+
+/**
+ * 恢复一条并把"没恢复成"翻译成可读结果。
+ *
+ * ★ 为什么不用异常：db.restore 在同内容已占住活跃行时返回 false（唯一索引挡住 UPDATE），
+ *   这是**正常的用户可解释状态**而不是错误。抛异常会让渲染层只看到一句
+ *   "Error invoking remote method 'items:restore'" 然后界面静默失败。
+ * ★ 两种失败必须分开：行还在回收站 = duplicate（同内容已在列表）；
+ *   行已经不在了 = missing（被 purge 或 id 不存在）。
+ */
+export interface RestoreCapableDb {
+  restore(id: string): boolean;
+  getRow(id: string): { deleted_at: number | null } | null;
+}
+
+export function runRestore(db: RestoreCapableDb, id: string): RestoreResult {
+  if (db.restore(id)) return { ok: true };
+  const row = db.getRow(id);
+  if (row && typeof row.deleted_at === 'number') return { ok: false, reason: 'duplicate' };
+  return { ok: false, reason: 'missing' };
 }
 
 /** 主进程 -> 渲染进程广播。 */

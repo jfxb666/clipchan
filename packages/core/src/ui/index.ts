@@ -9,6 +9,20 @@ export { Sidebar, NAV_ITEMS, type NavItem } from './Sidebar';
 export { SearchBar } from './SearchBar';
 export { ClipCard } from './ClipCard';
 export { ListPanel, LOAD_MORE_THRESHOLD_PX } from './ListPanel';
+export { TrashView, type TrashViewProps } from './TrashView';
+export {
+  TRASH_PAGE_SIZE,
+  TRASH_MAX_LIMIT,
+  EMPTY_TRASH_CONFIRM_TTL_MS,
+  EMPTY_TRASH_HINT,
+  deletedAtText,
+  emptyTrashLabel,
+  isTrashEmpty,
+  nextTrashOffset,
+  purgeLabel,
+  shouldShowEmptyTrash,
+  trashTitle,
+} from './trashViewLogic';
 export { OptimizeView, type OptimizeScene, type OptimizeViewProps } from './OptimizeViewCard';
 export { OPTIMIZE_MODES, degradedHint, type OptimizeMode } from './optimizeView';
 export { WidgetView, WIDGET_PREVIEW_COUNT, visibleWidgetItems } from './WidgetView';
@@ -34,6 +48,7 @@ export {
 export { TypeBadge } from './TypeBadge';
 export { EmptyState } from './EmptyState';
 export { Toast, ToastStack, type ToastItem } from './Toast';
+export { UNDO_LABEL, removeToast, undoToast } from './toastText';
 export { WordCloudView } from './WordCloudView';
 export {
   SettingsView,
@@ -45,6 +60,9 @@ export {
   HISTORY_SLIDER_MIN,
   HISTORY_SLIDER_STEP,
   IMAGE_BUDGET_OPTIONS,
+  TRASH_LIMIT_MAX,
+  TRASH_LIMIT_MIN,
+  TRASH_LIMIT_OPTIONS,
   WIDGET_SIZE_MAX,
   WIDGET_SIZE_MIN,
 } from './SettingsView';
@@ -86,6 +104,7 @@ export {
   mergeToast,
   copyToast,
   pasteToast,
+  type ToastAction,
   type ToastTone,
 } from './toastText';
 export {

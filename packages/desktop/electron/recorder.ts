@@ -51,6 +51,17 @@ function describeError(e: unknown): string {
 }
 
 /**
+ * 来源应用名归一化：空白/空串一律当"未知"（undefined），绝不写空串或占位串。
+ *
+ * 数据库里"未知"只有一个表示法——NULL。写 "" 会让"按来源分组"多出一个空分组。
+ */
+export function normalizeSourceApp(sourceApp: string | null | undefined): string | undefined {
+  if (typeof sourceApp !== 'string') return undefined;
+  const trimmed = sourceApp.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
  * 记录器。
  *
  * `lastSeen` 与轮询器**共享同一份**（轮询器从 `recorder.lastSeen` 读），
@@ -116,7 +127,7 @@ export class Recorder {
    * 截断与去重 db 层也会做一遍（两层结果一致），这里显式做是为了把
    * "10 万字符上限 + truncated 标记"这条规格钉在记录管线里，而不是散落在存储层。
    */
-  recordText(text: string): InsertResult | null {
+  recordText(text: string, sourceApp?: string): InsertResult | null {
     if (typeof text !== 'string') return null;
     const cleaned = text.replace(/\0/g, '');
     if (cleaned.length === 0) return null;
@@ -130,7 +141,14 @@ export class Recorder {
 
     try {
       const result = this.withEvictionWatch(() =>
-        this.db.insertText(content, { kind: classify(content), truncated, now: this.nowFn() }),
+        this.db.insertText(content, {
+          kind: classify(content),
+          truncated,
+          now: this.nowFn(),
+          // 去重命中时 db 不刷新来源：已有行记的是"最初那条"的真实来源，
+          // 拿后来的来源覆盖它才是错的。
+          sourceApp: normalizeSourceApp(sourceApp),
+        }),
       );
       this.afterWrite();
       return result;
@@ -150,7 +168,7 @@ export class Recorder {
    *
    * 去重命中（同一张图已在库里）时：丢弃刚落盘的临时文件，库行保持原样并刷新排序（db 层做）。
    */
-  recordImage(img: NativeImageLike): InsertResult | null {
+  recordImage(img: NativeImageLike, sig?: string | null, sourceApp?: string): InsertResult | null {
     if (!img || typeof img.isEmpty !== 'function' || img.isEmpty()) return null;
 
     const tmpId = randomUUID().replace(/-/g, '');
@@ -178,7 +196,7 @@ export class Recorder {
             imagePath: saved.image_path,
             thumbPath: saved.thumb_path,
           },
-          { now: this.nowFn() },
+          { now: this.nowFn(), sourceApp: normalizeSourceApp(sourceApp) },
         ),
       );
     } catch (e) {
@@ -219,22 +237,28 @@ export class Recorder {
   }
 
   /**
-   * 包住一次写入，捕捉 `db.evictOverLimit()` 顺手删掉的行，并**同步删掉它们的图片文件**。
+   * 包住一次写入，捕捉 `db.evictOverLimit()` 顺手淘汰掉的图片行，并**同步删掉它们的图片文件**。
    *
-   * db 层的上限淘汰是裸 DELETE（它不认识文件系统），所以"按上限淘汰"这条删除路径
-   * 必须在这里补齐文件清理（spec §7.3 的三条删除路径之一）。
+   * ★ v0.3.0 起 `evictOverLimit` 是**软删**（只盖 `deleted_at`），所以"前后差集"恒为空 ——
+   *   按 id 差集判断会一个文件都删不到，被淘汰的图片永远留在盘上。
+   *   这里改成看 `deleted_at` 的**翻转**：写入前活跃、写入后进回收站的行才是本次淘汰的目标。
+   * ★ 只认"活跃 → 回收站"这一个方向：回收站 → 活跃（恢复）不该删文件；
+   *   回收站里本来就有的行也不该被这次写入顺手删盘。
+   * ★ 已经在回收站里的行**不重复删文件**：它们的文件按 §1.1 必须留着等用户恢复或 purge。
+   *   所以这里刻意**不删盘**——上限淘汰进回收站，文件留在原处（这正是回收站的意义）。
    */
   private withEvictionWatch<T>(fn: () => T): T {
-    const before = new Map(this.db.allImageRows().map((r) => [r.id, r] as const));
+    const before = new Map(this.db.allImageRows().map((r) => [r.id, r.deleted_at] as const));
     const result = fn();
-    const after = new Set(this.db.allImageRows().map((r) => r.id));
-
-    const gone: (string | null)[] = [];
-    for (const [id, row] of before) {
-      if (after.has(id)) continue;
-      gone.push(row.image_path, row.thumb_path);
+    // 仅用于诊断：把"本次写入把哪些活跃图片行送进了回收站"记一笔，
+    // 便于真机上核对上限淘汰确实发生了（文件按设计不删）。
+    const moved: string[] = [];
+    for (const row of this.db.allImageRows()) {
+      if (row.deleted_at === null) continue;
+      const was = before.get(row.id);
+      if (was === null) moved.push(row.id);
     }
-    if (gone.length > 0) deleteImageFiles(this.dataDir, gone, this.onLog);
+    if (moved.length > 0) this.log('上限淘汰把 ' + moved.length + ' 条图片记录送进回收站（文件保留）');
     return result;
   }
 

@@ -10,6 +10,24 @@ import { pasteHintOf } from '../logic/paste';
 
 export type ToastTone = 'ok' | 'warn' | 'error';
 
+/**
+ * 浮层提示上的可点动作（目前只有「撤销」：删除后 3 秒内可反悔）。
+ * 放在这个纯文本模块里，是为了让 store 与 Toast.tsx 都只依赖它、不互相依赖。
+ */
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
+/**
+ * 主进程的 toast kind → 界面色调。
+ * info 落到 ok：主进程用 info 表示"说一声"（导入汇总这类中性信息），
+ * 而界面只有三档颜色，没有第四种"中性"可给 —— 硬要 warn/error 会让人以为出错。
+ */
+export function appToastTone(kind: 'info' | 'warn' | 'error'): ToastTone {
+  return kind === 'info' ? 'ok' : kind;
+}
+
 /** 幽灵模式期间复制的内容不会被记录，结束后也不补录（spec §6.8 ★）。 */
 export const GHOST_SKIP_TOAST = '幽灵模式中，本次复制没有记录（结束后也不会补录）';
 /** 幽灵模式关闭、轮询恢复。 */
@@ -52,4 +70,30 @@ export function mergeToast(
   };
   const reason = result.reason ?? '';
   return { text: map[reason] ?? '拼接失败，请重试', tone: 'warn' };
+}
+/** 「撤销」按钮的文案（删除后 3 秒窗口内出现）。 */
+export const UNDO_LABEL = '撤销';
+
+/** 删除后的提示文案：条数 + 3 秒内可撤销的提示。 */
+export function removeToast(count: number): { text: string; tone: ToastTone } {
+  return { text: '已删除 ' + count + ' 条（进回收站）', tone: 'ok' };
+}
+
+/**
+ * 撤销结果 → 提示文案。
+ *
+ * ★ 为什么要把「部分失败」单独成句：restore 失败的唯一常见原因是 duplicate
+ *   （同内容已在活跃列表里，唯一索引挡住 UPDATE）。这时用户点了撤销、看到的
+ *   却是"恢复失败"会以为功能坏了；如实说"恢复了 2 条、1 条本来就在列表里"才对得上事实。
+ */
+export function undoToast(restored: number, failed: number): { text: string; tone: ToastTone } {
+  if (failed === 0) {
+    return restored > 0
+      ? { text: '已恢复 ' + restored + ' 条', tone: 'ok' }
+      : { text: '没有可撤销的删除', tone: 'warn' };
+  }
+  if (restored === 0) {
+    return { text: '未恢复：同内容已在列表中', tone: 'warn' };
+  }
+  return { text: '已恢复 ' + restored + ' 条，' + failed + ' 条同内容已在列表中', tone: 'warn' };
 }

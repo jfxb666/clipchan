@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { planBudgetEviction, sweepOrphans } from './images-policy';
-import { removeItemsWithFiles, saveImage } from './images';
+import { purgeItemsWithFiles, saveImage } from './images';
 import type { NativeImageLike } from './images';
 import { openDb } from './db';
 
@@ -139,27 +139,70 @@ describe('saveImage', () => {
   });
 });
 
-describe('Review Focus 4：图片文件生命周期', () => {
-  it('删除图片记录后 images/<id>.* 与 thumbs/<id>.png 都消失', () => {
-    const dir = tmpDir();
-    const db = openDb(':memory:');
-    const saved = saveImage(dir, 'keep', makeFake(800, 600, false));
+describe('Review Focus 4：图片文件生命周期（v0.3.0 软删 vs 硬删）', () => {
+  /** 落一张真图并建行，返回库行 id 与两个文件的绝对路径。 */
+  function seedImage(db: ReturnType<typeof openDb>, dir: string, id: string) {
+    const saved = saveImage(dir, id, makeFake(800, 600, false));
     const r = db.insertImage({
-      hash: 'h-keep',
+      hash: 'h-' + id,
       width: saved.width,
       height: saved.height,
       bytes: saved.bytes,
       imagePath: saved.image_path,
       thumbPath: saved.thumb_path,
     });
-    expect(existsSync(join(dir, 'images', 'keep.jpg'))).toBe(true);
-    expect(existsSync(join(dir, 'thumbs', 'keep.png'))).toBe(true);
+    return {
+      rowId: r.id,
+      image: join(dir, 'images', id + '.jpg'),
+      thumb: join(dir, 'thumbs', id + '.png'),
+    };
+  }
 
-    const out = removeItemsWithFiles(db, dir, [r.id]);
+  it('★ 软删（remove）后记录进回收站，但原图与缩略图**仍在盘上**', () => {
+    const dir = tmpDir();
+    const db = openDb(':memory:');
+    const s = seedImage(db, dir, 'soft');
+    expect(existsSync(s.image)).toBe(true);
+    expect(existsSync(s.thumb)).toBe(true);
+
+    // 软删 = 只盖 deleted_at。走 db.remove（main.ts 的 items:remove 就是这么做的）。
+    const row = db.remove(s.rowId);
+    expect(row).not.toBeNull();
+
+    // 活跃列表里没有了、回收站里有
+    expect(db.list({ limit: 50 }).some((r) => r.id === s.rowId)).toBe(false);
+    expect(db.listTrash({}).some((r) => r.id === s.rowId)).toBe(true);
+    // ★ 回收站的全部意义：文件一个都没删
+    expect(existsSync(s.image)).toBe(true);
+    expect(existsSync(s.thumb)).toBe(true);
+    db.close();
+  });
+
+  it('★ purge 后记录与两个文件都消失（唯一删盘入口）', () => {
+    const dir = tmpDir();
+    const db = openDb(':memory:');
+    const s = seedImage(db, dir, 'purge');
+
+    const out = purgeItemsWithFiles(db, dir, [s.rowId]);
     expect(out.removed).toBe(1);
-    expect(db.getRow(r.id)).toBeNull();
-    expect(existsSync(join(dir, 'images', 'keep.jpg'))).toBe(false);
-    expect(existsSync(join(dir, 'thumbs', 'keep.png'))).toBe(false);
+    expect(out.log.failures).toEqual([]);
+    expect(db.getRow(s.rowId)).toBeNull();
+    expect(existsSync(s.image)).toBe(false);
+    expect(existsSync(s.thumb)).toBe(false);
+    db.close();
+  });
+
+  it('回收站里的行被 purge 时文件同样消失', () => {
+    const dir = tmpDir();
+    const db = openDb(':memory:');
+    const s = seedImage(db, dir, 'trashed');
+    db.remove(s.rowId); // 先进回收站
+    expect(existsSync(s.image)).toBe(true);
+
+    const out = purgeItemsWithFiles(db, dir, [s.rowId]);
+    expect(out.removed).toBe(1);
+    expect(existsSync(s.image)).toBe(false);
+    expect(existsSync(s.thumb)).toBe(false);
     db.close();
   });
 
@@ -170,6 +213,20 @@ describe('Review Focus 4：图片文件生命周期', () => {
     const out = sweepOrphans(dir, []);
     expect(out).toContain(join(dir, 'thumbs', 'orphan.png'));
     expect(existsSync(join(dir, 'thumbs', 'orphan.png'))).toBe(false);
+  });
+
+  it('★ 回收站行的文件不会被 sweepOrphans 当成孤儿删掉', () => {
+    const dir = tmpDir();
+    const db = openDb(':memory:');
+    const s = seedImage(db, dir, 'kept');
+    db.remove(s.rowId); // 进回收站，行还在库里
+
+    // allImageRows 含回收站行（db 侧刻意不过滤），所以孤儿扫描认得这两个文件
+    const removed = sweepOrphans(dir, db.allImageRows());
+    expect(removed).toEqual([]);
+    expect(existsSync(s.image)).toBe(true);
+    expect(existsSync(s.thumb)).toBe(true);
+    db.close();
   });
 
   it('文件删除失败时数据库删除仍提交（不回滚），且日志里有记录', () => {
@@ -187,7 +244,7 @@ describe('Review Focus 4：图片文件生命周期', () => {
       thumbPath: '',
     });
     const logs: string[] = [];
-    const out = removeItemsWithFiles(db, dir, [r.id], (m) => logs.push(m));
+    const out = purgeItemsWithFiles(db, dir, [r.id], (m: string) => logs.push(m));
     // 数据库删除已提交（不回滚）
     expect(out.removed).toBe(1);
     expect(db.getRow(r.id)).toBeNull();
@@ -195,5 +252,26 @@ describe('Review Focus 4：图片文件生命周期', () => {
     expect(out.log.failures.length).toBeGreaterThan(0);
     expect(logs.length).toBeGreaterThan(0);
     db.close();
+  });
+});
+
+describe('planBudgetEviction：回收站行优先腾', () => {
+  it('回收站行排在活跃行前面，即使它更新', () => {
+    const rows = [
+      { id: 'old-active', pinned: false, bytes: 100, created_at: 1 },
+      { id: 'new-trashed', pinned: false, bytes: 100, created_at: 9, deletedAt: 50 },
+    ];
+    // 总量 200、预算 100 → 目标 80，删一条就够（-100 → 100 > 80，要删两条）
+    const evicted = planBudgetEviction(rows, 100);
+    expect(evicted[0]).toBe('new-trashed');
+  });
+
+  it('回收站行也计入总量（文件还在盘上，不能假装不占额度）', () => {
+    const rows = [
+      { id: 'a', pinned: false, bytes: 100, created_at: 1, deletedAt: 5 },
+      { id: 'b', pinned: false, bytes: 100, created_at: 2 },
+    ];
+    // 若回收站行不计入总量（100）→ 已达标、返回空；计入（200）→ 必须淘汰
+    expect(planBudgetEviction(rows, 100).length).toBeGreaterThan(0);
   });
 });

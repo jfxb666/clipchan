@@ -22,7 +22,15 @@ export const CH = {
     getFullImage: 'items:getFullImage',
     count: 'items:count',
     exportAll: 'items:exportAll',
+    importAll: 'items:importAll',
     getText: 'items:getText',
+    // ★ 回收站五通道：加在这里就自动进 ALL_INVOKE_CHANNELS（它由 ...Object.values(CH.items) 展平），
+    //   所以 channels.ts 只需要改这一处，别再手工往下面那个数组里补。
+    trashList: 'items:trashList',
+    trashCount: 'items:trashCount',
+    restore: 'items:restore',
+    purge: 'items:purge',
+    emptyTrash: 'items:emptyTrash',
   },
   settings: { get: 'settings:get', set: 'settings:set' },
   ghost: { get: 'ghost:get', set: 'ghost:set' },

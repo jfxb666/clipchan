@@ -10,6 +10,7 @@ import { SettingsView } from './SettingsView';
 import { Sidebar } from './Sidebar';
 import { TitleBar } from './TitleBar';
 import { ToastStack } from './Toast';
+import { TrashView } from './TrashView';
 import { copyToast, pasteToast, type ToastTone } from './toastText';
 import { ContextMenu } from './ContextMenuView';
 import { menuItemsFor, type MenuAction } from './contextMenu';
@@ -64,6 +65,9 @@ export function App() {
   const toasts = useClipStore((s) => s.toasts);
   const wordcloud = useClipStore((s) => s.wordcloud);
   const mergeHint = useClipStore((s) => s.mergeHint);
+  const trashItems = useClipStore((s) => s.trashItems);
+  const trashTotal = useClipStore((s) => s.trashTotal);
+  const trashLoading = useClipStore((s) => s.trashLoading);
   /** 优化面板的原文初值：由卡片「优化」按钮写进来。 */
   const optimizeSource = useClipStore((s) => s.optimizeSource);
 
@@ -117,6 +121,7 @@ export function App() {
       clearInterval(tick);
     };
   }, []);
+
 
   // AI 模型列表：读一次 + 订阅主进程的变更（新增/编辑/删除后刷新）。
   // 非 Electron 环境读不到就保持空列表，不打扰用户（照 store.ts 的订阅写法）。
@@ -189,6 +194,9 @@ export function App() {
           return;
         case 'paste':
           void store.pasteSelected();
+          return;
+        case 'undo':
+          void store.undoRemove();
           return;
       }
     };
@@ -423,6 +431,7 @@ export function App() {
               useClipStore.getState().setView('list');
               useClipStore.getState().setKind(next);
             }}
+            onOpenTrash={() => void useClipStore.getState().openTrash()}
             onOpenSettings={() => useClipStore.getState().setView('settings')}
           />
         ) : null}
@@ -524,6 +533,7 @@ export function App() {
               onClearAll={clearAll}
               onOpenDataFolder={openDataFolder}
               onExportAll={() => void useClipStore.getState().exportAll()}
+              onImportAll={() => void useClipStore.getState().importAll()}
               onSetAutoStart={setAutoStart}
               onToggleMode={toggleMode}
               aiProviders={aiProviders}
@@ -546,6 +556,18 @@ export function App() {
               onToast={toast}
               onCancel={(requestId) => void getPlatform().ai.cancel(requestId)}
               onGoSettings={() => useClipStore.getState().setView('settings')}
+            />
+          ) : null}
+
+          {view === 'trash' ? (
+            <TrashView
+              items={trashItems}
+              total={trashTotal}
+              loading={trashLoading}
+              onLoadMore={() => void useClipStore.getState().loadMoreTrash()}
+              onRestore={(id) => void useClipStore.getState().restoreFromTrash(id)}
+              onPurge={(id) => void useClipStore.getState().purgeFromTrash(id)}
+              onEmptyTrash={() => void useClipStore.getState().emptyTrash()}
             />
           ) : null}
 

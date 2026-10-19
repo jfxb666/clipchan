@@ -22,12 +22,13 @@ import type { AiApi } from './ai';
 import { openDb } from './db';
 import type { Db, InsertResult } from './db';
 import { runLegacyMigration } from './migrate-runner';
-import { clearUnpinnedWithFiles, deleteImageFiles, enforceImageBudget, removeItemsWithFiles } from './images';
+import { enforceImageBudget, purgeItemsWithFiles, purgeTrashOverLimitWithFiles } from './images';
 import { sweepOrphans } from './images-policy';
 import { imageAbs, imagesDir, thumbsDir, dbFile, resolveDataDir } from './paths';
 import { THUMB_SCHEME, imageUrlFor, mapThumbUrl, resolveImageRequest, resolveThumbRequest } from './thumb-url';
 import { registerHotkeys, unregisterHotkeys } from './hotkeys';
-import { makeBroadcaster, registerIpc, registeredChannels } from './ipc';
+import { exportAllToZip, importAllFromZip, importSummaryText } from './export-import';
+import { makeBroadcaster, registerIpc, registeredChannels, runRestore } from './ipc';
 import type { IpcHandler } from './ipc';
 import { createTray, defaultTrayIcon, trayLabels, buildTrayMenu } from './tray';
 import { autoStartPath, enforceSingleInstance } from './startup';
@@ -300,18 +301,25 @@ function setupServices(dataDir: string): void {
 
   // ★ 连续复制检测与面板刷新都挂在"记录成功"这一刻：Recorder 没有回调，
   // 所以这里包一层 sink 转发 lastSeen，并在拿到 InsertResult 后做后处理。
+  // ★ sourceApp 是**可选参数**：只写 `(text) => recorder.recordText(text)` 也能编译通过，
+  //   于是类型检查全绿、来源功能却是死的（T5 的坑）。这里必须逐个参数显式转发。
   const sink: RecordSink = {
     get lastSeen() {
       return recorder.lastSeen;
     },
-    recordText: (text: string) => afterRecord(recorder.recordText(text)),
-    recordImage: (img) => afterRecord(recorder.recordImage(img)),
+    recordText: (text: string, sourceApp?: string) => afterRecord(recorder.recordText(text, sourceApp)),
+    recordImage: (img, sig?: string | null, sourceApp?: string) =>
+      afterRecord(recorder.recordImage(img, sig, sourceApp)),
   };
 
   watcher = new ClipboardWatcher({
     clip: clipboard,
     recorder: sink,
     isGhostActive: () => ghostSvc?.isActive() ?? false,
+    // ★ 来源应用要靠这条注入才真正接上：不传的话 watcher 里 resolveSourceApp 直接返回
+    //   undefined，source_app 永远是 NULL —— 编译通过、功能全死。
+    //   助手不可用/超时/前台是 clipchan 自己时 watcher 会归一成 undefined，照常记录。
+    foregroundExe: () => helperClient?.foregroundExe() ?? Promise.resolve(null),
     onNotice: (_kind, message) => makeBroadcaster(() => rt.win).toast(message, 'info'),
   });
 
@@ -409,9 +417,10 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
         return result;
       });
     },
+    // ★ v0.3.0 起删除 = 进回收站（软删）：只盖 deleted_at、**不删盘**。
+    //   所以这里没有任何"文件删不掉"的 toast —— 根本没删文件，留着那句提示只会误导用户。
     [CH.items.remove]: (_e, id: string) => {
-      const { log } = removeItemsWithFiles(needDb(), rt.dataDir, [String(id)], (m) => console.warn('[images] ' + m));
-      if (log.failures.length > 0) broadcast.toast('记录已删除，但有 ' + log.failures.length + ' 个图片文件未能删除', 'warn');
+      needDb().remove(String(id));
       broadcast.itemsChanged();
     },
     [CH.items.togglePin]: (_e, id: string) => {
@@ -419,23 +428,61 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       broadcast.itemsChanged();
     },
     [CH.items.clearUnpinned]: () => {
-      const { removed, log } = clearUnpinnedWithFiles(needDb(), rt.dataDir, (m) => console.warn('[images] ' + m));
-      if (log.failures.length > 0) broadcast.toast('已清空，但有 ' + log.failures.length + ' 个图片文件未能删除', 'warn');
+      // ★ 软删：进回收站、文件留在盘上（用户还能撤销）。不删盘 → 没有"文件删不掉"这回事。
+      const removed = needDb().clearUnpinned().length;
       broadcast.itemsChanged();
       return removed;
     },
     [CH.items.clearAll]: () => {
-      // ★ 先记下所有图片行、删库、再删文件 —— 顺序反了就拿不到相对路径了。
-      const rels: string[] = [];
-      for (const r of needDb().allImageRows()) {
-        if (r.image_path) rels.push(r.image_path);
-        if (r.thumb_path) rels.push(r.thumb_path);
-      }
+      // ★ 同上：软删全家桶，一个文件都不碰。真正的删盘只在 purge / 预算淘汰 / 回收站超限。
       const removed = needDb().clearAll();
-      const { log } = deleteImageFiles(rt.dataDir, rels, (m) => console.warn('[images] ' + m));
-      if (log.failures.length > 0) broadcast.toast('已清空，但有 ' + log.failures.length + ' 个图片文件未能删除', 'warn');
       broadcast.itemsChanged();
       return removed;
+    },
+    // ★ 回收站五通道（T2）：trashList 必须过 mapThumbUrl —— 回收站里的图片也要显示缩略图，
+    //   和 items:list 走同一条协议 URL 转换（库里存的是相对路径，渲染进程认不了）。
+    [CH.items.trashList]: (_e, q) => needDb().listTrash(q ?? {}).map(mapThumbUrl),
+    [CH.items.trashCount]: () => needDb().countTrash(),
+    [CH.items.restore]: (_e, id: string) => {
+      // ★ 语义在 ipc.ts 的 runRestore 里（可单测）：false 不抛异常，翻成
+      //   {ok:false, reason:'duplicate'|'missing'}，界面据此提示而不是静默失败。
+      const result = runRestore(needDb(), String(id));
+      if (result.ok) {
+        broadcast.itemsChanged();
+      } else if (result.reason === 'duplicate') {
+        broadcast.toast('同内容已在列表中，无需恢复', 'info');
+      }
+      return result;
+    },
+    [CH.items.purge]: (_e, ids: string[]) => {
+      const list = Array.isArray(ids) ? ids.map((x) => String(x)) : [];
+      if (list.length === 0) return { removed: 0 };
+      // ★ 唯一删盘入口：purgeItemsWithFiles 先取相对路径 → 删行 → 删文件。
+      const { removed, log } = purgeItemsWithFiles(needDb(), rt.dataDir, list, (m) =>
+        console.warn('[images] ' + m)
+      );
+      // 这里是**真的删了盘**，文件删不掉值得如实告诉用户（残留会在下次启动被孤儿扫描清掉）。
+      if (log.failures.length > 0) broadcast.toast('已永久删除，但有 ' + log.failures.length + ' 个图片文件未能删除', 'warn');
+      broadcast.itemsChanged();
+      return { removed };
+    },
+    [CH.items.emptyTrash]: () => {
+      const db = needDb();
+      // ★ 分页取全部回收站 id：listTrash 单次上限 500（db 的 MAX_LIMIT），
+      //   一次取 500 条循环到取空为止，避免回收站里超过 500 条时只清掉一半。
+      const ids: string[] = [];
+      const PAGE = 500;
+      for (;;) {
+        const page = db.listTrash({ limit: PAGE, offset: ids.length });
+        if (page.length === 0) break;
+        for (const r of page) ids.push(r.id);
+        if (page.length < PAGE) break;
+      }
+      if (ids.length === 0) return { removed: 0 };
+      const { removed, log } = purgeItemsWithFiles(db, rt.dataDir, ids, (m) => console.warn('[images] ' + m));
+      if (log.failures.length > 0) broadcast.toast('回收站已清空，但有 ' + log.failures.length + ' 个图片文件未能删除', 'warn');
+      broadcast.itemsChanged();
+      return { removed };
     },
     // ★ 原图给的是**协议 URL**，不是磁盘绝对路径：渲染层的 <img src> 认不了 file://，
     //   而且绝对路径一旦离开主进程就再也收不回来（spec §9.2 的边界）。
@@ -447,36 +494,52 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       return imageUrlFor(row.image_path) ?? '';
     },
     [CH.items.count]: (_e, q: ListQuery) => needDb().count(q ?? {}),
-    // ★ 导出：写成 JSON 落到数据目录，只回路径。图片只导相对路径（不把二进制塞进 JSON）。
-    [CH.items.exportAll]: () => {
-      try {
-        const rows = needDb().raw
-          .prepare('SELECT * FROM items ORDER BY created_at DESC, seq DESC')
-          .all() as Record<string, unknown>[];
-        const payload = {
-          app: 'Clipchan',
-          version: 1,
-          exportedAt: new Date().toISOString(),
-          items: rows,
-        };
-        // 文件名带本地时间戳（导出可能一天做多次，同名会互相覆盖）。
-        const d = new Date();
-        const pad = (n: number): string => String(n).padStart(2, '0');
-        const stamp =
-          d.getFullYear() +
-          pad(d.getMonth() + 1) +
-          pad(d.getDate()) +
-          '-' +
-          pad(d.getHours()) +
-          pad(d.getMinutes()) +
-          pad(d.getSeconds());
-        const file = path.join(rt.dataDir, 'export-' + stamp + '.json');
-        fs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8');
-        return { ok: true, path: file };
-      } catch (e) {
-        console.warn('[export] 导出失败：' + String(e));
-        return { ok: false };
+    // ★ 导出（v0.3.0 起是 zip 备份包）：含原图，路径由用户在保存对话框里选。
+    //   实现在 export-import.ts（不 import electron，可单测）；这里只负责把 dialog 注入进去。
+    //   用户取消 → { ok:false, cancelled:true }，界面据此静默返回，不弹「导出失败」。
+    [CH.items.exportAll]: () =>
+      exportAllToZip({
+        db: needDb(),
+        dataDir: rt.dataDir,
+        pickSave: async (defaultFileName) => {
+          // 有窗口就挂在窗口上（模态，用户不会跑到后面去点别的），没有窗口就走无父窗口重载。
+          const win = rt.win;
+          const options = {
+            title: '导出备份包',
+            defaultPath: path.join(app.getPath('documents'), defaultFileName),
+            filters: [{ name: 'Clipchan 备份包', extensions: ['zip'] }],
+          };
+          const picked = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
+          return { canceled: picked.canceled, filePath: picked.filePath };
+        },
+      }),
+    // ★ 导入：选 zip → 逐条校验 → 单事务插入。绝不覆盖现有数据（重复 id/哈希一律跳过）。
+    //   完成后必须广播 itemsChanged，否则列表还是旧的一屏（用户以为没导进来）。
+    [CH.items.importAll]: async () => {
+      const result = await importAllFromZip({
+        db: needDb(),
+        dataDir: rt.dataDir,
+        pickOpen: async () => {
+          const win = rt.win;
+          const options = {
+            title: '导入备份包',
+            defaultPath: app.getPath('documents'),
+            // 单选：一次导入一个包，多包合并留给以后（语义会更复杂）。
+            properties: ['openFile'] as Array<'openFile'>,
+            filters: [{ name: 'Clipchan 备份包', extensions: ['zip'] }],
+          };
+          const picked = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+          return { canceled: picked.canceled, filePaths: picked.filePaths };
+        },
+      });
+      if (result.ok) {
+        broadcast.itemsChanged();
+        broadcast.toast(importSummaryText(result), 'info');
+      } else if (!result.cancelled) {
+        // 取消是正常操作，静默；真失败要如实告诉用户原因（不是笼统的「导入失败」）。
+        broadcast.toast('导入失败：' + (result.reason ?? '未知原因'), 'warn');
       }
+      return result;
     },
     [CH.items.copy]: (_e, id: string) => {
       const svc = pasteSvc;
@@ -518,6 +581,11 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
         enforceImageBudget(needDb(), rt.dataDir, Math.max(0, patch.imageBudgetMB) * 1024 * 1024, (m) =>
           console.warn('[images] ' + m)
         );
+      }
+      // ★ 回收站上限调小要立刻收敛。db 内部顺手触发的超限淘汰拿不到被删 id（也就删不了盘），
+      //   所以这里走带删盘的版本：先按 id 记路径 → 让 db 删行 → 删文件。
+      if (patch && typeof patch.trashLimit === 'number') {
+        purgeTrashOverLimitWithFiles(needDb(), rt.dataDir, (m) => console.warn('[images] ' + m));
       }
       if (patch && (typeof patch.hotkeyActivate === 'string' || typeof patch.hotkeyWidget === 'string')) {
         registerHotkeysNow();

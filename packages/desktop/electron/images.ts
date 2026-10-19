@@ -195,40 +195,36 @@ function relPathsOf(db: Db, ids: string[]): string[] {
 }
 
 /**
- * 删除记录（一条或多条），并同步删除它们的原图与缩略图。
- * 数据库删除先提交，文件删除失败只记日志（spec §7.3 的"删除三条路径"之一）。
+ * 硬删记录（purge）并同步删除原图与缩略图 —— **全仓唯一会删盘的删除入口**。
+ *
+ * ★ 软删家族（remove / clearUnpinned / clearAll / 上限淘汰）**绝不经过本文件**：
+ *   它们只盖 `deleted_at`、不碰磁盘，文件留在原处，回收站才有东西可恢复。
+ *   所以旧的 removeItemsWithFiles / clearUnpinnedWithFiles 已删除——软删根本不涉及文件，
+ *   留着 "WithFiles" 这个名字（以及它顺带删盘的实现）就是在撒谎。
+ *
+ * ★ 顺序不能反：**先取相对路径再删行**，行一删路径就没了。
+ * ★ 数据库删除先提交，文件删除失败只记日志（spec §7.3）：残留文件由下次启动的
+ *   sweepOrphans 兜底，绝不因为文件删不掉就回滚数据库。
  */
-export function removeItemsWithFiles(
+export function purgeItemsWithFiles(
   db: Db,
   dir: string,
   ids: string[],
   onLog?: (message: string) => void,
 ): { removed: number; log: FileRemovalLog } {
   const rels = relPathsOf(db, ids);
-  const removed = db.removeMany(ids).length;
-  const { log } = deleteImageFiles(dir, rels, onLog);
-  return { removed, log };
-}
-
-/** 清空未收藏：同步删除对应图片文件（spec §7.3 的"删除三条路径"之二）。 */
-export function clearUnpinnedWithFiles(
-  db: Db,
-  dir: string,
-  onLog?: (message: string) => void,
-): { removed: number; log: FileRemovalLog } {
-  const rows = db.allImageRows({ unpinnedOnly: true });
-  const rels: string[] = [];
-  for (const r of rows) {
-    if (r.image_path) rels.push(r.image_path);
-    if (r.thumb_path) rels.push(r.thumb_path);
-  }
-  const removed = db.clearUnpinned().length;
+  const removed = db.purge(ids);
   const { log } = deleteImageFiles(dir, rels, onLog);
   return { removed, log };
 }
 
 /**
  * 按磁盘预算淘汰：删到预算的 80% 以下，收藏图片不动（spec §7.3 的"删除三条路径"之三）。
+ *
+ * ★ 这一族**必须硬删**（计划 §1.1 点名的最易错处）：预算淘汰的目的就是腾磁盘，
+ *   改成软删只会把行藏进回收站、文件一个字节没少，预算永远降不下来，下一跳又淘汰一批，
+ *   最后整库都被塞进回收站。所以这里用 `db.purge` 而不是 `db.removeMany`。
+ * ★ 回收站行也计入总量（文件确实还在盘上），但排序时**先被腾掉**——见 planBudgetEviction。
  */
 export function enforceImageBudget(
   db: Db,
@@ -236,25 +232,59 @@ export function enforceImageBudget(
   budgetBytes: number,
   onLog?: (message: string) => void,
 ): { evicted: string[]; removed: number; log: FileRemovalLog } {
-  const rows = db.allImageRows().map((r) => ({
+  const all = db.allImageRows();
+  const rows = all.map((r) => ({
     id: r.id,
     pinned: r.pinned,
     bytes: r.bytes ?? 0,
     created_at: r.created_at,
+    // 回收站行优先腾：它们已经是"用户不要了"的东西，先删它们再动活跃记录。
+    deletedAt: r.deleted_at,
   }));
   const evicted = planBudgetEviction(rows, budgetBytes);
   if (evicted.length === 0) return { evicted, removed: 0, log: { removed: [], failures: [] } };
 
-  const byId = new Map(db.allImageRows().map((r) => [r.id, r] as const));
+  const byId = new Map(all.map((r) => [r.id, r] as const));
   const rels: string[] = [];
   for (const id of evicted) {
     const row = byId.get(id);
     if (row?.image_path) rels.push(row.image_path);
     if (row?.thumb_path) rels.push(row.thumb_path);
   }
-  const removed = db.removeMany(evicted).length;
+  const removed = db.purge(evicted);
   const { log } = deleteImageFiles(dir, rels, onLog);
   return { evicted, removed, log };
+}
+
+/**
+ * 回收站超限淘汰 + 删盘。
+ *
+ * ★ db 层的 `purgeTrashOverLimit()` 是裸 DELETE（它不认识文件系统），返回的 id 已经取不到
+ *   路径了。所以这里**先按 id 记下回收站图片行的路径**，再让 db 删行，最后删文件。
+ * ★ 只在"设置里把 trashLimit 调小"这类调用方**主动**触发的场景用；db 内部顺手触发的
+ *   超限淘汰（remove / clearUnpinned / clearAll 之后）拿不到 id，残留文件由启动时的
+ *   sweepOrphans 兜底（它只删"盘上有、库里没有"，回收站行仍在库里所以那些文件是安全的）。
+ */
+export function purgeTrashOverLimitWithFiles(
+  db: Db,
+  dir: string,
+  onLog?: (message: string) => void,
+): { removed: number; log: FileRemovalLog } {
+  const paths = new Map<string, (string | null)[]>();
+  for (const r of db.allImageRows()) {
+    if (r.deleted_at === null) continue;
+    paths.set(r.id, [r.image_path, r.thumb_path]);
+  }
+  const ids = db.purgeTrashOverLimit();
+  if (ids.length === 0) return { removed: 0, log: { removed: [], failures: [] } };
+
+  const rels: (string | null)[] = [];
+  for (const id of ids) {
+    const p = paths.get(id);
+    if (p) rels.push(...p);
+  }
+  const { log } = deleteImageFiles(dir, rels, onLog);
+  return { removed: ids.length, log };
 }
 
 /** 供上层复用的类型（避免直接 import images-policy）。 */

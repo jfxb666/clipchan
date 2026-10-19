@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Download, FolderOpen, Ghost } from 'lucide-react';
+import { Download, FolderOpen, Ghost, Upload } from 'lucide-react';
 import type {
   AiError,
   AiProvider,
@@ -29,6 +29,15 @@ export const HISTORY_SLIDER_STEP = 100;
 export const HISTORY_INPUT_MAX = 9999;
 /** 图片磁盘预算档位（MB）。 */
 export const IMAGE_BUDGET_OPTIONS = [256, 512, 1024, 2048] as const;
+/**
+ * 回收站上限的预设档位（条）。
+ * 与历史条数上限一样保留数字输入框：9999 这种极端值用档位表达不出来，
+ * 但主进程的 sanitizeSettings 会 clamp 1–9999，所以手输越界也不会写坏库。
+ */
+export const TRASH_LIMIT_OPTIONS = [100, 200, 500, 1000] as const;
+/** 回收站上限的硬边界，与主进程 sanitizeSettings 的 clamp 区间一致。 */
+export const TRASH_LIMIT_MIN = 1;
+export const TRASH_LIMIT_MAX = 9999;
 /** 小组件宽度范围（spec §6.6）。 */
 export const WIDGET_SIZE_MIN = 240;
 export const WIDGET_SIZE_MAX = 400;
@@ -36,7 +45,7 @@ export const WIDGET_SIZE_MAX = 400;
 export const GHOST_MAX_MINUTES = 720;
 export const GHOST_PRESETS = [5, 10, 30, 60] as const;
 /** 底部展示的版本号。 */
-export const APP_VERSION = '0.2.0';
+export const APP_VERSION = '0.3.0';
 
 const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: 'auto', label: '跟随系统' },
@@ -129,6 +138,7 @@ export function SettingsView({
   onClearAll,
   onOpenDataFolder,
   onExportAll,
+  onImportAll,
   onSetAutoStart,
   onToggleMode,
   mode,
@@ -149,8 +159,10 @@ export function SettingsView({
   onClearUnpinned: () => void;
   onClearAll: () => void;
   onOpenDataFolder: () => void;
-  /** 导出全部记录为 JSON；结果（含失败）由 store 统一 toast。 */
+  /** 导出全部记录为 zip；结果（含失败）由 store 统一 toast。 */
   onExportAll: () => void;
+  /** 从 zip 备份包导入（纯加法，重复项跳过，所以不需要二次确认）。 */
+  onImportAll: () => void;
   /** 返回 false 表示写入没成功（例如注册表被拒），此时开关要回滚，不能假装成功。 */
   onSetAutoStart: (on: boolean) => void | Promise<boolean>;
   onToggleMode: () => void;
@@ -485,6 +497,48 @@ export function SettingsView({
           </button>
         </Row>
 
+        <Row
+          label="回收站上限"
+          hint={
+            '当前 ' +
+            settings.trashLimit +
+            ' 条；超出后最旧的回收站记录会被真正删除（含图片文件），不可恢复'
+          }
+        >
+          <div className="flex shrink-0 items-center gap-[2px] rounded-button border border-line bg-surface-2 p-[2px]">
+            {TRASH_LIMIT_OPTIONS.map((limit) => (
+              <button
+                key={limit}
+                type="button"
+                onClick={() => onUpdate({ trashLimit: limit })}
+                className={cn(
+                  'rounded-[9px] px-snug py-[3px] text-[11px] transition-colors',
+                  settings.trashLimit === limit
+                    ? 'bg-surface text-ink shadow-card'
+                    : 'text-ink-2 hover:text-ink',
+                )}
+              >
+                {limit}
+              </button>
+            ))}
+          </div>
+          <input
+            type="number"
+            min={TRASH_LIMIT_MIN}
+            max={TRASH_LIMIT_MAX}
+            value={settings.trashLimit}
+            onChange={(event) => {
+              const next = Number(event.target.value);
+              if (!Number.isFinite(next)) return;
+              // 主进程会再 clamp 一次，这里先夹住是为了让输入框里的数字与落库值一致。
+              onUpdate({
+                trashLimit: Math.min(TRASH_LIMIT_MAX, Math.max(TRASH_LIMIT_MIN, Math.round(next))),
+              });
+            }}
+            className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]"
+          />
+        </Row>
+
         <div className="rounded-card border border-line bg-surface-2 px-snug py-tight">
           <div className="flex items-center gap-tight">
             <Ghost size={14} className="text-[var(--cc-accent)]" aria-hidden />
@@ -546,15 +600,26 @@ export function SettingsView({
           </p>
         </div>
 
-        <Row label="导出备份" hint="把全部记录写成 JSON 文件，存到数据目录">
-          <button
-            type="button"
-            onClick={onExportAll}
-            className="flex shrink-0 items-center gap-[4px] rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
-          >
-            <Download size={12} aria-hidden />
-            导出 JSON
-          </button>
+        <Row label="导出备份" hint="把全部记录与图片打包成 zip，存到数据目录">
+          <div className="flex shrink-0 items-center gap-[4px]">
+            <button
+              type="button"
+              onClick={onExportAll}
+              className="flex shrink-0 items-center gap-[4px] rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
+            >
+              <Download size={12} aria-hidden />
+              导出为 zip
+            </button>
+            {/* 导入是加法：重复 id / 哈希一律跳过，不会覆盖现有数据，所以不做二次确认。 */}
+            <button
+              type="button"
+              onClick={onImportAll}
+              className="flex shrink-0 items-center gap-[4px] rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
+            >
+              <Upload size={12} aria-hidden />
+              导入备份包
+            </button>
+          </div>
         </Row>
 
         <Row label="存储位置" hint="数据库与图片缓存的存放目录">

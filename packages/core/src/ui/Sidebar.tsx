@@ -1,5 +1,6 @@
-import { Code2, FileText, Image as ImageIcon, Layers, Link2, Settings, Star } from 'lucide-react';
+import { Code2, FileText, Image as ImageIcon, Layers, Link2, Settings, Star, Trash2 } from 'lucide-react';
 import type { KindFilter } from '../types';
+import type { View } from '../state/store';
 import { cn } from './util';
 
 /** 侧栏导航项（spec §6.3）：数组里只有 6 个分类，底部设置按钮单独渲染。 */
@@ -12,6 +13,10 @@ export interface NavItem {
 /**
  * 侧栏 6 个分类固定不变（spec §6.4：path / number 不单独建页，归入"文本"）。
  * 文本项对应 text-group（文本 + 路径 + 数字），收藏项对应 favorite。
+ *
+ * ★ 回收站**不进这个数组**：NavItem.key 的类型是 KindFilter（分类筛选），
+ *   而回收站是一个独立视图、也不参与分类筛选。塞进来会逼着 KindFilter 加一个
+ *   永远查不到数据的 'trash' 分类。它渲染成数组之外的独立按钮。
  */
 export const NAV_ITEMS: NavItem[] = [
   { key: 'all', label: '全部', icon: Layers },
@@ -27,13 +32,24 @@ export function Sidebar({
   kind,
   view,
   onSelectKind,
+  onOpenTrash,
   onOpenSettings,
 }: {
   kind: KindFilter;
-  view: 'list' | 'settings' | 'wordcloud' | 'optimize';
+  view: View;
   onSelectKind: (kind: KindFilter) => void;
+  onOpenTrash: () => void;
   onOpenSettings: () => void;
 }) {
+  /** 分类项与底部两个入口共用同一套外观，避免三处各写一遍尺寸与配色。 */
+  const itemClass = (active: boolean): string =>
+    cn(
+      'flex h-[52px] w-[52px] flex-col items-center justify-center gap-[3px] rounded-button transition-colors',
+      active
+        ? 'bg-primary-soft text-[var(--cc-primary)]'
+        : 'text-ink-2 hover:bg-surface-2 hover:text-ink',
+    );
+
   return (
     <nav className="cc-no-drag flex w-16 shrink-0 flex-col items-center gap-[2px] border-r border-line bg-surface py-snug">
       {NAV_ITEMS.map((nav) => {
@@ -45,12 +61,7 @@ export function Sidebar({
             type="button"
             title={nav.label}
             onClick={() => onSelectKind(nav.key)}
-            className={cn(
-              'flex h-[52px] w-[52px] flex-col items-center justify-center gap-[3px] rounded-button transition-colors',
-              active
-                ? 'bg-primary-soft text-[var(--cc-primary)]'
-                : 'text-ink-2 hover:bg-surface-2 hover:text-ink',
-            )}
+            className={itemClass(active)}
           >
             <Icon size={17} aria-hidden />
             <span className="text-[10px] leading-none">{nav.label}</span>
@@ -58,17 +69,12 @@ export function Sidebar({
         );
       })}
       <div className="flex-1" />
-      <button
-        type="button"
-        title="设置"
-        onClick={onOpenSettings}
-        className={cn(
-          'flex h-[52px] w-[52px] flex-col items-center justify-center gap-[3px] rounded-button transition-colors',
-          view === 'settings'
-            ? 'bg-primary-soft text-[var(--cc-primary)]'
-            : 'text-ink-2 hover:bg-surface-2 hover:text-ink',
-        )}
-      >
+      {/* 回收站紧贴设置上方：两者都是"工具型"入口，放在分类之后、底部收口。 */}
+      <button type="button" title="回收站" onClick={onOpenTrash} className={itemClass(view === 'trash')}>
+        <Trash2 size={17} aria-hidden />
+        <span className="text-[10px] leading-none">回收站</span>
+      </button>
+      <button type="button" title="设置" onClick={onOpenSettings} className={itemClass(view === 'settings')}>
         <Settings size={17} aria-hidden />
         <span className="text-[10px] leading-none">设置</span>
       </button>

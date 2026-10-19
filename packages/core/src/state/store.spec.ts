@@ -1,15 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BurstHint, ClipItemDTO, ClipchanApi, GhostState, ListQuery, NavigateTarget, Settings } from '../types';
+import type {
+  AppToast,
+  BurstHint,
+  ClipItemDTO,
+  ClipchanApi,
+  GhostState,
+  ListQuery,
+  NavigateTarget,
+  Settings,
+} from '../types';
 import { DEFAULT_SETTINGS } from '../types';
 import { setPlatform } from '../platform/adapter';
 import {
   CLEAR_CONFIRM_TTL_MS,
   PAGE_SIZE,
   QUERY_DEBOUNCE_MS,
+  TOAST_TTL_MS,
   bindClipStore,
   resetClipStore,
   useClipStore,
 } from './store';
+import { UNDO_LABEL } from '../ui/toastText';
+import { TRASH_PAGE_SIZE } from '../ui/trashViewLogic';
 
 /**
  * store 的单测全部用假平台适配器注入（setPlatform），不真连 Electron。
@@ -40,16 +52,39 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
   const settingCalls: Partial<Settings>[] = [];
   const countCalls: ListQuery[] = [];
   const exportCalls: number[] = [];
+  const importCalls: number[] = [];
+  /** v0.3.0 回收站 / 撤销相关的调用记录。 */
+  const restoreCalls: string[] = [];
+  const purgeCalls: string[][] = [];
+  const emptyTrashCalls: number[] = [];
+  const trashListCalls: { limit?: number; offset?: number }[] = [];
+  let trashSeed: ClipItemDTO[] = [];
+  /** 让 restore 的返回值由用例决定：默认全部成功。 */
+  let restoreResult: (id: string) => { ok: boolean; reason?: 'duplicate' | 'missing' } = () => ({ ok: true });
   /** 让 count 失败/成功由用例决定：null = 用 seed.length。 */
   let countResult: number | null = null;
   let countThrows = false;
-  let exportResult: { ok: boolean; path?: string } = { ok: true, path: 'C:/tmp/export.json' };
+  let exportResult: { ok: boolean; cancelled?: boolean; path?: string; reason?: string } = {
+    ok: true,
+    path: 'C:/tmp/export.zip',
+  };
+  let importResult: {
+    ok: boolean;
+    cancelled?: boolean;
+    imported?: number;
+    skippedDuplicate?: number;
+    skippedInvalid?: number;
+    missingImages?: number;
+    reason?: string;
+  } = { ok: true, imported: 0 };
   const unsubscribed: string[] = [];
   let itemChanged: (() => void) | null = null;
   let settingsChanged: ((s: Settings) => void) | null = null;
   let ghostChanged: ((g: GhostState) => void) | null = null;
   let burstHinted: ((hint: BurstHint) => void) | null = null;
   let navigated: ((target: NavigateTarget) => void) | null = null;
+  /** 主进程推 toast 的回调（app:toast）。 */
+  let toastPushed: ((t: AppToast) => void) | null = null;
 
   const adapter: ClipchanApi = {
     items: {
@@ -83,7 +118,32 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
         exportCalls.push(1);
         return exportResult;
       },
+      importAll: async () => {
+        importCalls.push(1);
+        return importResult;
+      },
       getText: async () => '',
+      trashList: async (q: { limit?: number; offset?: number }) => {
+        trashListCalls.push(q);
+        const offset = q.offset ?? 0;
+        const limit = q.limit ?? 200;
+        return trashSeed.slice(offset, offset + limit);
+      },
+      trashCount: async () => trashSeed.length,
+      restore: async (id: string) => {
+        restoreCalls.push(id);
+        return restoreResult(id);
+      },
+      purge: async (ids: string[]) => {
+        purgeCalls.push(ids);
+        return { removed: ids.length };
+      },
+      emptyTrash: async () => {
+        emptyTrashCalls.push(1);
+        const removed = trashSeed.length;
+        trashSeed = [];
+        return { removed };
+      },
       onChanged: (cb: () => void) => {
         itemChanged = cb;
         return () => {
@@ -149,6 +209,13 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
           navigated = null;
         };
       },
+      onToast: (cb: (t: AppToast) => void) => {
+        toastPushed = cb;
+        return () => {
+          unsubscribed.push('toast');
+          toastPushed = null;
+        };
+      },
     },
     wordcloud: {
       today: async () => ({ words: [], totalItems: 0 }),
@@ -188,21 +255,44 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
     settingCalls,
     countCalls,
     exportCalls,
+    importCalls,
+    restoreCalls,
+    purgeCalls,
+    emptyTrashCalls,
+    trashListCalls,
     unsubscribed,
+    setTrashSeed: (items: ClipItemDTO[]) => {
+      trashSeed = items;
+    },
+    setRestoreResult: (fn: (id: string) => { ok: boolean; reason?: 'duplicate' | 'missing' }) => {
+      restoreResult = fn;
+    },
     setCountResult: (n: number | null) => {
       countResult = n;
     },
     setCountThrows: (v: boolean) => {
       countThrows = v;
     },
-    setExportResult: (v: { ok: boolean; path?: string }) => {
+    setExportResult: (v: { ok: boolean; cancelled?: boolean; path?: string; reason?: string }) => {
       exportResult = v;
+    },
+    setImportResult: (v: {
+      ok: boolean;
+      cancelled?: boolean;
+      imported?: number;
+      skippedDuplicate?: number;
+      skippedInvalid?: number;
+      missingImages?: number;
+      reason?: string;
+    }) => {
+      importResult = v;
     },
     fireItemChanged: () => itemChanged?.(),
     fireSettingsChanged: (s: Settings) => settingsChanged?.(s),
     fireGhostChanged: (g: GhostState) => ghostChanged?.(g),
     fireBurstHint: (hint: BurstHint) => burstHinted?.(hint),
     fireNavigate: (target: NavigateTarget) => navigated?.(target),
+    fireToast: (t: AppToast) => toastPushed?.(t),
   };
 }
 
@@ -582,24 +672,38 @@ describe('pressClearUnpinned 二次确认', () => {
 describe('exportAll', () => {
   it('成功时提示导出路径', async () => {
     const fake = makeFakeAdapter([]);
-    fake.setExportResult({ ok: true, path: 'C:/data/export-20260101.json' });
+    fake.setExportResult({ ok: true, path: 'C:/data/export-20260101.zip' });
     setPlatform(fake.adapter);
 
     await useClipStore.getState().exportAll();
 
     expect(fake.exportCalls).toHaveLength(1);
-    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('C:/data/export-20260101.json');
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('C:/data/export-20260101.zip');
     expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('ok');
+  });
+
+  it('★ 用户点「取消」时静默返回：不弹「导出失败」', async () => {
+    const fake = makeFakeAdapter([]);
+    // 保存对话框点取消：既没落盘也没出错，cancelled:true 且没有 reason
+    fake.setExportResult({ ok: false, cancelled: true });
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().exportAll();
+
+    expect(fake.exportCalls).toHaveLength(1);
+    expect(useClipStore.getState().toasts).toHaveLength(0);
   });
 
   it('失败时如实提示，不假装成功', async () => {
     const fake = makeFakeAdapter([]);
-    fake.setExportResult({ ok: false });
+    fake.setExportResult({ ok: false, reason: '磁盘已满' });
     setPlatform(fake.adapter);
 
     await useClipStore.getState().exportAll();
 
     expect(useClipStore.getState().toasts.at(-1)?.text).toContain('导出失败');
+    // 有 reason 就把真原因带出来，不要笼统的「导出失败」
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('磁盘已满');
     expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('warn');
   });
 
@@ -614,5 +718,318 @@ describe('exportAll', () => {
 
     expect(useClipStore.getState().toasts.at(-1)?.text).toContain('磁盘只读');
     expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('error');
+  });
+});
+
+describe('importAll（v0.3.0 zip 备份包）', () => {
+  it('★ 成功后只刷新列表，不再重复 toast（主进程已发过汇总）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    fake.setImportResult({ ok: true, imported: 3, skippedDuplicate: 1, skippedInvalid: 0, missingImages: 0 });
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().importAll();
+
+    expect(fake.importCalls).toHaveLength(1);
+    // 主进程 main.ts 已经 broadcast.toast(importSummaryText(...))，这里再弹就是两条
+    expect(useClipStore.getState().toasts).toHaveLength(0);
+    // 但列表必须重新拉：否则用户看不到新导进来的条目
+    expect(fake.listCalls.length).toBeGreaterThan(0);
+  });
+
+  it('★ 取消时静默：不弹 toast，也不刷新列表', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setImportResult({ ok: false, cancelled: true });
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().importAll();
+
+    expect(useClipStore.getState().toasts).toHaveLength(0);
+    expect(fake.listCalls).toHaveLength(0);
+  });
+
+  it('失败时把 reason 如实带出来', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setImportResult({ ok: false, reason: '这不是 Clipchan 的备份包' });
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().importAll();
+
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('导入失败');
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('这不是 Clipchan 的备份包');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('warn');
+  });
+
+  it('主进程抛错时把错误文案带出来（error 档）', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.adapter.items.importAll = async () => {
+      throw new Error('zip 已损坏');
+    };
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().importAll();
+
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('zip 已损坏');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('error');
+  });
+});
+
+describe('主进程推来的 toast（app:toast）', () => {
+  it('pushToast 把消息送进 toasts 队列', () => {
+    const fake = makeFakeAdapter([]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().pushToast('同内容已在列表中，无需恢复', 'ok');
+
+    const last = useClipStore.getState().toasts.at(-1);
+    expect(last?.text).toBe('同内容已在列表中，无需恢复');
+    expect(last?.tone).toBe('ok');
+  });
+
+  it('绑定 store 后 fireToast 能落到 toasts（订阅链路完整）', () => {
+    const fake = makeFakeAdapter([]);
+    setPlatform(fake.adapter);
+    const unbind = bindClipStore();
+
+    fake.fireToast({ message: '已清空回收站', kind: 'warn' });
+
+    expect(useClipStore.getState().toasts.at(-1)?.text).toBe('已清空回收站');
+    unbind();
+  });
+
+  it('★ 取消订阅后不再接收（卸载不叠加监听）', () => {
+    const fake = makeFakeAdapter([]);
+    setPlatform(fake.adapter);
+    const unbind = bindClipStore();
+    unbind();
+
+    expect(fake.unsubscribed).toContain('toast');
+    fake.fireToast({ message: '不该出现', kind: 'info' });
+    expect(useClipStore.getState().toasts).toHaveLength(0);
+  });
+});
+
+describe('删除后的撤销窗口', () => {
+  it('remove 成功后记下被删的 id，并弹出带「撤销」按钮的提示', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b'), item('c')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+
+    await useClipStore.getState().remove('b');
+
+    expect(useClipStore.getState().lastDeletedIds).toEqual(['b']);
+    const last = useClipStore.getState().toasts.at(-1);
+    expect(last?.text).toBe('已删除 1 条（进回收站）');
+    expect(last?.action?.label).toBe(UNDO_LABEL);
+  });
+
+  it('提示条上的「撤销」按钮真的接到 undoRemove（action.onClick 即撤销入口）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    await useClipStore.getState().remove('a');
+
+    const action = useClipStore.getState().toasts.at(-1)?.action;
+    expect(action).toBeDefined();
+    action?.onClick();
+    await vi.waitFor(() => expect(fake.restoreCalls).toEqual(['a']));
+  });
+
+  it('removeSelected 把整批 id 都记下来', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b'), item('c')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    useClipStore.getState().select('a');
+    useClipStore.getState().select('b', { multi: true });
+
+    await useClipStore.getState().removeSelected();
+
+    expect(useClipStore.getState().lastDeletedIds.sort()).toEqual(['a', 'b']);
+  });
+
+  it('删除失败（主进程抛错）时不开撤销窗口：那些行还在列表里，撤销会撤出个空操作', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    fake.adapter.items.remove = async () => {
+      throw new Error('数据库忙');
+    };
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+
+    await useClipStore.getState().remove('a');
+
+    expect(useClipStore.getState().lastDeletedIds).toEqual([]);
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('数据库忙');
+  });
+
+  it('undoRemove 逐条调 restore，成功后提示恢复条数', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    await useClipStore.getState().remove(['a', 'b']);
+
+    await useClipStore.getState().undoRemove();
+
+    expect(fake.restoreCalls.sort()).toEqual(['a', 'b']);
+    expect(useClipStore.getState().toasts.at(-1)?.text).toBe('已恢复 2 条');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('ok');
+  });
+
+  it('撤销后窗口立即收起：连点两次不会把同一批 restore 两遍', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    await useClipStore.getState().remove('a');
+
+    await useClipStore.getState().undoRemove();
+    await useClipStore.getState().undoRemove();
+
+    expect(fake.restoreCalls).toEqual(['a']);
+    expect(useClipStore.getState().lastDeletedIds).toEqual([]);
+  });
+
+  it('部分失败（duplicate）时如实报两个数字，不假装全部恢复', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b')]);
+    fake.setRestoreResult((id) => (id === 'a' ? { ok: true } : { ok: false, reason: 'duplicate' }));
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    await useClipStore.getState().remove(['a', 'b']);
+
+    await useClipStore.getState().undoRemove();
+
+    const last = useClipStore.getState().toasts.at(-1);
+    expect(last?.text).toBe('已恢复 1 条，1 条同内容已在列表中');
+    expect(last?.tone).toBe('warn');
+  });
+
+  it('3 秒窗口过期后 undoRemove 是 no-op（不调 restore）', async () => {
+    vi.useFakeTimers();
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    await useClipStore.getState().remove('a');
+    expect(useClipStore.getState().lastDeletedIds).toEqual(['a']);
+
+    vi.advanceTimersByTime(TOAST_TTL_MS + 1);
+    expect(useClipStore.getState().lastDeletedIds).toEqual([]);
+
+    await useClipStore.getState().undoRemove();
+
+    expect(fake.restoreCalls).toEqual([]);
+  });
+
+  it('窗口内撤销有效（3 秒是边界：过期前一毫秒仍可撤）', async () => {
+    vi.useFakeTimers();
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    await useClipStore.getState().remove('a');
+
+    vi.advanceTimersByTime(TOAST_TTL_MS - 1);
+    await useClipStore.getState().undoRemove();
+
+    expect(fake.restoreCalls).toEqual(['a']);
+  });
+});
+
+describe('回收站', () => {
+  it('openTrash 切到 trash 视图并拉列表与总数', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setTrashSeed([item('t1', { deletedAt: 900 }), item('t2', { deletedAt: 800 })]);
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().openTrash();
+
+    expect(useClipStore.getState().view).toBe('trash');
+    expect(useClipStore.getState().trashItems.map((it) => it.id)).toEqual(['t1', 't2']);
+    expect(useClipStore.getState().trashTotal).toBe(2);
+    expect(fake.trashListCalls[0]).toMatchObject({ limit: TRASH_PAGE_SIZE, offset: 0 });
+  });
+
+  it('loadMoreTrash 用已加载条数当下一页 offset', async () => {
+    const fake = makeFakeAdapter([]);
+    const many = Array.from({ length: TRASH_PAGE_SIZE + 3 }, (_, i) => item('t' + i));
+    fake.setTrashSeed(many);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().openTrash();
+
+    await useClipStore.getState().loadMoreTrash();
+
+    expect(fake.trashListCalls.at(-1)).toMatchObject({ offset: TRASH_PAGE_SIZE });
+    expect(useClipStore.getState().trashItems).toHaveLength(TRASH_PAGE_SIZE + 3);
+  });
+
+  it('已加载满总数时 loadMoreTrash 不再发请求', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setTrashSeed([item('t1')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().openTrash();
+
+    await useClipStore.getState().loadMoreTrash();
+
+    expect(fake.trashListCalls).toHaveLength(1);
+  });
+
+  it('restore 遇到 duplicate 时不把这一行从回收站摘掉（它还在回收站里）', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setTrashSeed([item('t1'), item('t2')]);
+    fake.setRestoreResult(() => ({ ok: false, reason: 'duplicate' }));
+    setPlatform(fake.adapter);
+    await useClipStore.getState().openTrash();
+
+    await useClipStore.getState().restoreFromTrash('t1');
+
+    expect(fake.restoreCalls).toEqual(['t1']);
+    expect(useClipStore.getState().trashItems.map((it) => it.id)).toEqual(['t1', 't2']);
+  });
+
+  it('restore 成功后刷新回收站列表与计数', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setTrashSeed([item('t1'), item('t2')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().openTrash();
+    // 主进程把 t1 恢复后，回收站里只剩 t2。
+    fake.setTrashSeed([item('t2')]);
+
+    await useClipStore.getState().restoreFromTrash('t1');
+
+    expect(useClipStore.getState().trashItems.map((it) => it.id)).toEqual(['t2']);
+    expect(useClipStore.getState().trashTotal).toBe(1);
+  });
+
+  it('purgeFromTrash 用单元素数组调 purge 并刷新列表', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setTrashSeed([item('t1')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().openTrash();
+    fake.setTrashSeed([]);
+
+    await useClipStore.getState().purgeFromTrash('t1');
+
+    expect(fake.purgeCalls).toEqual([['t1']]);
+    expect(useClipStore.getState().trashItems).toEqual([]);
+    expect(useClipStore.getState().trashTotal).toBe(0);
+  });
+
+  it('emptyTrash 清空并提示条数', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setTrashSeed([item('t1'), item('t2')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().openTrash();
+
+    await useClipStore.getState().emptyTrash();
+
+    expect(fake.emptyTrashCalls).toHaveLength(1);
+    expect(useClipStore.getState().trashItems).toEqual([]);
+    expect(useClipStore.getState().toasts.at(-1)?.text).toBe('已清空回收站（2 条）');
+  });
+
+  it('view 不持久化：reset 后回到 list', async () => {
+    const fake = makeFakeAdapter([]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().openTrash();
+    expect(useClipStore.getState().view).toBe('trash');
+
+    resetClipStore();
+
+    expect(useClipStore.getState().view).toBe('list');
   });
 });

@@ -18,6 +18,29 @@ export interface ListQuery {
   offset?: number;
 }
 
+/** 回收站查询参数（只有分页；回收站不参与类别/关键词筛选）。 */
+export interface TrashQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * 恢复一条的结果。
+ *
+ * ★ 用结果对象而不是异常表达"没恢复成"：同内容已在活跃列表时唯一索引会挡住 UPDATE，
+ *   这不是错误而是**正常的用户可解释状态**，界面要能提示「同内容已在列表中」。
+ */
+export interface RestoreResult {
+  ok: boolean;
+  /** 失败原因：duplicate = 同内容已在活跃列表；missing = id 不在回收站里。 */
+  reason?: 'duplicate' | 'missing';
+}
+
+/** 硬删（purge / emptyTrash）的结果：removed 是实际删掉的条数。 */
+export interface PurgeResult {
+  removed: number;
+}
+
 /** 给界面看的记录投影：原图磁盘路径与哈希不出主进程。 */
 export interface ClipItemDTO {
   id: string;
@@ -29,6 +52,10 @@ export interface ClipItemDTO {
   truncated?: boolean;
   sizeLabel?: string;
   source: 'capture' | 'merge';
+  /** 来源可执行文件名，如 "Code.exe"；未知时为 undefined（绝不写 "__unknown__" 这种兜底串）。 */
+  sourceApp?: string;
+  /** 在回收站里的时间戳；活跃记录为 undefined。 */
+  deletedAt?: number;
 }
 
 export type ThemeMode = 'auto' | 'light' | 'dark';
@@ -43,6 +70,8 @@ export interface Settings {
   autoPaste: boolean;
   hotkeyActivate: string;
   hotkeyWidget: string;
+  /** 回收站上限（条）。超出后硬删最旧的回收站记录并删盘。 */
+  trashLimit: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -55,6 +84,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoPaste: true,
   hotkeyActivate: 'Control+' + '\u0060',
   hotkeyWidget: 'Alt+C',
+  trashLimit: 200,
 };
 
 export interface HotkeyStatus {
@@ -155,6 +185,58 @@ export interface OptimizeResult {
   degraded: boolean;
 }
 
+/**
+ * 导出为 zip 备份包的结果。
+ *
+ * ★ 为什么用「ok + cancelled」而不是抛异常表达取消：用户点「取消」是**正常操作**，
+ *   不是失败 —— 界面不该弹「导出失败」，也不该把取消当成成功去提示路径。
+ */
+export interface ExportResult {
+  ok: boolean;
+  /** 用户在保存对话框里点了取消：既不是成功也不是失败，界面静默返回。 */
+  cancelled?: boolean;
+  /** 落盘路径（ok:true 时必有）。 */
+  path?: string;
+  /** 包内记录条数。 */
+  items?: number;
+  /** 原图文件已丢失、只导出了记录的条数（这些条目导入回来没有图）。 */
+  missingImages?: number;
+  /** ok:false 且非取消时的原因；如实上报，不假装成功。 */
+  reason?: string;
+}
+
+/**
+ * 从 zip 备份包导入的结果。
+ *
+ * ★ 四类计数分开报：用户要知道「进来了多少」以及「为什么剩下的没进来」
+ *   （重复 / 坏条 / 缺图是三种完全不同的解释）。
+ */
+export interface ImportResult {
+  ok: boolean;
+  /** 用户在打开对话框里点了取消。 */
+  cancelled?: boolean;
+  /** 实际写入的条数。 */
+  imported?: number;
+  /** 因 id 或内容哈希已存在而跳过的条数（绝不覆盖现有数据）。 */
+  skippedDuplicate?: number;
+  /** 因条目本身不合法（缺字段 / 包内图片缺失）而跳过的条数。 */
+  skippedInvalid?: number;
+  /** 其中因包内图片文件缺失而跳过的条数（是 skippedInvalid 的子集）。 */
+  missingImages?: number;
+  /** ok:false 且非取消时的原因（例如「这不是 Clipchan 的备份包」）。 */
+  reason?: string;
+}
+
+/**
+ * 主进程推给界面的浮层提示（app:toast 的负载）。
+ * kind 只有三档，与 ToastTone 的 ok/warn/error 不是一一对应：info 是"说一声"而不是"成功"，
+ * 映射集中在 toastText.appToastTone 里，避免两边各写一套。
+ */
+export interface AppToast {
+  message: string;
+  kind: 'info' | 'warn' | 'error';
+}
+
 /** preload 暴露给渲染进程的完整 API。任何新增能力都必须先加到这里。 */
 export interface ClipchanApi {
   items: {
@@ -174,10 +256,32 @@ export interface ClipchanApi {
     getFullImage(id: string): Promise<string>;
     /** 与 list 同条件的总条数（分页时界面要显示"共 N 条"而不是"已加载 N 条"）。 */
     count(q: ListQuery): Promise<number>;
-    /** 导出全部记录为 JSON 文件，返回落盘路径；失败回 ok:false（不假装成功）。 */
-    exportAll(): Promise<{ ok: boolean; path?: string }>;
+    /**
+     * 导出全部活跃记录为 zip 备份包（含原图），落盘路径由用户在保存对话框里选。
+     * 用户取消 → { ok:false, cancelled:true }；失败回 ok:false + reason（不假装成功）。
+     */
+    exportAll(): Promise<ExportResult>;
+    /**
+     * 从 zip 备份包导入（用户在打开对话框里选包）。
+     * 绝不覆盖现有数据：重复 id / 重复哈希一律跳过并计数；用户取消 → cancelled:true。
+     */
+    importAll(): Promise<ImportResult>;
     /** 正文全文（列表预览是截断的）；图片行或 id 不存在 → ''。 */
     getText(id: string): Promise<string>;
+    /** 回收站列表（按删除时间倒序）；缩略图同样走协议 URL。 */
+    trashList(q: TrashQuery): Promise<ClipItemDTO[]>;
+    /** 回收站总条数（分页显示"共 N 条"）。 */
+    trashCount(): Promise<number>;
+    /**
+     * 从回收站恢复。**同内容已在活跃列表时返回 ok:false / reason:'duplicate'，不抛异常**——
+     * 恢复是用户点的"撤销"，不该因为内容重复就报错崩界面；界面据此提示
+     * 「同内容已在列表中」。
+     */
+    restore(id: string): Promise<RestoreResult>;
+    /** 永久删除（删盘）。回收站里的行与活跃行都适用。 */
+    purge(ids: string[]): Promise<PurgeResult>;
+    /** 清空回收站（全部硬删 + 删盘）。 */
+    emptyTrash(): Promise<PurgeResult>;
     onChanged(cb: () => void): () => void;
     /** 连续复制 3 条：把这几条预选并浮出提示条（不合并）。 */
     onBurstHint(cb: (hint: BurstHint) => void): () => void;
@@ -211,6 +315,12 @@ export interface ClipchanApi {
     onMode(cb: (mode: 'main' | 'widget') => void): () => void;
     /** 托盘「设置…」/ 热键唤出：要求界面切到某个视图。 */
     onNavigate(cb: (target: NavigateTarget) => void): () => void;
+    /**
+     * 主进程主动推的浮层提示。
+     * ★ 主进程才是很多提示的唯一知情方（恢复遇到重复、删盘失败、导入汇总），
+     *   不暴露这条订阅，那些 toast 就永远到不了界面，用户看到的是"点了没反应"。
+     */
+    onToast(cb: (t: AppToast) => void): () => void;
   };
   wordcloud: {
     today(): Promise<WordCloudData>;

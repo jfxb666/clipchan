@@ -29,7 +29,13 @@ const stub: PlatformAdapter = {
     getFullImage: () => Promise.reject(new Error('当前环境没有实现 items.getFullImage')),
     count: () => Promise.reject(new Error('当前环境没有实现 items.count')),
     exportAll: () => Promise.reject(new Error('当前环境没有实现 items.exportAll')),
+    importAll: () => Promise.reject(new Error('当前环境没有实现 items.importAll')),
     getText: () => Promise.reject(new Error('当前环境没有实现 items.getText')),
+    trashList: () => Promise.reject(new Error('当前环境没有实现 items.trashList')),
+    trashCount: () => Promise.reject(new Error('当前环境没有实现 items.trashCount')),
+    restore: () => Promise.reject(new Error('当前环境没有实现 items.restore')),
+    purge: () => Promise.reject(new Error('当前环境没有实现 items.purge')),
+    emptyTrash: () => Promise.reject(new Error('当前环境没有实现 items.emptyTrash')),
     onChanged: () => unsubscribe(),
     onBurstHint: () => unsubscribe(),
   },
@@ -55,6 +61,8 @@ const stub: PlatformAdapter = {
     openDataFolder: () => Promise.reject(new Error('当前环境没有实现 app.openDataFolder')),
     onMode: () => unsubscribe(),
     onNavigate: () => unsubscribe(),
+    // 订阅类一律 no-op 而不是 reject：调用方在挂载时就订阅，抛错会把整个界面拖崩。
+    onToast: () => unsubscribe(),
   },
   wordcloud: {
     today: () => Promise.reject(new Error('当前环境没有实现 wordcloud.today')),

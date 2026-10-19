@@ -173,6 +173,12 @@ namespace Clipchan
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool CloseHandle(IntPtr hObject);
 
+        // ★ lpExeName 是 TCHAR 缓冲，必须显式 CharSet.Unicode：默认 ANSI 会让 marshaller
+        //   按单字节写，拿回来的是半截乱码路径（实测踩过）。
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
+
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
@@ -199,6 +205,9 @@ namespace Clipchan
         private const int ACCENT_DISABLED = 0;
         private const int ACCENT_ENABLE_BLURBEHIND = 3;
         private const int ACCENT_ENABLE_ACRYLICBLURBEHIND = 4;
+
+        /// <summary>进程映像路径的缓冲字符数：MAX_PATH 之上留足，长路径 exe 不会被截断。</summary>
+        private const int IMAGE_NAME_CHARS = 1024;
 
         private const int RESTORE_TRIES = 4;      // 软失效宽限重试次数
         private const int GRACE_MS = 80;          // 每次重试间隔（4×80ms ≈ 320ms）
@@ -277,6 +286,9 @@ namespace Clipchan
                     case "FG":
                         stdout.WriteLine("FG " + ToDecimal(NativeMethods.GetForegroundWindow()));
                         break;
+                    case "FGEXE":
+                        HandleForegroundExe(stdout);
+                        break;
                     case "PING":
                         stdout.WriteLine("PONG " + (parts.Length > 1 ? parts[1] : string.Empty));
                         break;
@@ -289,6 +301,79 @@ namespace Clipchan
                 }
             }
             return 0;
+        }
+
+        // ---- FGEXE ----
+
+        /// <summary>
+        /// FGEXE —— 前台窗口所属进程的 exe 文件名（只留文件名，不含路径）。
+        ///
+        /// 输出 `FGEXE &lt;十进制句柄&gt; &lt;exe名&gt;`；任何一步取不到（没有前台窗口 /
+        /// 窗口已失效 / 目标进程已退 / 权限不足）一律输出 `FGEXE 0 -`。
+        /// ★ 绝不抛异常、绝不阻塞 Serve 循环：来源只是附加信息，剪贴板记录本身
+        ///   不能被来源追踪拖死，所以失败必须是一条正常回包而不是异常。
+        /// </summary>
+        private static void HandleForegroundExe(StreamWriter stdout)
+        {
+            try
+            {
+                IntPtr hwnd = NativeMethods.GetForegroundWindow();
+                if (hwnd == IntPtr.Zero)
+                {
+                    stdout.WriteLine("FGEXE 0 -");
+                    return;
+                }
+                long handle = hwnd.ToInt64();
+                uint pid;
+                NativeMethods.GetWindowThreadProcessId(hwnd, out pid);
+                string exe = pid == 0 ? null : TryGetProcessImageName(pid);
+                if (string.IsNullOrEmpty(exe))
+                {
+                    Trace("fgexe unknown hwnd=" + handle + " pid=" + pid);
+                    stdout.WriteLine("FGEXE 0 -");
+                    return;
+                }
+                stdout.WriteLine("FGEXE " + handle + " " + exe);
+            }
+            catch (Exception e)
+            {
+                Trace("fgexe failed: " + e.Message);
+                try
+                {
+                    stdout.WriteLine("FGEXE 0 -");
+                }
+                catch
+                {
+                    // stdout 也坏了：这一条只能放弃，但仍然不能让异常冒到 Serve 循环。
+                }
+            }
+        }
+
+        /// <summary>
+        /// 取进程映像的完整路径后只留文件名。OpenProcess 失败（提权进程）按"未知"处理
+        /// ——宁可没有来源，也不要猜一个。
+        /// </summary>
+        private static string TryGetProcessImageName(uint pid)
+        {
+            IntPtr proc = NativeMethods.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (proc == IntPtr.Zero)
+            {
+                return null;
+            }
+            try
+            {
+                var buffer = new StringBuilder(IMAGE_NAME_CHARS);
+                uint size = (uint)buffer.Capacity;
+                if (!NativeMethods.QueryFullProcessImageNameW(proc, 0, buffer, ref size) || size == 0)
+                {
+                    return null;
+                }
+                return Path.GetFileName(buffer.ToString(0, (int)size));
+            }
+            finally
+            {
+                NativeMethods.CloseHandle(proc);
+            }
         }
 
         // ---- PASTE ----

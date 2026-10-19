@@ -73,6 +73,19 @@ describe('resolveKey', () => {
   it('顺序：无选中时的 Ctrl+Delete 仍是 clear-unpinned 而非 none', () => {
     expect(resolveKey(key('Delete', { ctrl: true }), ctx(true))).toEqual({ type: 'clear-unpinned' });
   });
+
+  it('Ctrl+Z / Cmd+Z → undo（大小写都认）', () => {
+    expect(resolveKey(key('z', { ctrl: true }), ctx(false))).toEqual({ type: 'undo' });
+    expect(resolveKey(key('Z', { meta: true }), ctx(false))).toEqual({ type: 'undo' });
+  });
+
+  it('搜索框内 Ctrl+Z 不触发撤销（那是输入框自己的撤销输入）', () => {
+    expect(resolveKey(key('z', { ctrl: true }), ctx(true))).toEqual({ type: 'none' });
+  });
+
+  it('不带修饰键的 z 在列表里也不触发 undo', () => {
+    expect(resolveKey(key('z'), ctx(false))).toEqual({ type: 'none' });
+  });
 });
 
 describe('shouldPreventDefault', () => {
@@ -87,6 +100,7 @@ describe('shouldPreventDefault', () => {
       { type: 'move', delta: 1 },
       { type: 'move', delta: -1, fromSearch: true },
       { type: 'paste' },
+      { type: 'undo' },
     ];
     for (const action of actions) expect(shouldPreventDefault(action)).toBe(true);
     expect(shouldPreventDefault({ type: 'none' })).toBe(false);

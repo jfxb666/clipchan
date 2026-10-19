@@ -17,9 +17,14 @@ afterEach(() => {
   }
 });
 
+/**
+ * 活跃条数。
+ *
+ * ★ v0.3.0 起 removeMany 是软删：源条目仍在 items 表里（回收站），所以"被删掉"
+ *   要看活跃列表而不是裸 COUNT(*) —— 后者会把回收站行一起数进来。
+ */
 function countRows(db: Db): number {
-  const r = db.raw.prepare('SELECT COUNT(*) AS n FROM items').get() as { n: number };
-  return r.n;
+  return db.count();
 }
 
 function row(db: Db, id: string): ItemRow {
@@ -48,9 +53,12 @@ describe('MergeService.mergeSelected', () => {
     expect(countRows(db)).toBe(1);
     const merged = row(db, res.id!);
     expect(merged.content).toBe('第一行\r\n第二行\r\n第三行');
-    expect(db.getRow(a)).toBeNull();
-    expect(db.getRow(b)).toBeNull();
-    expect(db.getRow(c)).toBeNull();
+    // 软删：三条源条目进回收站（文件与行都还在，只是离开列表）
+    const active = new Set(db.list().map((x) => x.id));
+    expect(active.has(a)).toBe(false);
+    expect(active.has(b)).toBe(false);
+    expect(active.has(c)).toBe(false);
+    expect(db.countTrash()).toBe(3);
   });
 
   it('拼接结果的 kind 按内容重算、source 为 merge', () => {

@@ -24,6 +24,11 @@ import type { NativeImageLike } from './images';
 export const POLL_INTERVAL_MS = 300;
 /** 连续失败到这个次数才写一条 CLIPCHAN_TRACE 日志（spec §7.1）。 */
 export const FAILURE_TRACE_THRESHOLD = 5;
+/**
+ * 取来源应用的等待上限。比助手自身的 3 秒默认超时短一个数量级：
+ * 来源只是附加信息，不能让它拖住剪贴板记录。
+ */
+export const SOURCE_APP_TIMEOUT_MS = 500;
 /** 图片粗判只看前 4KB（spec §7.1）。 */
 export const IMAGE_SIG_HEAD_BYTES = 4096;
 /** Windows 上"复制了文件"的剪贴板格式名（spec §7.1）。 */
@@ -70,9 +75,28 @@ export class LastSeen {
 export interface RecordSink {
   /** 与轮询器共享的"上次值"。 */
   readonly lastSeen: LastSeen;
-  recordText(text: string): unknown;
-  recordImage(img: NativeImageLike, sig?: string | null): unknown;
+  /** sourceApp 未知（助手不可用 / 超时 / 排除自身）时传 undefined，**绝不因此不记录**。 */
+  recordText(text: string, sourceApp?: string): unknown;
+  recordImage(img: NativeImageLike, sig?: string | null, sourceApp?: string): unknown;
 }
+
+/**
+ * 判定"这个 exe 就是我们自己"。命中时不记来源，否则面板内粘贴回写会写成
+ * "来自 clipchan"，用户看到一条自我引用的历史。
+ *
+ * 同时认 electron.exe（开发期跑的是 Electron 本体）与 clipchan.exe /
+ * clipchan-helper.exe（打包后与原生助手）。
+ */
+export function isSelfExe(exe: string | null | undefined): boolean {
+  if (typeof exe !== 'string') return false;
+  return SELF_EXE_NAMES.has(exe.trim().toLowerCase());
+}
+
+const SELF_EXE_NAMES: ReadonlySet<string> = new Set([
+  'electron.exe',
+  'clipchan.exe',
+  'clipchan-helper.exe',
+]);
 
 function lower(formats: string[] | null | undefined): string[] {
   const out: string[] = [];
@@ -186,6 +210,37 @@ function describeError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * 给一个 promise 加上限时：超时兑现 null。
+ *
+ * 被包裹的 promise 自己失败时**原样拒绝**——超时是"没等到"，失败是"取的时候炸了"，
+ * 两者要能分开记日志，否则助手崩溃在 trace 里永远是一片安静。
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise<T | null>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(null);
+    }, ms);
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
 export interface ClipboardWatcherDeps {
   clip: ClipboardLike;
   recorder: RecordSink;
@@ -197,6 +252,11 @@ export interface ClipboardWatcherDeps {
   onNotice?: (kind: 'skip-files' | 'skip-rich', message: string) => void;
   /** 诊断日志出口，默认走 `writeWatcherTrace`。 */
   onTrace?: (message: string) => void;
+  /**
+   * 取前台窗口所属进程的 exe 文件名。**只在真的检测到剪贴板变化时才调用**
+   * （每跳都问助手等于每 300ms 一次 IPC），缺省视为"来源未知"。
+   */
+  foregroundExe?: () => Promise<string | null>;
 }
 
 /**
@@ -212,6 +272,9 @@ export class ClipboardWatcher {
   private readonly intervalMs: number;
   private readonly onNotice: ((kind: 'skip-files' | 'skip-rich', message: string) => void) | undefined;
   private readonly onTrace: ((message: string) => void) | undefined;
+  private readonly foregroundExe: (() => Promise<string | null>) | undefined;
+  /** 记录串行链（见 enqueueRecord）。 */
+  private recordChain: Promise<void> = Promise.resolve();
   /** 已提示过的跳过类别：第一次给一次轻提示，之后不再打扰。 */
   private readonly noticed = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -227,6 +290,7 @@ export class ClipboardWatcher {
     this.intervalMs = ms;
     this.onNotice = deps.onNotice;
     this.onTrace = deps.onTrace;
+    this.foregroundExe = deps.foregroundExe;
   }
 
   /** 开始轮询（幂等）。 */
@@ -322,7 +386,10 @@ export class ClipboardWatcher {
 
     const img = probe.img ?? this.clip.readImage();
     if (!img || (typeof img.isEmpty === 'function' && img.isEmpty())) return;
-    this.recorder.recordImage(img, probe.sig);
+    this.enqueueRecord(async () => {
+      const sourceApp = await this.resolveSourceApp();
+      this.recorder.recordImage(img, probe.sig, sourceApp);
+    });
   }
 
   private handleText(suppressed: boolean): void {
@@ -333,7 +400,47 @@ export class ClipboardWatcher {
     seen.text = text;
     seen.imageSig = null;
     if (suppressed) return;
-    this.recorder.recordText(text);
+    this.enqueueRecord(async () => {
+      const sourceApp = await this.resolveSourceApp();
+      this.recorder.recordText(text, sourceApp);
+    });
+  }
+
+  /**
+   * 记录排队执行。
+   *
+   * 取来源要问助手（一次 IPC 往返），必须异步；但两次复制如果并发落库就会乱序，
+   * 所以串成一条链——任何一环失败都只吞掉自己，绝不断链。
+   */
+  private enqueueRecord(task: () => Promise<void>): void {
+    this.recordChain = this.recordChain.then(task).catch((e: unknown) => {
+      this.trace('记录管线失败（已忽略）：' + describeError(e));
+    });
+  }
+
+  /** 当前排队中的记录全部完成时兑现（测试用；生产代码不需要等它）。 */
+  whenRecordsSettled(): Promise<void> {
+    return this.recordChain;
+  }
+
+  /**
+   * 取来源应用名。**任何失败都返回 undefined**，调用方照常记录。
+   *
+   * 这里额外加一道比助手自身超时更短的闸：助手"活着但不回包"时，
+   * 记录不能被它的 3 秒默认超时拖住。
+   */
+  private async resolveSourceApp(): Promise<string | undefined> {
+    const probe = this.foregroundExe;
+    if (!probe) return undefined;
+    try {
+      const exe = await withTimeout(probe(), SOURCE_APP_TIMEOUT_MS);
+      if (typeof exe !== 'string' || exe.length === 0) return undefined;
+      // 面板内粘贴回写会把前台判成自己，记下来就是一条自我引用。
+      return isSelfExe(exe) ? undefined : exe;
+    } catch (e) {
+      this.trace('取来源应用失败（已忽略）：' + describeError(e));
+      return undefined;
+    }
   }
 
   private notice(kind: 'skip-files' | 'skip-rich'): void {

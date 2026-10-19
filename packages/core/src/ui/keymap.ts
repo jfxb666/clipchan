@@ -33,6 +33,7 @@ export type KeyAction =
   | { type: 'remove-selected' }
   | { type: 'move'; delta: number; fromSearch?: boolean }
   | { type: 'paste' }
+  | { type: 'undo' }
   | { type: 'none' };
 
 /** 该动作是否需要 preventDefault（'none' 不拦，让输入框照常收字符）。 */
@@ -59,6 +60,11 @@ export function resolveKey(event: KeyEventLike, ctx: KeyContext): KeyAction {
     if (key === 'ArrowUp') return { type: 'move', delta: -1, fromSearch: true };
     return { type: 'none' };
   }
+
+  // ★ Ctrl+Z 放在 inSearch 分支**之后**：搜索框里 Ctrl+Z 是浏览器/输入框自己的
+  //   撤销输入，抢过来会把用户刚打的字换回上一版。这与 ↑/↓ 在搜索框里不移动选中
+  //   是同一条约定（输入框优先）。
+  if (mod && (key === 'z' || key === 'Z')) return { type: 'undo' };
 
   if (key === 'ArrowDown') return { type: 'move', delta: 1 };
   if (key === 'ArrowUp') return { type: 'move', delta: -1 };

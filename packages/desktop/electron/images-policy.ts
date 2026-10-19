@@ -26,6 +26,8 @@ export interface BudgetRow {
   pinned: boolean;
   bytes: number;
   created_at: number;
+  /** 回收站时间戳；活跃行为 null / undefined。回收站行在淘汰顺序里排最前。 */
+  deletedAt?: number | null;
 }
 
 function toRelPosix(dir: string, p: string): string {
@@ -89,13 +91,22 @@ export function sweepOrphans(
   return removed;
 }
 
+/** 回收站行的排序键：有 deleted_at 就是回收站行。 */
+function isTrashed(row: BudgetRow): boolean {
+  return typeof row.deletedAt === 'number';
+}
+
 /**
- * 预算淘汰计划：预算超了就**从最旧的未收藏图片**开始删，直到总量降到预算的 80% 以下。
+ * 预算淘汰计划：预算超了就按「回收站行优先，然后最旧的未收藏」的顺序删，
+ * 直到总量降到预算的 80% 以下。
  *
+ * ★ 为什么回收站行先删：它们已经在回收站里（用户点过删除），文件却还占着磁盘。
+ *   先腾它们等于"回收站主动给预算让路"，能少删用户还想要的活跃记录。
+ * ★ 回收站行仍然**计入总量**：文件确实还在盘上，不计数的话预算就是假的。
  * ★ 收藏图片（pinned）永远不出现在结果里——它占用的字节仍然计入总量（文件确实在磁盘上），
  *   但只能靠用户自己取消收藏或手动清理，界面上给警告即可（spec §7.3）。
  *
- * @returns 需要删除的记录 id（按删除顺序：最旧在前）。
+ * @returns 需要删除的记录 id（按删除顺序：回收站行在前，同类内最旧在前）。
  */
 export function planBudgetEviction(rows: BudgetRow[], budgetBytes: number): string[] {
   const budget = Number.isFinite(budgetBytes) && budgetBytes > 0 ? budgetBytes : 0;
@@ -106,12 +117,15 @@ export function planBudgetEviction(rows: BudgetRow[], budgetBytes: number): stri
   const target = Math.floor(budget * EVICTION_RATIO);
   if (total <= target) return [];
 
-  const candidates = all
-    .filter((r) => !r.pinned)
-    .sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const byAge = (a: BudgetRow, b: BudgetRow): number =>
+    a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
+  const candidates = all.filter((r) => !r.pinned);
+  const trashed = candidates.filter(isTrashed).sort(byAge);
+  const active = candidates.filter((r) => !isTrashed(r)).sort(byAge);
 
   const out: string[] = [];
-  for (const c of candidates) {
+  for (const c of [...trashed, ...active]) {
     if (total <= target) break;
     total -= Math.max(0, c.bytes || 0);
     out.push(c.id);

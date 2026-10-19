@@ -5,8 +5,13 @@
  *   channels.ts 的通道表必须与 core 的 ClipchanApi 方法一一对应。少一个通道 =
  *   界面点了没反应；多一个 = 暴露了不该暴露的东西。
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ALL_INVOKE_CHANNELS, CH, EV } from './channels';
+
+/** preload 的源码：它 import electron，Node 里跑不了，所以契约只能靠读源码来断言。 */
+const PRELOAD_SRC = readFileSync(join(__dirname, 'preload.ts'), 'utf8');
 
 /** core 的 ClipchanApi 上所有"会发请求"的方法名（按 spec §8.1 / types.ts）。 */
 const EXPECTED = {
@@ -22,7 +27,15 @@ const EXPECTED = {
     'getFullImage',
     'count',
     'exportAll',
+    // v0.3.0 T4：zip 备份包导入
+    'importAll',
     'getText',
+    // v0.3.0 回收站五通道
+    'trashList',
+    'trashCount',
+    'restore',
+    'purge',
+    'emptyTrash',
   ],
   settings: ['get', 'set'],
   ghost: ['get', 'set'],
@@ -90,5 +103,54 @@ describe('channels 契约', () => {
 
   it('capabilities 走同步通道（types.ts 里它是普通对象，不是 Promise）', () => {
     expect(CH.app.capabilities).toBe('app:capabilities');
+  });
+});
+
+describe('回收站五通道（v0.3.0）：五处同步，漏一处就是运行时 not-implemented', () => {
+  const TRASH: [string, string][] = [
+    ['trashList', 'items:trashList'],
+    ['trashCount', 'items:trashCount'],
+    ['restore', 'items:restore'],
+    ['purge', 'items:purge'],
+    ['emptyTrash', 'items:emptyTrash'],
+  ];
+
+  it('① channels.ts 有五个键，② 且都进了 ALL_INVOKE_CHANNELS（Object.values 展平）', () => {
+    for (const [key, channel] of TRASH) {
+      expect(CH.items[key as keyof typeof CH.items], '缺少通道键 ' + key).toBe(channel);
+      expect(ALL_INVOKE_CHANNELS, channel + ' 没进 ALL_INVOKE_CHANNELS').toContain(channel);
+    }
+  });
+
+  it('④ preload 暴露了五个方法，且各自 invoke 到对应通道常量（不是手写字符串）', () => {
+    for (const [key, channel] of TRASH) {
+      const re = new RegExp(key + ':[^\\n]*ipcRenderer\\.invoke\\(CH\\.items\\.' + key);
+      expect(PRELOAD_SRC, 'preload 缺少 ' + key + ' 或没走 CH.items.' + key).toMatch(re);
+      // 手写字符串会绕过通道常量表，改一处就悄悄对不上
+      expect(PRELOAD_SRC).not.toContain("'" + channel + "'");
+    }
+  });
+
+  it('★ preload 不暴露 raw ipcRenderer（只暴露固定方法）', () => {
+    expect(PRELOAD_SRC).toContain("contextBridge.exposeInMainWorld('clipchan', api)");
+    // 直接把 ipcRenderer 当第二个参数交出去 = 渲染进程能 invoke 任意通道
+    expect(PRELOAD_SRC).not.toMatch(/exposeInMainWorld\(\s*['"]clipchan['"]\s*,\s*ipcRenderer\s*\)/);
+    // 也不许把 ipcRenderer 挂在暴露对象里
+    expect(PRELOAD_SRC).not.toMatch(/^\s*(ipcRenderer|invoke|send|sendSync|on)\s*:/m);
+  });
+});
+
+describe('app:toast 订阅（v0.3.0）：主进程推的提示必须能到界面', () => {
+  // 订阅类方法不是 invoke 通道，进不了 EXPECTED 表（那张表断言的是 CH 表里的键），
+  // 所以这里直接读 preload 源码断言"订阅的是 EV.toast 常量、不是手写字符串"。
+  it('preload 的 app.onToast 订阅 EV.toast', () => {
+    expect(EV.toast).toBe('app:toast');
+    expect(PRELOAD_SRC).toMatch(/onToast:\s*\(cb:[^)]*\)[^\n]*on\(EV\.toast, cb\)/);
+    // 手写 'app:toast' 会绕过通道常量表，改名时悄悄失效
+    expect(PRELOAD_SRC).not.toContain("'app:toast'");
+  });
+
+  it('app:toast 是事件而不是 invoke 通道（渲染层只能被动收）', () => {
+    expect(ALL_INVOKE_CHANNELS).not.toContain(EV.toast);
   });
 });
