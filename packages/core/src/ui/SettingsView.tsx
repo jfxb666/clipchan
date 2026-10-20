@@ -7,6 +7,8 @@ import type {
   Capabilities,
   GhostState,
   HotkeyStatus,
+  OcrProgress,
+  OcrStatus,
   Settings,
   ThemeMode,
 } from '../types';
@@ -16,6 +18,7 @@ import { autoStartClick, autoStartSettle, initialAutoStartToggle } from './autoS
 import { HotkeyRecorder } from './HotkeyRecorder';
 import { AiProviderForm } from './AiProviderFormCard';
 import { aiErrorMessage, protocolLabel } from './aiProviderForm';
+import { ocrProgressText, ocrStatusText } from './ocrView';
 
 /**
  * 设置页（spec §6.7）：快捷键 / 外观 / 历史 / 小组件 / 数据 五个分区。
@@ -147,6 +150,9 @@ export function SettingsView({
   onAiRemove,
   onAiTest,
   onAiListModels,
+  ocrStatus,
+  ocrProgress,
+  onOcrDownload,
 }: {
   settings: Settings;
   ghost: GhostState;
@@ -176,6 +182,12 @@ export function SettingsView({
   onAiTest: (id: string) => Promise<{ ok: boolean; error?: AiError; model?: string }>;
   /** 拉取模型列表；返回空数组或抛错时降级为手输，不报错。 */
   onAiListModels: (id: string) => Promise<string[]>;
+  /** 语言包就绪状态；null = 还没问过主进程（面板关着时就是 null）。 */
+  ocrStatus: OcrStatus | null;
+  /** 下载 / 识别进度；没有在途任务时为 null。 */
+  ocrProgress: OcrProgress | null;
+  /** 下载缺失语言包。设置页不 getPlatform，一律由 App 注入（同 aiProviders 那一组）。 */
+  onOcrDownload: () => void;
 }) {
   // 危险操作两次点击确认（spec §6.7）：第一次点变成"再点一次"，3 秒后自动复位。
   const [pendingClear, setPendingClear] = useState<'unpinned' | 'all' | null>(null);
@@ -255,6 +267,14 @@ export function SettingsView({
             value={settings.hotkeyWidget}
             defaultValue={DEFAULT_SETTINGS.hotkeyWidget}
             onChange={(v) => onUpdate({ hotkeyWidget: v === '' ? DEFAULT_SETTINGS.hotkeyWidget : v })}
+          />
+        </Row>
+        <Row label="截图标注" hint={hotkeys.capture ? '已生效' : '注册失败'}>
+          <HotkeyRecorder
+            label="截图标注"
+            value={settings.hotkeyCapture}
+            defaultValue={DEFAULT_SETTINGS.hotkeyCapture}
+            onChange={(v) => onUpdate({ hotkeyCapture: v === '' ? DEFAULT_SETTINGS.hotkeyCapture : v })}
           />
         </Row>
         <Row label="拼接选中项" hint="按住 Ctrl 或 Shift 多选几条后按下">
@@ -451,6 +471,27 @@ export function SettingsView({
             </button>
           </Row>
         )}
+      </Section>
+
+      <Section title="文字识别">
+        {/*
+          ★ 状态文案直接复用 ocrView 的纯函数：面板与设置页说的是同一句话，
+            两处各写一份迟早会有一处忘了改（尤其是失败原因那一支）。
+        */}
+        <Row label="语言包" hint={ocrStatus !== null ? ocrStatusText(ocrStatus) : '正在读取状态…'}>
+          <button
+            type="button"
+            // 已就绪没什么可下的；正在下载时再点一次只会并发两条下载。
+            disabled={ocrStatus === null || ocrStatus.ready || ocrProgress?.phase === 'download'}
+            onClick={onOcrDownload}
+            className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {ocrProgress?.phase === 'download' ? '下载中…' : '下载语言包'}
+          </button>
+        </Row>
+        {ocrProgress !== null ? (
+          <p className="text-[11px] leading-[1.6] text-ink-3">{ocrProgressText(ocrProgress)}</p>
+        ) : null}
       </Section>
 
       <Section title="数据">

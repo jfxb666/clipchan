@@ -45,7 +45,22 @@ describe('menuItemsFor', () => {
       'pin',
       'remove',
     ]);
-    expect(actions({ kind: 'image', pinned: true })).toEqual(['view', 'copy', 'paste', 'pin', 'remove']);
+    expect(actions({ kind: 'image', pinned: true })).toEqual(['view', 'ocr', 'copy', 'paste', 'pin', 'remove']);
+  });
+
+  it('图片菜单有 ocr 项，文案是「识别文字」', () => {
+    const ocr = menuItemsFor({ kind: 'image', pinned: false }).find((entry) => entry.action === 'ocr');
+    expect(ocr?.label).toBe('识别文字');
+  });
+
+  it('ocr 紧跟在 view 之后（图片第一意图是看图，第二才是认字）', () => {
+    expect(actions({ kind: 'image', pinned: false })).toEqual(['view', 'ocr', 'copy', 'paste', 'pin', 'remove']);
+  });
+
+  it('文本菜单没有 ocr 项', () => {
+    expect(actions({ kind: 'text', pinned: false })).not.toContain('ocr');
+    expect(actions({ kind: 'code', pinned: false, hasFullText: true })).not.toContain('ocr');
+    expect(actions({ kind: 'link', pinned: false })).not.toContain('ocr');
   });
 
   it('remove 带 danger，pin 带 Ctrl+D 提示，其余不带', () => {

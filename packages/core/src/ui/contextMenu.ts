@@ -3,7 +3,7 @@
  * 单独抽出来的原因：仓库测试跑在 node 环境（无 jsdom），能测的只有纯函数。
  */
 
-export type MenuAction = 'copy' | 'paste' | 'view' | 'optimize' | 'pin' | 'remove';
+export type MenuAction = 'copy' | 'paste' | 'view' | 'ocr' | 'optimize' | 'pin' | 'remove';
 
 export interface MenuItem {
   action: MenuAction;
@@ -24,8 +24,9 @@ export interface MenuSource {
 const DEFAULT_MARGIN = 8;
 
 /**
- * 固定顺序：view → copy → paste → optimize → pin → remove。
- * view 放最前是因为它只在「有更多内容可看」时出现，属于第一意图。
+ * 固定顺序：view → ocr → copy → paste → optimize → pin → remove。
+ * view 放最前是因为它只在「有更多内容可看」时出现，属于第一意图；
+ * ocr 紧跟 view：图片上的第一意图是看图，第二才是把图里的字抠出来。
  */
 export function menuItemsFor(item: MenuSource): MenuItem[] {
   const isImage = item.kind === 'image';
@@ -34,6 +35,9 @@ export function menuItemsFor(item: MenuSource): MenuItem[] {
   if (isImage || item.truncated === true || item.hasFullText === true) {
     items.push({ action: 'view', label: isImage ? '查看大图' : '查看全文' });
   }
+
+  // 只给图片：OCR 的输入是图片记录，文本记录没有可识别的像素。
+  if (isImage) items.push({ action: 'ocr', label: '识别文字' });
 
   items.push({ action: 'copy', label: '复制到剪贴板' });
   items.push({ action: 'paste', label: '复制并粘贴' });

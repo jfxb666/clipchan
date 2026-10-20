@@ -48,6 +48,16 @@ export {
 } from './trashViewLogic';
 export { OptimizeView, type OptimizeScene, type OptimizeViewProps } from './OptimizeViewCard';
 export { OPTIMIZE_MODES, degradedHint, type OptimizeMode } from './optimizeView';
+export {
+  HISTORY_LIMIT,
+  emptyHistoryHint,
+  historySceneLabel,
+  historyTimeLabel,
+  truncateForList,
+} from './optimizeHistory';
+// 历史条目类型定义在 types.ts（主进程与渲染层共用），这里顺手从 UI 出口再暴露一次，
+// 免得调用方为了一个类型去深挖 core 的内部路径。
+export type { OptimizeHistoryEntry } from '../types';
 export { WidgetView, WIDGET_PREVIEW_COUNT, visibleWidgetItems } from './WidgetView';
 export {
   WIDGET_AUTO_MAX_HEIGHT,
@@ -118,6 +128,17 @@ export {
   type MenuSource,
 } from './contextMenu';
 export { ContextMenu, type ContextMenuProps } from './ContextMenuView';
+export { OcrResultView, type OcrResultViewProps } from './OcrResultView';
+export {
+  OCR_EMPTY_TOAST,
+  OCR_SAVED_TOAST,
+  canSaveAsItem,
+  ocrEmptyToast,
+  ocrErrorText,
+  ocrProgressText,
+  ocrSavedToast,
+  ocrStatusText,
+} from './ocrView';
 export { viewerKindOf, viewerTitleOf, type ViewerKind, type ViewerSource } from './viewer';
 export { TextViewer } from './TextViewer';
 export {

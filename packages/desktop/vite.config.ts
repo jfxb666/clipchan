@@ -22,5 +22,13 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: true,
     target: 'chrome120',
+    // 两个页面入口：主窗口 index.html 与截图 overlay capture.html（铁律一：overlay
+    // 是独立页面，不塞进 App 的 View 里）。overlay 由主进程按显示器分别 loadFile。
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        capture: path.resolve(__dirname, 'capture.html'),
+      },
+    },
   },
 });

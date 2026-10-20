@@ -7,24 +7,37 @@
  * ★ --smoke：创建窗口、切两次形态、回读尺寸、打印一行 SMOKE {...} 后退出 0
  *   （给 scripts/smoke-main.mjs 断言用，不需要人眼看）。
  */
-import { Menu, app, BrowserWindow, clipboard, dialog, nativeImage, net, protocol, screen } from 'electron';
+import { Menu, app, BrowserWindow, clipboard, desktopCapturer, dialog, nativeImage, net, protocol, screen } from 'electron';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DEFAULT_SETTINGS } from '@clipchan/core';
-import type { Capabilities, GhostState, ListQuery, NavigateTarget, Settings } from '@clipchan/core';
+import { DEFAULT_SETTINGS, pasteHintOf } from '@clipchan/core';
+import type {
+  Capabilities,
+  CaptureFinishPayload,
+  CaptureResult,
+  CaptureTarget,
+  GhostState,
+  ListQuery,
+  NavigateTarget,
+  OptimizeRequest,
+  OptimizeResult,
+  Settings,
+} from '@clipchan/core';
 import { adapterFor } from '@clipchan/ai';
 import { optimize as runOptimize } from '@clipchan/ai';
 import { CH, EV } from './channels';
-import { createAi } from './ai';
+import { PROVIDERS_KEY, createAi } from './ai';
 import { createDeltaThrottle } from './deltaThrottle';
 import type { AiApi } from './ai';
 import { openDb } from './db';
 import type { Db, InsertResult } from './db';
 import { runLegacyMigration } from './migrate-runner';
-import { enforceImageBudget, purgeItemsWithFiles, purgeTrashOverLimitWithFiles } from './images';
+import { deleteImageFiles, enforceImageBudget, hashImageBuffer, purgeItemsWithFiles, purgeTrashOverLimitWithFiles, saveImage } from './images';
+import type { NativeImageLike, SavedImage } from './images';
 import { sweepOrphans } from './images-policy';
-import { imageAbs, imagesDir, thumbsDir, dbFile, resolveDataDir } from './paths';
+import { imageAbs, imagesDir, thumbsDir, dbFile, resolveDataDir, toRelativePath } from './paths';
 import { THUMB_SCHEME, imageUrlFor, mapThumbUrl, resolveImageRequest, resolveThumbRequest } from './thumb-url';
 import { registerHotkeys, unregisterHotkeys } from './hotkeys';
 import { exportAllToZip, importAllFromZip, importSummaryText } from './export-import';
@@ -45,6 +58,10 @@ import { FrostedGlass, handleOf } from './frosted';
 import { BurstDetector, showBurstBalloon } from './burst';
 import { MergeService } from './merge-service';
 import { wordCloudToday } from './wordcloud';
+import { describeFinish, matchSource, thumbnailSizeFor } from './capture';
+import { closeOverlays, createOverlayWindows } from './overlay';
+import { createOcr } from './ocr';
+import type { OcrApi } from './ocr';
 import type { RecordSink } from './watcher';
 
 const SMOKE = process.argv.includes('--smoke');
@@ -105,6 +122,14 @@ let mergeSvc: MergeService | null = null;
 let burstDetector: BurstDetector | null = null;
 /** 面板不可见时攒下的预选 id，等下次显示面板再发给界面（照抄 legacy MainForm.cs:596-598）。 */
 let pendingBurstIds: string[] = [];
+
+/**
+ * 一次截图会话的两个句柄：overlay 窗与它们各自的底图。
+ * ★ 底图留在主进程而不是随窗传：overlay 只拿自己那块（capture.target 按 displayId 取），
+ *   否则多屏时每个窗都会收到全部屏的 PNG，内存与 IPC 都白付一遍。
+ */
+let captureOverlays: BrowserWindow[] = [];
+let captureTargets: CaptureTarget[] = [];
 
 /** 广播器在 buildHandlers() 里才创建；AI 桥用它的 aiChanged 通道。 */
 let aiBroadcast: {
@@ -548,6 +573,16 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
     },
     // ★ 正文全文（列表预览是截断的）：优化面板要原文，图片行/不存在一律空串。
     [CH.items.getText]: (_e, id: string) => needDb().getText(String(id)),
+    // ★ v0.5.0：OCR 结果「存为一条新记录」。空串回 ok:false 而不是让 insertText 抛
+    //   —— 面板已经按 canSaveAsItem 禁用了按钮，这里再抛只会把一句 SQLite 的报错摊给用户。
+    [CH.items.saveText]: (_e, text: string) => {
+      const body = typeof text === 'string' ? text : '';
+      if (body.trim() === '') return { ok: false };
+      const result = needDb().insertText(body);
+      // 列表由事件刷新：不广播的话用户存完看不到新记录（以为没成功）。
+      broadcast.itemsChanged();
+      return { ok: true, id: result.id };
+    },
     // ★ 优化结果「复制并粘贴」：同一段文本可能贴多次，不走 items:paste（那是库里的记录，
     //   会刷新排序）。不查库、不 touch，编排与 pasteItem 一致。
     [CH.ai.copyAndPaste]: (_e, text: string) => {
@@ -650,6 +685,37 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
     [CH.wordcloud.exportPng]: () => exportWordCloudPng(),
     // ★ AI 面（Task 5）：Key 只在主进程与库之间流动，界面拿到的是掩码与布尔。
     ...needAi().handlers(),
+    // ★ v0.5.0 历史与截图/OCR 面写在展开之后：对象字面量后写的键覆盖前面的，
+    //   所以这三条能盖掉 ai.ts 里那份 ai.optimize（要包一层才写得了历史）。
+    [CH.ai.optimize]: async (_e, req: OptimizeRequest) => {
+      const res = await needAi().optimize(req);
+      recordOptimizeHistory(req, res);
+      return res;
+    },
+    [CH.ai.history]: (_e, limit?: number) =>
+      needDb().listOptimizeHistory(typeof limit === 'number' ? limit : undefined),
+    [CH.ai.historyRemove]: (_e, id: string) => {
+      needDb().removeOptimizeHistory(String(id));
+    },
+    [CH.ai.historyClear]: () => {
+      needDb().clearOptimizeHistory();
+    },
+    // 截图四条：begin 由热键触发，其余由 overlay 页面（capture.html）调用。
+    [CH.capture.begin]: () => beginCapture(),
+    [CH.capture.target]: (_e, displayId: number) =>
+      captureTargets.find((t) => t.displayId === Number(displayId)) ?? null,
+    [CH.capture.finish]: (_e, p: CaptureFinishPayload) => finishCapture(p),
+    [CH.capture.cancel]: () => {
+      cancelCapture();
+    },
+    // OCR 三条：全部懒创建（needOcr 内部才建桥），冷启动与 smoke 都不为它付代价。
+    [CH.ocr.status]: () => needOcr().status(),
+    [CH.ocr.download]: () => needOcr().download(),
+    [CH.ocr.recognize]: (_e, id: string) => {
+      const row = needDb().getImageRow(String(id));
+      if (!row || !row.image_path) throw new Error('这条记录不是图片');
+      return needOcr().recognize(imageAbs(rt.dataDir, row.image_path));
+    },
   };
   return handlers;
 }
@@ -662,6 +728,279 @@ function needAi(): AiApi {
 function needWin(): BrowserWindow {
   if (!rt.win) throw new Error('窗口尚未创建');
   return rt.win;
+}
+
+/** buildHandlers() 里那份 needDb 是闭包局部量，模块级的截图/历史逻辑用这个。 */
+function requireDb(): Db {
+  if (!rt.db) throw new Error('数据库尚未就绪');
+  return rt.db;
+}
+
+// ---------------- 截图会话（v0.5.0 T6） ----------------
+
+/**
+ * 一次截图会话的收尾：关掉全部 overlay 并清空本次状态。
+ * ★ 成功 / 用户取消 / 出错三条路径都要走到这里，否则会留下一层吃掉全部鼠标事件的全屏窗。
+ */
+function cancelCapture(): void {
+  closeOverlays(captureOverlays);
+  captureOverlays = [];
+  captureTargets = [];
+}
+
+/**
+ * 抓全部屏幕 → 每屏建一个 overlay 窗。
+ * @returns 本次的 targets；抓不到任何屏幕时返回 null（并 toast 中文原因）。
+ */
+async function beginCapture(): Promise<CaptureTarget[] | null> {
+  const broadcast = makeBroadcaster(() => rt.win);
+  // ★ 连按两次热键：先收掉上一次的 overlay，否则屏幕上会叠两层全屏窗（上层关掉才露出下层）。
+  if (captureOverlays.length > 0) cancelCapture();
+
+  const displays = screen.getAllDisplays();
+  // thumbnailSize 只能给一个尺寸，所以取各屏物理像素的最大值：小屏抓大图只是多几个像素，
+  // 大屏抓小图会被放大成糊图 —— 宁可多花内存也不给用户一张糊的底图。
+  const sizes = displays.map((d) => thumbnailSizeFor(d));
+  let sources: Awaited<ReturnType<typeof desktopCapturer.getSources>>;
+  try {
+    sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: {
+        width: Math.max(1, ...sizes.map((s) => s.width)),
+        height: Math.max(1, ...sizes.map((s) => s.height)),
+      },
+    });
+  } catch (e) {
+    broadcast.toast('没能抓取屏幕内容，请重试', 'error');
+    console.warn('[capture] 抓屏失败：' + (e instanceof Error ? e.message : String(e)));
+    return null;
+  }
+
+  const targets: CaptureTarget[] = [];
+  for (const display of displays) {
+    // ★ 配不上就跳过这块屏（matchSource 绝不猜）：把别人的屏幕画到这块屏上比抓不到更糟。
+    const matched = matchSource(sources, display, displays.length);
+    if (!matched) continue;
+    // matchSource 只声明了 getSize（它测得了），底图要 toDataURL，所以按 id 取回完整 source。
+    const source = sources.find((s) => s.id === matched.id);
+    if (!source) continue;
+    targets.push({
+      displayId: display.id,
+      bounds: display.bounds,
+      scaleFactor: display.scaleFactor,
+      dataUrl: source.thumbnail.toDataURL(),
+    });
+  }
+  if (targets.length === 0) {
+    broadcast.toast('没能抓取屏幕内容，请重试', 'error');
+    return null;
+  }
+
+  captureTargets = targets;
+  captureOverlays = createOverlayWindows({
+    targets,
+    preload: preloadFile(),
+    devServerUrl: process.env.VITE_DEV_SERVER_URL,
+    // 与 rendererFile() 同一条规则（main.ts:200-202）：dist-electron 上跳一级就是包根下的 dist。
+    file: path.join(__dirname, '..', 'dist', 'capture.html'),
+  });
+  return targets;
+}
+
+/**
+ * 把临时 id 的图片文件改名到库行 id 并回填路径。
+ *
+ * ★ 这段是 recorder.adoptId（recorder.ts:228-237）的照抄：那里是 private、签名也要
+ *   SavedImage，而 recorder.ts 本次不许改。顺序与它逐行一致，两处必须同改同测。
+ */
+function adoptCaptureImageId(fromId: string, toId: string, saved: SavedImage): void {
+  const ext = path.extname(saved.image_path) || '.png';
+  const absImage = path.join(imagesDir(rt.dataDir), toId + ext);
+  const absThumb = path.join(thumbsDir(rt.dataDir), toId + '.png');
+  fs.renameSync(imageAbs(rt.dataDir, saved.image_path), absImage);
+  fs.renameSync(imageAbs(rt.dataDir, saved.thumb_path), absThumb);
+  requireDb()
+    .raw.prepare('UPDATE items SET image_path = ?, thumb_path = ? WHERE id = ?')
+    .run(toRelativePath(rt.dataDir, absImage), toRelativePath(rt.dataDir, absThumb), toId);
+}
+
+/**
+ * 截图落库，返回记录 id。
+ *
+ * ★ 顺序照抄 recorder.recordImage（recorder.ts:171-225），不发明第三种写法：
+ *   临时 id 落盘 → 哈希**磁盘字节** → db.insertImage（它自己生成 id）→ id 不同则改名回填。
+ *   理由见那段注释：insertImage 不接受外部 id，而文件名必须是 images/<id>.<ext>，
+ *   先落盘再改名才能保证"行指向的文件一定存在"。
+ */
+function persistCaptureImage(img: NativeImageLike): string {
+  const db = requireDb();
+  const dataDir = rt.dataDir;
+  const tmpId = randomUUID().replace(/-/g, '');
+  const saved = saveImage(dataDir, tmpId, img);
+  const tmpRels = [saved.image_path, saved.thumb_path];
+
+  // 去重键取**磁盘上那份原图字节**的 sha256：与 recorder 完全一致，否则同一张图
+  // 从剪贴板进来和从截图进来会算出两个哈希，去重直接失效。
+  const hash = hashImageBuffer(fs.readFileSync(imageAbs(dataDir, saved.image_path)));
+  const result = db.insertImage(
+    {
+      hash,
+      width: saved.width,
+      height: saved.height,
+      bytes: saved.bytes,
+      imagePath: saved.image_path,
+      thumbPath: saved.thumb_path,
+    },
+    { now: Date.now(), source: 'capture' },
+  );
+
+  if (result.touched) {
+    // 库里已有同一张图：它的文件在它自己的 id 下，刚落的这份是多余的。
+    deleteImageFiles(dataDir, tmpRels, (m) => console.warn('[images] ' + m));
+    return result.id;
+  }
+
+  if (result.id !== tmpId) {
+    try {
+      adoptCaptureImageId(tmpId, result.id, saved);
+    } catch (e) {
+      // 改名失败不回滚数据库：行已经建好，最坏是路径与文件名对不上（日志里留证据）。
+      console.warn('[capture] 图片文件改名失败（库行 ' + result.id + '）：' + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+
+  // 与 recorder.afterWrite 对齐：截图也是图片写入，不按预算淘汰就等于绕开用户设的磁盘上限。
+  try {
+    const mb = rt.settings?.imageBudgetMB ?? DEFAULT_SETTINGS.imageBudgetMB;
+    enforceImageBudget(db, dataDir, mb * 1024 * 1024, (m) => console.warn('[images] ' + m));
+  } catch (e) {
+    console.warn('[capture] 图片预算淘汰失败（已忽略）：' + (e instanceof Error ? e.message : String(e)));
+  }
+  return result.id;
+}
+
+/**
+ * 标注完成：落库 + 按 action 分发（复制 / 粘贴 / 存文件）。
+ * ★ 无论哪条路径最后都 cancelCapture()，overlay 绝不留在屏幕上。
+ */
+async function finishCapture(payload: CaptureFinishPayload): Promise<CaptureResult> {
+  const broadcast = makeBroadcaster(() => rt.win);
+  try {
+    const img = nativeImage.createFromDataURL(String(payload?.pngDataUrl ?? ''));
+    if (img.isEmpty()) return { ok: false, reason: '截图内容为空' };
+
+    // ★ 先落库再分发：用户点了「存文件」却取消，记录也不该丢（这是有意的，见计划 §3 T6）。
+    const recordId = persistCaptureImage(img);
+    const action = payload.action;
+
+    if (action === 'copy') {
+      // 自我抑制：这条图刚由我们自己落库，不抑制的话轮询器会把同一张图再记一遍
+      // （去重会挡住重复行，但仍会白跑一次哈希并把这条顶到最前）。
+      watcher?.suppressNext();
+      clipboard.writeImage(img);
+    } else if (action === 'paste') {
+      const svc = pasteSvc;
+      if (!svc) return { ok: false, reason: '粘贴服务尚未就绪' };
+      // pasteItem 内部已写剪贴板 + 尝试贴回前台窗口，这里不重复写。
+      const pasted = await svc.pasteItem(recordId);
+      broadcast.itemsChanged();
+      // ★ 不无条件说「已粘贴到目标窗口」：没有可粘贴的目标 / 助手不可用时它只做到了复制，
+      //   照 describeFinish 报成功就是在骗用户（pasteHintOf 才是这一跳的真相）。
+      if (pasted.ok) broadcast.toast(describeFinish('paste'), 'info');
+      else broadcast.toast(pasteHintOf(pasted), 'warn');
+      return { ok: true, id: recordId };
+    } else if (action === 'save') {
+      const win = rt.win;
+      const options = {
+        title: '保存截图',
+        defaultPath: path.join(app.getPath('pictures'), 'clipchan-shot-' + Date.now() + '.png'),
+        filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+      };
+      // 与 exportAll 同一写法：有窗口就挂模态，窗口已销毁就走无父窗口对话框。
+      const picked = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
+      if (picked.canceled || !picked.filePath) {
+        // 记录已经在库里，只是没存成文件 —— 静默返回，不弹「已保存为文件」。
+        broadcast.itemsChanged();
+        return { ok: true, id: recordId, cancelled: true };
+      }
+      fs.writeFileSync(picked.filePath, img.toPNG());
+    } else {
+      // IPC 传进来的 action 不受类型约束：认不出来就说清楚，不假装处理成功。
+      return { ok: false, reason: '不认识的截图动作' };
+    }
+
+    broadcast.itemsChanged();
+    broadcast.toast(describeFinish(action), 'info');
+    return { ok: true, id: recordId };
+  } catch (e) {
+    const reason = e instanceof Error && e.message !== '' ? e.message : String(e);
+    console.warn('[capture] 处理截图失败：' + reason);
+    return { ok: false, reason: '处理截图失败：' + reason };
+  } finally {
+    cancelCapture();
+  }
+}
+
+// ---------------- OCR（v0.5.0 T6） ----------------
+
+/**
+ * tesseract.js-core 的目录。
+ *
+ * ★ 必须指向 asar **外**：wasm 不能从 asar 里读（electron-builder.yml 的 asarUnpack 已把
+ *   整个 tesseract.js-core 解到 app.asar.unpacked）。打包后 require.resolve 给出的仍是
+ *   asar 内路径，所以要把 'app.asar' 换成 'app.asar.unpacked'。
+ * ★ 包名走变量而不是字面量：esbuild 见字面量会尝试在打包期解析，而它是 tesseract.js 的
+ *   传递依赖（pnpm 不提升），解析不到会直接让主进程构建失败。
+ */
+function ocrCorePath(): string {
+  const pkg = 'tesseract.js-core/package.json';
+  try {
+    const dir = path.dirname(require.resolve(pkg));
+    return dir.replace('app.asar', 'app.asar.unpacked');
+  } catch {
+    // 解析不到（极端裁剪过的安装）就按 electron-builder 的固定布局兜底，绝不回 asar 内。
+    return path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'tesseract.js-core');
+  }
+}
+
+/** OCR 桥：懒创建（首次用到才建），smoke 与冷启动都不该为 OCR 付代价。 */
+let ocrApi: OcrApi | null = null;
+function needOcr(): OcrApi {
+  if (ocrApi) return ocrApi;
+  ocrApi = createOcr({
+    // 语言包与 worker 缓存都随数据目录走，卸载重装不丢。
+    langDir: path.join(rt.dataDir, 'ocr'),
+    corePath: ocrCorePath(),
+    onProgress: (p) => makeBroadcaster(() => rt.win).send(EV.ocrProgress, p),
+  });
+  return ocrApi;
+}
+
+/**
+ * 优化成功后写一条历史。
+ * ★ 整段 try/catch：写历史是**附加**动作，它失败绝不能把已经拿到的优化结果变成一次报错。
+ */
+function recordOptimizeHistory(req: OptimizeRequest, res: OptimizeResult): void {
+  try {
+    const db = requireDb();
+    // 键名与 ai.ts:35 的 PROVIDERS_KEY 是同一个（从那里 import，不在这里再写一遍字面量）。
+    const raw = db.getSettingValue<{ id?: unknown; name?: unknown }[]>(PROVIDERS_KEY);
+    const list = Array.isArray(raw) ? raw : [];
+    const found = list.find((p) => p && String(p.id) === req.providerId);
+    const name = found && typeof found.name === 'string' && found.name.trim() !== '' ? found.name : req.providerId;
+    db.addOptimizeHistory({
+      source: req.text,
+      output: res.optimized,
+      sceneId: req.sceneId,
+      mode: req.mode,
+      providerId: req.providerId,
+      // provider 名字存快照：provider 后来被删，历史条目仍能看懂是谁生成的。
+      providerName: name,
+      createdAt: Date.now(),
+    });
+  } catch (e) {
+    console.warn('[ai] 写历史失败：' + (e instanceof Error ? e.message : String(e)));
+  }
 }
 
 /**
@@ -701,6 +1040,8 @@ function registerHotkeysNow(): void {
       navigateTo('list');
     },
     onWidget: () => void switchMode('widget'),
+    // 截图由 overlay 自己收尾（finish/cancel 都会 cancelCapture），这里不 await。
+    onCapture: () => void beginCapture(),
   });
 }
 

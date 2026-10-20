@@ -13,8 +13,10 @@ npmRebuild: false
 buildDependenciesFromSource: false
 
 # better-sqlite3 的 .node 不能进 asar（否则 dlopen 失败）。
+# tesseract.js-core 的 .wasm 同理：wasm 不能从 asar 里读，corePath 必须指 unpacked 目录。
 asarUnpack:
   - '**/*.node'
+  - '**/tesseract.js-core/**'
 
 files:
   - 'dist/**/*'

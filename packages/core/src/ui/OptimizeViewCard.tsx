@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { Sparkles } from 'lucide-react';
-import type { AiProvider, OptimizeDelta, OptimizeRequest, OptimizeResult, PasteResult } from '../types';
+import { History, Sparkles, Trash2, X } from 'lucide-react';
+import type {
+  AiProvider,
+  OptimizeDelta,
+  OptimizeHistoryEntry,
+  OptimizeRequest,
+  OptimizeResult,
+  PasteResult,
+} from '../types';
 import type { ToastTone } from './toastText';
 import { aiErrorMessage } from './aiProviderForm';
 import {
@@ -17,6 +24,7 @@ import {
   takeDraft,
 } from './optimizeView';
 import type { OptimizeDraft } from './optimizeView';
+import { emptyHistoryHint, historySceneLabel, historyTimeLabel, truncateForList } from './optimizeHistory';
 import { pasteToast } from './toastText';
 import { cn } from './util';
 
@@ -64,6 +72,13 @@ export interface OptimizeViewProps {
   onCancel?: (requestId: string) => void;
   onToast: (text: string, tone?: ToastTone) => void;
   onGoSettings: () => void;
+  /**
+   * 优化历史（v0.5.0）。三个回调都可选：都不传时「历史」按钮根本不渲染，
+   * 这样 v0.4 的调用方（含测试与移动端壳）不改一行也不会看到一个点不开的按钮。
+   */
+  onHistory?: () => Promise<OptimizeHistoryEntry[]>;
+  onHistoryRemove?: (id: string) => Promise<void>;
+  onHistoryClear?: () => Promise<void>;
 }
 
 const SELECT_CLASS =
@@ -116,6 +131,9 @@ export function OptimizeView({
   onCancel,
   onToast,
   onGoSettings,
+  onHistory,
+  onHistoryRemove,
+  onHistoryClear,
 }: OptimizeViewProps) {
   // 切走再回来（App 条件渲染会卸载本组件）：先取回上次的草稿，没有才用传入的原文。
   // ★ 用 ref 守卫而不是 useState 惰性初始化：StrictMode 下渲染函数会跑两遍，
@@ -145,6 +163,12 @@ export function OptimizeView({
   const activeRequest = useRef<string | null>(null);
   /** 草稿挂靠的原文：跟着当前记录走，切到别的记录时才换。 */
   const draftSource = useRef(restored?.source ?? source);
+  /** 历史抽屉：只在调用方给了 onHistory 时才可能打开（按钮也不渲染）。 */
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<OptimizeHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  /** 「清空全部」的二次确认：就地变成「确认清空 / 取消」，不弹原生对话框。 */
+  const [historyConfirming, setHistoryConfirming] = useState(false);
 
   // 场景目录：主进程投影，失败时把错误摊在工具条上，不静默留个空下拉。
   useEffect(() => {
@@ -274,6 +298,68 @@ export function OptimizeView({
     onToast(toast.text, toast.tone);
   }
 
+  /**
+   * 拉历史。失败不白屏：抽屉里留空列表 + 一条中文提示，同时用 toast 出声，
+   * 因为抽屉可能是半遮挡的，用户未必盯着它看。
+   */
+  async function loadHistory(): Promise<void> {
+    if (onHistory === undefined) return;
+    setHistoryLoading(true);
+    try {
+      setHistory(await onHistory());
+    } catch {
+      setHistory([]);
+      onToast('读取优化历史失败，请重试', 'warn');
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  function toggleHistory(): void {
+    if (historyOpen) {
+      setHistoryOpen(false);
+      setHistoryConfirming(false);
+      return;
+    }
+    setHistoryOpen(true);
+    setHistoryConfirming(false);
+    void loadHistory();
+  }
+
+  /** 点一条历史：原文 / 结果 / 场景 / 模式一起还原，再把上一次请求的残留清掉。 */
+  function applyHistory(entry: OptimizeHistoryEntry): void {
+    setText(entry.source);
+    setOutput(entry.output);
+    setSceneId(entry.sceneId);
+    setMode(entry.mode);
+    setResult(null);
+    setNotes([]);
+    setError(null);
+    setHistoryOpen(false);
+    setHistoryConfirming(false);
+  }
+
+  async function removeHistory(id: string): Promise<void> {
+    if (onHistoryRemove === undefined) return;
+    try {
+      await onHistoryRemove(id);
+      await loadHistory();
+    } catch {
+      onToast('删除历史记录失败，请重试', 'warn');
+    }
+  }
+
+  async function clearHistory(): Promise<void> {
+    if (onHistoryClear === undefined) return;
+    try {
+      await onHistoryClear();
+      setHistoryConfirming(false);
+      await loadHistory();
+    } catch {
+      onToast('清空历史失败，请重试', 'warn');
+    }
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-snug border-b border-line px-base py-snug">
@@ -346,8 +432,22 @@ export function OptimizeView({
             />
           </label>
 
-          <div className="flex min-h-0 flex-col gap-tight">
-            <span className="text-[12px] font-semibold text-ink">优化后</span>
+          <div className="relative flex min-h-0 flex-col gap-tight">
+            <div className="flex shrink-0 items-center justify-between gap-snug">
+              <span className="text-[12px] font-semibold text-ink">优化后</span>
+              {/* 只有调用方接了历史回调才出现：旧调用方看到一个点不开的按钮比看不到更糟。 */}
+              {onHistory !== undefined ? (
+                <button
+                  type="button"
+                  className={cn(GHOST_BUTTON_CLASS, 'flex items-center gap-[4px]')}
+                  aria-expanded={historyOpen}
+                  onClick={toggleHistory}
+                >
+                  <History size={12} aria-hidden />
+                  历史
+                </button>
+              ) : null}
+            </div>
             {loading ? (
               <span className="shrink-0 text-[11px] text-ink-3">优化中：内容会实时显示在下面，结束后可直接修改</span>
             ) : null}
@@ -372,6 +472,94 @@ export function OptimizeView({
                 className="cc-scroll min-h-0 flex-1 resize-none rounded-input border border-line bg-surface px-snug py-tight text-[12px] leading-[1.7] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-primary)]"
               />
             )}
+
+            {/* 历史抽屉：盖在「优化后」这一栏上而不是新开一层浮层——点一条就是为了把它填回这栏。 */}
+            {historyOpen ? (
+              <div className="absolute inset-0 z-10 flex min-h-0 flex-col overflow-hidden rounded-input border border-line bg-surface shadow-card">
+                <div className="flex shrink-0 items-center justify-between gap-snug border-b border-line px-snug py-tight">
+                  <span className="text-[11px] font-semibold text-ink-2">优化历史</span>
+                  <button
+                    type="button"
+                    title="关闭"
+                    onClick={toggleHistory}
+                    className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+                  >
+                    <X size={13} aria-hidden />
+                  </button>
+                </div>
+
+                <div className="cc-scroll min-h-0 flex-1 overflow-y-auto px-[6px] py-tight">
+                  {historyLoading ? (
+                    <Skeleton />
+                  ) : history.length === 0 ? (
+                    <p className="px-snug py-comfortable text-center text-[11px] text-ink-3">{emptyHistoryHint()}</p>
+                  ) : (
+                    <ul className="flex flex-col gap-[2px]">
+                      {history.map((entry) => (
+                        <li key={entry.id} className="flex items-start gap-[2px]">
+                          <button
+                            type="button"
+                            onClick={() => applyHistory(entry)}
+                            className="min-w-0 flex-1 rounded-button px-snug py-[5px] text-left transition-colors hover:bg-surface-2"
+                          >
+                            <span className="flex items-center gap-[6px] text-[10px] text-ink-3">
+                              <span className="shrink-0">{historyTimeLabel(entry.createdAt)}</span>
+                              <span className="truncate">{historySceneLabel(entry, scenes)}</span>
+                            </span>
+                            <span className="mt-[2px] block truncate text-[11px] leading-[1.6] text-ink-2">
+                              {truncateForList(entry.source)}
+                            </span>
+                          </button>
+                          {/* 删除是逐项的，所以不放进主按钮里：误点主按钮会替换掉当前原文，误点删除只是少一条历史。 */}
+                          {onHistoryRemove !== undefined ? (
+                            <button
+                              type="button"
+                              title="删除这条历史"
+                              onClick={() => void removeHistory(entry.id)}
+                              className="mt-[3px] shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-red-400"
+                            >
+                              <Trash2 size={12} aria-hidden />
+                            </button>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                {onHistoryClear !== undefined && history.length > 0 ? (
+                  <div className="flex shrink-0 items-center justify-end gap-snug border-t border-line px-snug py-tight">
+                    {historyConfirming ? (
+                      <>
+                        <span className="text-[10px] text-ink-3">清空后不可恢复</span>
+                        <button
+                          type="button"
+                          className="rounded-button px-snug py-[3px] text-[11px] text-red-400 hover:bg-surface-2"
+                          onClick={() => void clearHistory()}
+                        >
+                          确认清空
+                        </button>
+                        <button
+                          type="button"
+                          className={GHOST_BUTTON_CLASS}
+                          onClick={() => setHistoryConfirming(false)}
+                        >
+                          取消
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className={GHOST_BUTTON_CLASS}
+                        onClick={() => setHistoryConfirming(true)}
+                      >
+                        清空全部
+                      </button>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
       )}

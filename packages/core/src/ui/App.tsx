@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppWindow, CalendarClock, Columns2, LayoutGrid, List, Settings2, Sparkles } from 'lucide-react';
-import type { AiError, AiProvider, AiProviderInput, OptimizeDelta, OptimizeRequest, Settings } from '../types';
+import type {
+  AiError,
+  AiProvider,
+  AiProviderInput,
+  OcrProgress,
+  OcrResult,
+  OcrStatus,
+  OptimizeDelta,
+  OptimizeRequest,
+  Settings,
+} from '../types';
 import { getPlatform } from '../platform/adapter';
 import { bindClipStore, useClipStore, type AppMode, type View } from '../state/store';
 import { ListPanel } from './ListPanel';
@@ -15,10 +25,12 @@ import { copyToast, pasteToast, type ToastTone } from './toastText';
 import { ContextMenu } from './ContextMenuView';
 import { menuItemsFor, type MenuAction } from './contextMenu';
 import { TextViewer } from './TextViewer';
+import { OcrResultView } from './OcrResultView';
 import { viewerKindOf, viewerTitleOf } from './viewer';
 import { WidgetView, WIDGET_PREVIEW_COUNT } from './WidgetView';
 import { widgetWindowHeight } from './widgetFit';
 import { OptimizeView } from './OptimizeViewCard';
+import { ocrErrorText, ocrSavedToast } from './ocrView';
 import { WordCloudView } from './WordCloudView';
 import { resolveKey, shouldPreventDefault } from './keymap';
 import { useAutoStart, useHotkeyStatus } from './usePlatformValue';
@@ -94,6 +106,18 @@ export function App() {
   /** 全文 / 大图浮层；null = 关闭。 */
   const [viewer, setViewer] = useState<ViewerState | null>(null);
 
+  /**
+   * OCR 结果浮层：itemId 非空即打开。
+   * 状态、进度、结果、错误分开存 —— 它们由四条不同的路径更新（打开 / 订阅 / 识别 / 下载），
+   * 合成一个对象的话每次都要整体重建，容易出现"改了进度把结果清掉"这类错。
+   */
+  const [ocr, setOcr] = useState<{ itemId: string } | null>(null);
+  const [ocrStatus, setOcrStatus] = useState<OcrStatus | null>(null);
+  const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null);
+  const [ocrResult, setOcrResult] = useState<OcrResult | null>(null);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const [ocrLoading, setOcrLoading] = useState(false);
+
   /** 小组件形态下收起侧栏，把宽度让给内容（spec §6.6 切形态改布局）。 */
   const widgetCompact = mode === 'widget';
 
@@ -153,6 +177,34 @@ export function App() {
       off();
     };
   }, []);
+
+  /**
+   * 设置页要显示语言包状态，而它平时是 null（只有 OCR 面板会去问）。
+   * ★ 进设置页时补一次：不问就永远停在「正在读取状态…」，而主进程的 status 只是
+   *   看两个文件在不在（不起 worker），代价可以忽略。
+   */
+  useEffect(() => {
+    if (view !== 'settings' || ocrStatus !== null) return;
+    let alive = true;
+    getPlatform()
+      .ocr.status()
+      .then((next) => {
+        if (alive) setOcrStatus(next);
+      })
+      .catch(() => {
+        // 非 Electron 环境 / preload 未加载：保持 null，设置页继续显示"正在读取状态…"。
+      });
+    return () => {
+      alive = false;
+    };
+  }, [view, ocrStatus]);
+
+  // OCR 进度：只在面板打开期间订阅（关掉就退订，否则主进程会一直往一个死面板推事件）。
+  useEffect(() => {
+    if (!ocr) return;
+    const off = getPlatform().ocr.onProgress(setOcrProgress);
+    return off;
+  }, [ocr]);
 
   // 全局键盘（spec §7.7）。判定收在 ./keymap 的纯函数里，这里只把动作派发给 store：
   // 仓库没有 jsdom（vitest 只跑 node），判定逻辑必须能脱离 DOM 单测。
@@ -304,6 +356,54 @@ export function App() {
     }
   }, []);
 
+  /**
+   * 识别当前这一条。
+   * ★ 失败原因翻成中文后放进 error（面板红字），loading 由 finally 收掉 ——
+   *   否则识别一失败按钮就永远停在「识别中…」。
+   */
+  const recognizeOcr = useCallback(async (itemId: string) => {
+    setOcrLoading(true);
+    setOcrError(null);
+    try {
+      setOcrResult(await getPlatform().ocr.recognize(itemId));
+    } catch (err) {
+      setOcrError(ocrErrorText(err));
+    } finally {
+      setOcrLoading(false);
+      // ★ 收尾必须清进度：设置页只要 progress 非 null 就会显示「正在识别…」，
+      //   不清的话识别完那条文案会一直挂在那里。
+      setOcrProgress(null);
+    }
+  }, []);
+
+  /**
+   * 右键「识别文字」：开面板 + 问一次状态，就绪才自动识别。
+   * ★ 未就绪时不调 recognize：那只会拿到一句「尚未下载文字识别语言包」，
+   *   不如让面板直接把下载按钮摆出来（OcrResultView 按 status.ready 分支渲染）。
+   * ★ 不做「是不是图片」判断：menuItemsFor 已经只在图片记录上给 ocr。
+   */
+  const openOcr = useCallback(
+    async (id: string) => {
+      setOcr({ itemId: id });
+      setOcrResult(null);
+      setOcrError(null);
+      setOcrProgress(null);
+      setOcrLoading(true);
+      try {
+        const status = await getPlatform().ocr.status();
+        setOcrStatus(status);
+        if (!status.ready) return;
+        setOcrResult(await getPlatform().ocr.recognize(id));
+      } catch (err) {
+        setOcrError(ocrErrorText(err));
+      } finally {
+        setOcrLoading(false);
+        setOcrProgress(null);
+      }
+    },
+    [],
+  );
+
   const menuItems = useCallback((id: string) => {
     const item = useClipStore.getState().items.find((it) => it.id === id);
     if (!item) return [];
@@ -329,6 +429,9 @@ export function App() {
         case 'view':
           void openViewer(id);
           return;
+        case 'ocr':
+          void openOcr(id);
+          return;
         case 'optimize':
           void openOptimize(id);
           return;
@@ -340,7 +443,7 @@ export function App() {
           return;
       }
     },
-    [copyItem, openOptimize, openViewer, paste],
+    [copyItem, openOcr, openOptimize, openViewer, paste],
   );
 
   // 优化面板的平台动作：组件不碰 getPlatform，一律由 App 注入（与设置页一致）。
@@ -357,7 +460,67 @@ export function App() {
     (cb: (delta: OptimizeDelta) => void) => getPlatform().ai.onOptimizeDelta(cb),
     [],
   );
+  // 优化历史的读写都在主进程（写入口在 ai.optimize 成功之后），这里只转发。
+  const loadHistory = useCallback(() => getPlatform().ai.history(), []);
+  const removeHistory = useCallback((id: string) => getPlatform().ai.historyRemove(id), []);
+  const clearHistory = useCallback(() => getPlatform().ai.historyClear(), []);
   const toast = useCallback((text: string, tone?: ToastTone) => useClipStore.getState().toast(text, tone), []);
+
+  // OCR 面板的平台动作：组件不碰 getPlatform，全部由 App 注入（与优化面板一致）。
+  /**
+   * 下载语言包：成功且已就绪就顺手把当前这条识别掉 —— 用户点下载的意图就是"我要看字"。
+   * 下载可能几十秒，loading 全程为 true（OcrResultView 据此显示进度条而不是空面板）。
+   */
+  const downloadOcr = useCallback(async () => {
+    const current = ocr;
+    setOcrLoading(true);
+    setOcrError(null);
+    try {
+      const status = await getPlatform().ocr.download();
+      setOcrStatus(status);
+      if (!status.ready) {
+        // 下载失败的原因已经在 status.error 里（ocrStatusText 会优先显示它）。
+        return;
+      }
+      if (current) setOcrResult(await getPlatform().ocr.recognize(current.itemId));
+    } catch (err) {
+      setOcrError(ocrErrorText(err));
+    } finally {
+      setOcrLoading(false);
+      setOcrProgress(null);
+    }
+  }, [ocr]);
+
+  const recognizeCurrentOcr = useCallback(() => {
+    if (ocr) void recognizeOcr(ocr.itemId);
+  }, [ocr, recognizeOcr]);
+
+  /**
+   * 存为一条新记录。
+   * ★ 不手动 reload：主进程 items:saveText 写库后会自己发 itemsChanged，列表会刷新；
+   *   这里再刷一次只会白跑一遍查询。
+   */
+  const saveOcrAsItem = useCallback(
+    async (text: string) => {
+      try {
+        const result = await getPlatform().items.saveText(text);
+        const { text: message, tone } = result.ok ? ocrSavedToast() : { text: '存为记录失败，请重试', tone: 'warn' as const };
+        toast(message, tone);
+      } catch (err) {
+        toast(ocrErrorText(err), 'error');
+      }
+    },
+    [toast],
+  );
+
+  const closeOcr = useCallback(() => {
+    setOcr(null);
+    setOcrStatus(null);
+    setOcrProgress(null);
+    setOcrResult(null);
+    setOcrError(null);
+    setOcrLoading(false);
+  }, []);
 
   const openWordCloud = useCallback(() => {
     useClipStore.getState().setView('wordcloud');
@@ -567,6 +730,9 @@ export function App() {
               onAiRemove={removeAiProvider}
               onAiTest={testAiProvider}
               onAiListModels={listAiModels}
+              ocrStatus={ocrStatus}
+              ocrProgress={ocrProgress}
+              onOcrDownload={() => void downloadOcr()}
             />
           ) : null}
 
@@ -582,6 +748,9 @@ export function App() {
               onToast={toast}
               onCancel={(requestId) => void getPlatform().ai.cancel(requestId)}
               onGoSettings={() => useClipStore.getState().setView('settings')}
+              onHistory={loadHistory}
+              onHistoryRemove={removeHistory}
+              onHistoryClear={clearHistory}
             />
           ) : null}
 
@@ -633,6 +802,22 @@ export function App() {
         loading={viewer?.loading}
         onCopy={(text) => void writeClipboard(text).then(() => toast('已复制到剪贴板', 'ok'))}
         onClose={() => setViewer(null)}
+      />
+
+      {/* 与 TextViewer 同层：都要盖住所有视图（含小组件形态）。 */}
+      <OcrResultView
+        open={ocr !== null}
+        itemId={ocr?.itemId ?? ''}
+        status={ocrStatus}
+        progress={ocrProgress}
+        result={ocrResult}
+        error={ocrError}
+        loading={ocrLoading}
+        onDownload={() => void downloadOcr()}
+        onRecognize={recognizeCurrentOcr}
+        onSaveAsItem={(text) => void saveOcrAsItem(text)}
+        onCopy={(text) => void writeClipboard(text).then(() => toast('已复制到剪贴板', 'ok'))}
+        onClose={closeOcr}
       />
 
       <ToastStack toasts={toasts} onDismiss={(id) => useClipStore.getState().dismissToast(id)} />
