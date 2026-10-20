@@ -81,6 +81,13 @@ export {
 export { badgeOf, filterKindOf, emptyHintOf, type Badge, type BadgeIcon } from './badges';
 export { highlightSegments, type HighlightSegment } from './highlight';
 export {
+  HIGHLIGHT_MAX_CHARS,
+  HLJS_LANGUAGES,
+  guessLanguage,
+  shouldHighlight,
+  highlightToHtml,
+} from './codeHighlight';
+export {
   clampMenuPosition,
   menuItemsFor,
   type MenuAction,

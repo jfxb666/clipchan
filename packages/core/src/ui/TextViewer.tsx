@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
+import { HIGHLIGHT_MAX_CHARS, guessLanguage, highlightToHtml } from './codeHighlight';
 import { cn } from './util';
 
 export interface TextViewerProps {
@@ -9,6 +10,8 @@ export interface TextViewerProps {
   text?: string;
   imageUrl?: string;
   loading?: boolean;
+  /** 指定语言；不传则按内容猜（猜不出回落 javascript）。 */
+  language?: string;
   onCopy?: (text: string) => void;
   onClose: () => void;
 }
@@ -23,6 +26,7 @@ export function TextViewer({
   text,
   imageUrl,
   loading,
+  language,
   onCopy,
   onClose,
 }: TextViewerProps) {
@@ -44,6 +48,12 @@ export function TextViewer({
 
   const isImage = typeof imageUrl === 'string' && imageUrl.length > 0;
   const broken = isImage && failedUrl === imageUrl;
+  // 浮层里没有搜索态，所以这里不判 term（与卡片不同，不受铁律二影响）。
+  const body = text ?? '';
+  const hlHtml =
+    !isImage && body.length > 0 && body.length <= HIGHLIGHT_MAX_CHARS
+      ? highlightToHtml(body, language ?? guessLanguage(body) ?? 'javascript')
+      : null;
 
   return createPortal(
     <div
@@ -81,7 +91,11 @@ export function TextViewer({
             )
           ) : (
             <pre className="max-h-[60vh] select-text overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.7] text-ink">
-              {text ?? ''}
+              {hlHtml !== null ? (
+                <code className="cc-hljs" dangerouslySetInnerHTML={{ __html: hlHtml }} />
+              ) : (
+                body
+              )}
             </pre>
           )}
         </div>

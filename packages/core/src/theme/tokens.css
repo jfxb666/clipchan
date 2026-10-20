@@ -151,3 +151,16 @@ body {
 
 @keyframes cc-fade { from { opacity: 0; } to { opacity: 1; } }
 .cc-fade { animation: cc-fade 160ms ease-out; }
+
+/*
+ * highlight.js token → 主题变量（v0.4.0 语法高亮）。
+ * 一套规则吃两套主题：颜色全走 --cc-* 变量，深色主题下变量自己会换值，不必写两份。
+ */
+.cc-hljs .hljs-keyword, .cc-hljs .hljs-selector-tag, .cc-hljs .hljs-literal { color: var(--cc-accent); }
+.cc-hljs .hljs-string, .cc-hljs .hljs-attr { color: var(--cc-primary); }
+.cc-hljs .hljs-comment { color: var(--cc-text-3); font-style: italic; }
+.cc-hljs .hljs-number, .cc-hljs .hljs-symbol { color: var(--cc-warm); }
+.cc-hljs .hljs-title, .cc-hljs .hljs-function, .cc-hljs .hljs-built_in { color: var(--cc-primary); }
+.cc-hljs .hljs-type, .cc-hljs .hljs-variable { color: var(--cc-pink); }
+.cc-hljs .hljs-meta, .cc-hljs .hljs-params { color: var(--cc-text-2); }
+.cc-hljs .hljs-tag, .cc-hljs .hljs-name { color: var(--cc-accent); }

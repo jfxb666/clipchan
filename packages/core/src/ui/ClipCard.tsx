@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import { ImageIcon, Sparkles, Star } from 'lucide-react';
 import type { ClipItemDTO } from '../types';
 import { TypeBadge } from './TypeBadge';
+import { guessLanguage, highlightToHtml, shouldHighlight } from './codeHighlight';
 import { highlightSegments } from './highlight';
 import { cn, formatTime } from './util';
 
@@ -45,6 +46,11 @@ export function ClipCard({
 }: ClipCardProps) {
   const isCode = item.kind === 'code';
   const segments = highlightSegments(item.preview, term);
+  // ★ 铁律二：有搜索词时只做搜索词高亮（shouldHighlight 已把 term 非空判掉），
+  //   语法高亮为 null 就原样走 segments 分支。
+  const hlHtml = shouldHighlight(item.kind, item.preview, term)
+    ? highlightToHtml(item.preview, guessLanguage(item.preview) ?? 'javascript')
+    : null;
   return (
     <motion.div
       layout
@@ -94,14 +100,18 @@ export function ClipCard({
             isCode && 'font-mono text-[12px]',
           )}
         >
-          {segments.map((segment, index) =>
-            segment.hit ? (
-              <mark key={index} className={HIT_CLASS}>
-                {segment.text}
-              </mark>
-            ) : (
-              <Fragment key={index}>{segment.text}</Fragment>
-            ),
+          {hlHtml !== null ? (
+            <span className="cc-hljs" dangerouslySetInnerHTML={{ __html: hlHtml }} />
+          ) : (
+            segments.map((segment, index) =>
+              segment.hit ? (
+                <mark key={index} className={HIT_CLASS}>
+                  {segment.text}
+                </mark>
+              ) : (
+                <Fragment key={index}>{segment.text}</Fragment>
+              ),
+            )
           )}
         </p>
         <div className="mt-tight flex items-center gap-tight text-[11px] text-ink-3">
