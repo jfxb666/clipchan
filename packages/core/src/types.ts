@@ -56,9 +56,15 @@ export interface ClipItemDTO {
   sourceApp?: string;
   /** 在回收站里的时间戳；活跃记录为 undefined。 */
   deletedAt?: number;
+  /** 图片原始宽高（v0.4.0 瀑布流算列高用）；非图片或无记录时 undefined。 */
+  width?: number;
+  height?: number;
 }
 
 export type ThemeMode = 'auto' | 'light' | 'dark';
+
+/** 列表布局模式（v0.4.0）：只是 list 视图内部的排列方式，不是新的 View。 */
+export type ListLayout = 'list' | 'timeline' | 'masonry' | 'source';
 
 export interface Settings {
   theme: ThemeMode;
@@ -72,6 +78,8 @@ export interface Settings {
   hotkeyWidget: string;
   /** 回收站上限（条）。超出后硬删最旧的回收站记录并删盘。 */
   trashLimit: number;
+  /** 列表布局模式（v0.4.0）。只影响排列，不影响筛选。 */
+  listLayout: ListLayout;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -85,6 +93,7 @@ export const DEFAULT_SETTINGS: Settings = {
   hotkeyActivate: 'Control+' + '\u0060',
   hotkeyWidget: 'Alt+C',
   trashLimit: 200,
+  listLayout: 'list',
 };
 
 export interface HotkeyStatus {

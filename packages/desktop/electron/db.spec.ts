@@ -350,6 +350,34 @@ describe('settings 持久化', () => {
     expect(s.autoPaste).toBe(false);
     expect(s.historyLimit).toBe(DEFAULT_SETTINGS.historyLimit);
   });
+
+  it('listLayout 走 sanitizeSettings 白名单（非法值回落 list）', () => {
+    const db = mem();
+    expect(db.getSettings().listLayout).toBe('list');
+    expect(db.setSettings({ listLayout: 'timeline' }).listLayout).toBe('timeline');
+    expect(db.setSettings({ listLayout: 'masonry' }).listLayout).toBe('masonry');
+    expect(db.setSettings({ listLayout: 'source' }).listLayout).toBe('source');
+    expect(db.setSettings({ listLayout: 'bogus' as never }).listLayout).toBe('list');
+  });
+
+  it('图片 DTO 带原始 width/height（瀑布流算列高用）', () => {
+    const db = mem();
+    db.insertImage(
+      { imagePath: 'images/a.jpg', thumbPath: 'thumbs/a.png', width: 800, height: 600, bytes: 1000, hash: 'hash-a' },
+      { now: 1000 },
+    );
+    const dto = db.list()[0]!;
+    expect(dto.width).toBe(800);
+    expect(dto.height).toBe(600);
+  });
+
+  it('非图片 DTO 不带 width/height（有才给的写法）', () => {
+    const db = mem();
+    db.insertText('甲', { now: 1000 });
+    const dto = db.list()[0]!;
+    expect(dto.width).toBeUndefined();
+    expect(dto.height).toBeUndefined();
+  });
 });
 
 describe('KV 访问器（绕过 sanitizeSettings 白名单）', () => {

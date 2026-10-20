@@ -282,6 +282,7 @@ function rowToDto(row: ItemRow): ClipItemDTO {
     const w = row.width ?? 0;
     const h = row.height ?? 0;
     const bytes = row.bytes ?? 0;
+    const dims: Pick<ClipItemDTO, 'width' | 'height'> = w > 0 && h > 0 ? { width: w, height: h } : {};
     return {
       id: row.id,
       kind,
@@ -291,6 +292,7 @@ function rowToDto(row: ItemRow): ClipItemDTO {
       pinned,
       sizeLabel: kbLabel(bytes),
       source,
+      ...dims,
       ...extra,
     };
   }
@@ -396,6 +398,11 @@ function normalizeTheme(v: unknown): Settings['theme'] {
   return s === 'light' || s === 'dark' ? s : 'auto';
 }
 
+/** 把任意输入归一化为四种布局（非法值回落 list）。 */
+function normalizeLayout(v: unknown): Settings['listLayout'] {
+  return v === 'timeline' || v === 'masonry' || v === 'source' ? v : 'list';
+}
+
 /** 逐键清洗，非法值一律回落默认值——旧库被手改过也不至于把界面搞崩。 */
 function sanitizeSettings(input: Partial<Settings>): Settings {
   const d = DEFAULT_SETTINGS;
@@ -410,6 +417,7 @@ function sanitizeSettings(input: Partial<Settings>): Settings {
     hotkeyActivate: typeof input.hotkeyActivate === 'string' && input.hotkeyActivate.length > 0 ? input.hotkeyActivate : d.hotkeyActivate,
     hotkeyWidget: typeof input.hotkeyWidget === 'string' && input.hotkeyWidget.length > 0 ? input.hotkeyWidget : d.hotkeyWidget,
     trashLimit: input.trashLimit === undefined ? d.trashLimit : clampInt(input.trashLimit, 1, 9999, d.trashLimit),
+    listLayout: input.listLayout === undefined ? d.listLayout : normalizeLayout(input.listLayout),
   };
 }
 
