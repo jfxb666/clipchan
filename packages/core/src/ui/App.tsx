@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { LayoutGrid, List, Settings2, Sparkles } from 'lucide-react';
+import { AppWindow, CalendarClock, Columns2, LayoutGrid, List, Settings2, Sparkles } from 'lucide-react';
 import type { AiError, AiProvider, AiProviderInput, OptimizeDelta, OptimizeRequest, Settings } from '../types';
 import { getPlatform } from '../platform/adapter';
 import { bindClipStore, useClipStore, type AppMode, type View } from '../state/store';
@@ -49,6 +49,14 @@ interface ViewerState {
   imageUrl?: string;
   loading: boolean;
 }
+
+/** 顶部布局切换器的四个按钮：图标 + 中文名 + title 提示。 */
+const LAYOUT_BUTTONS = [
+  { key: 'list', icon: List, label: '列表' },
+  { key: 'timeline', icon: CalendarClock, label: '时间轴' },
+  { key: 'masonry', icon: Columns2, label: '瀑布流' },
+  { key: 'source', icon: AppWindow, label: '按来源' },
+] as const;
 
 export function App() {
   const view = useClipStore((s) => s.view);
@@ -433,6 +441,7 @@ export function App() {
             }}
             onOpenTrash={() => void useClipStore.getState().openTrash()}
             onOpenSettings={() => useClipStore.getState().setView('settings')}
+            onOpenOptimize={() => useClipStore.getState().openOptimize('')}
           />
         ) : null}
 
@@ -451,6 +460,22 @@ export function App() {
                   onEscape={onHide}
                   className="flex-1"
                 />
+                {LAYOUT_BUTTONS.map(({ key, icon: Icon, label }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    title={'布局：' + label}
+                    onClick={() => void useClipStore.getState().updateSettings({ listLayout: key })}
+                    className={cn(
+                      'cc-no-drag flex shrink-0 items-center rounded-button border px-[6px] py-[7px] transition-colors',
+                      settings.listLayout === key
+                        ? 'border-[var(--cc-primary)] bg-primary-soft text-[var(--cc-primary)]'
+                        : 'border-line text-ink-2 hover:bg-surface-2',
+                    )}
+                  >
+                    <Icon size={12} aria-hidden />
+                  </button>
+                ))}
                 <button
                   type="button"
                   title="今日词云"
@@ -498,6 +523,7 @@ export function App() {
                 onOptimize={(id) => void openOptimize(id)}
                 onLoadMore={() => void useClipStore.getState().loadMore()}
                 onContextMenu={(id, x, y) => setMenu({ id, x, y })}
+                layout={settings.listLayout}
               />
 
               <div className="flex shrink-0 items-center gap-tight border-t border-line px-base py-[6px] text-[11px] text-ink-3">
