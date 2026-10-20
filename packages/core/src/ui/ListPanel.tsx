@@ -1,7 +1,11 @@
 import { useEffect, useRef } from 'react';
-import type { ClipItemDTO, KindFilter } from '../types';
+import type { ClipItemDTO, KindFilter, ListLayout } from '../types';
 import { ClipCard } from './ClipCard';
 import { EmptyState } from './EmptyState';
+import type { ListBodyProps } from './listBody';
+import { MasonryList } from './MasonryList';
+import { SourceGroupList } from './SourceGroupList';
+import { TimelineList } from './TimelineList';
 
 /** 触底阈值：滚动位置距底小于该值时拉下一页（spec §6.3 / §8.1）。 */
 export const LOAD_MORE_THRESHOLD_PX = 200;
@@ -35,6 +39,9 @@ function ListSkeleton() {
 /**
  * 卡片列表（spec §6.3）：8px 间距，滚到底自动拉下一页。
  * 长列表靠每张卡片的 content-visibility 裁剪，不用虚拟滚动库。
+ *
+ * v0.4.0：list 视图内部多了三种排列方式（时间轴 / 瀑布流 / 按来源分组）。
+ * ★ 布局只换「同一批 items 怎么排」，滚动容器与触底分页三种布局共用。
  */
 export function ListPanel({
   items,
@@ -42,6 +49,7 @@ export function ListPanel({
   q,
   selectedIds,
   loading,
+  layout = 'list',
   onSelect,
   onPaste,
   onTogglePin,
@@ -55,6 +63,8 @@ export function ListPanel({
   q: string;
   selectedIds: string[];
   loading: boolean;
+  /** 布局模式（v0.4.0）；缺省 'list'，这样 App 未接线时行为不变。 */
+  layout?: ListLayout;
   onSelect: (id: string, opts?: { multi?: boolean }) => void;
   onPaste: (id: string) => void;
   onTogglePin: (id: string) => void;
@@ -67,12 +77,24 @@ export function ListPanel({
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // 换分类 / 换搜索词后回到顶部，避免停留在上一份列表的滚动位置。
+  // 换分类 / 换搜索词 / 换布局后回到顶部：三种情况下列表内容都整体变了，
+  // 停在原来的滚动位置会落在毫无关系的一条记录上。
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
-  }, [kind, q]);
+  }, [kind, q, layout]);
 
   const showSkeleton = items.length === 0 && loading;
+  const bodyProps: ListBodyProps = {
+    items,
+    selectedIds,
+    term: q,
+    onSelect,
+    onPaste,
+    onTogglePin,
+    onHover,
+    onOptimize,
+    onContextMenu,
+  };
 
   return (
     <div
@@ -89,25 +111,35 @@ export function ListPanel({
       ) : items.length === 0 ? (
         <EmptyState kind={kind} q={q} />
       ) : (
-        <div className="flex flex-col gap-tight">
-          {items.map((item) => (
-            <ClipCard
-              key={item.id}
-              item={item}
-              selected={selectedIds.includes(item.id)}
-              term={q}
-              onSelect={onSelect}
-              onPaste={onPaste}
-              onTogglePin={onTogglePin}
-              onHover={onHover}
-              onOptimize={onOptimize}
-              onContextMenu={onContextMenu}
-            />
-          ))}
+        <>
+          {layout === 'timeline' ? (
+            <TimelineList {...bodyProps} />
+          ) : layout === 'masonry' ? (
+            <MasonryList {...bodyProps} />
+          ) : layout === 'source' ? (
+            <SourceGroupList {...bodyProps} />
+          ) : (
+            <div className="flex flex-col gap-tight">
+              {items.map((item) => (
+                <ClipCard
+                  key={item.id}
+                  item={item}
+                  selected={selectedIds.includes(item.id)}
+                  term={q}
+                  onSelect={onSelect}
+                  onPaste={onPaste}
+                  onTogglePin={onTogglePin}
+                  onHover={onHover}
+                  onOptimize={onOptimize}
+                  onContextMenu={onContextMenu}
+                />
+              ))}
+            </div>
+          )}
           {loading ? (
             <p className="py-snug text-center text-[11px] text-ink-3">正在加载更多…</p>
           ) : null}
-        </div>
+        </>
       )}
     </div>
   );
