@@ -3,9 +3,9 @@
 Windows 剪贴板历史工具。Ctrl+` 唤起面板，选中即粘贴回刚才那个窗口。
 Electron + React + SQLite，界面代码与手机端壳共用一份。
 
-- **下载**：[Releases · v0.3.0](https://github.com/jfxb666/clipchan/releases/tag/v0.3.0)
+- **下载**：[Releases · v0.4.0](https://github.com/jfxb666/clipchan/releases/tag/v0.4.0)
   - 免安装版 `Clipchan.exe`（单文件，双击即用，不要求装任何运行时）
-  - 安装版 `Clipchan-Setup-0.3.0.exe`
+  - 安装版 `Clipchan-Setup-0.4.0.exe`
 - **源码**：本仓库（私有）。构建产物不进版本库，由 `pnpm build` 生成到 `release\`。
 
 ## 安装与首次运行
@@ -58,6 +58,18 @@ Electron + React + SQLite，界面代码与手机端壳共用一份。
 长文本在列表里只显示前 200 字，库里最多存 10 万字；「查看全文」打开浮层看完整内容并可「复制全文」。图片卡片右键「查看大图」按原图分辨率显示，不是 64×64 缩略图。
 
 搜索词在列表里会高亮命中片段。
+
+## 排列方式与代码高亮
+
+顶部搜索框右侧有四个图标按钮：**列表 / 时间轴 / 瀑布流 / 按来源**。它们只换「同一批记录怎么排」，不改变筛选内容——「只看图片 + 瀑布流」这种组合照常可用。选过的排列方式会记住。
+
+- **时间轴**：按天分组、日期标题吸顶。今天 / 昨天 / 8月14日 / 2024年8月14日。
+- **瀑布流**：按窗口宽度排 1–4 列，图片按真实宽高比显示。文本卡高度按行数估算，只用来决定放进哪一列。
+- **按来源**：按复制来源的程序分组，组标题右侧标条数，组按「组内最新一条」倒序。来源名去掉 `.exe` 后缀；取不到来源的归到「未知来源」并固定排最后。
+
+三种排列共用同一套分页：滚到底加载下一页，不是本地重排全部历史。回收站不支持这三种排列。
+
+被判定为**代码**的文本记录会按语法着色（列表卡片与「查看全文」都有），支持 13 种语言：JavaScript / TypeScript / Python / Java / C# / C++ / Go / Rust / JSON / XML（含 HTML、SVG）/ CSS / Shell / SQL。语言按文本特征猜，猜不出就不高亮；超过 8000 字不高亮；**搜索时只有搜索词高亮**，两套着色不叠加。
 
 ## 回收站与撤销
 
@@ -131,6 +143,7 @@ Key 只在主进程读取，界面上只回显掩码（`sk-…abcd`）；编辑�
 - **手机端这一轮只搭壳。** `packages/mobile` 能构建出在 Capacitor WebView 里跑的 Web 包，但**没有 APK**（本机没装 JDK / Android SDK / Gradle），也没有持久化（记录在内存里，进程杀掉即清空）。Android 10 起后台读剪贴板被系统禁止，所以手机端的产品形态是「手动粘进来 + 手动复制出去」，`backgroundCapture` 恒为 `false`。
 - **只记文本和图片。** 文件列表（在资源管理器里复制文件）与富文本（`text/html` 单独存在时）会被跳过 —— 实测这两类读出来不是用户预期的东西。
 - **来源应用只记 exe 名**（如 `Code.exe`、`msedge.exe`），不记窗口标题、不记路径。取不到时留空，界面上就不显示来源，不会写「未知」这类假值。从面板里粘贴回写的内容不会把 Clipchan 自己记成来源。
+- **语法高亮的语言是猜的**，不是让用户选：猜不出来就不高亮（显示成普通文本），混合语言的片段可能只认主语言。搜索时只有搜索词高亮，语法高亮让位。
 - **回收站不参与搜索、分类、词云**，它只是一个按删除时间倒序的分页列表。清空回收站不可撤销（硬删）。
 - **AI 优化用你自备的 Key，Key 以明文存放在本地 `clipchan.db`，本轮不做加密。** 只在桌面端可用，手机端不接 AI；详见上文「AI 提示词优化」。
 
@@ -140,7 +153,7 @@ Key 只在主进程读取，界面上只回显掩码（`sk-…abcd`）；编辑�
 pnpm install      # pnpm 11 的构建脚本许可写在 pnpm-workspace.yaml 的 allowBuilds 里；老版本 pnpm 才需要 --allow-build=electron --allow-build=esbuild --allow-build=better-sqlite3
 pnpm dev          # 开发模式（Vite + Electron 热重载）
 pnpm typecheck    # tsc -b
-pnpm test         # vitest run，49 个文件 / 625 个用例（缺真实助手 exe 时另有若干条跳过）
+pnpm test         # vitest run，53 个文件 / 649 个用例（缺真实助手 exe 时另有若干条跳过）
 pnpm build:helper # 编译 C# 原生助手 → packages/desktop/helper/dist/clipchan-helper.exe
 pnpm smoke:main   # 主进程冒烟（13 项断言）
 pnpm build        # 打包 → release/Clipchan.exe 与 release/Clipchan-Setup-<版本>.exe
