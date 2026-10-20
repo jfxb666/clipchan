@@ -14,6 +14,9 @@ import type {
   AppToast,
   BurstHint,
   Capabilities,
+  CaptureFinishPayload,
+  CaptureResult,
+  CaptureTarget,
   ClipItemDTO,
   ExportResult,
   GhostState,
@@ -21,7 +24,11 @@ import type {
   ImportResult,
   ListQuery,
   NavigateTarget,
+  OcrProgress,
+  OcrResult,
+  OcrStatus,
   OptimizeDelta,
+  OptimizeHistoryEntry,
   OptimizeRequest,
   OptimizeResult,
   PasteResult,
@@ -57,6 +64,7 @@ const api = {
     exportAll: (): Promise<ExportResult> => ipcRenderer.invoke(CH.items.exportAll),
     importAll: (): Promise<ImportResult> => ipcRenderer.invoke(CH.items.importAll),
     getText: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getText, id),
+    saveText: (text: string): Promise<{ ok: boolean; id?: string }> => ipcRenderer.invoke(CH.items.saveText, text),
     // ★ 回收站五方法：与 channels.ts 的五个键一一对应（preload.spec 断言不遗漏）。
     trashList: (q: TrashQuery): Promise<ClipItemDTO[]> => ipcRenderer.invoke(CH.items.trashList, q),
     trashCount: (): Promise<number> => ipcRenderer.invoke(CH.items.trashCount),
@@ -112,8 +120,26 @@ const api = {
     cancel: (requestId: string): Promise<void> => ipcRenderer.invoke(CH.ai.cancel, requestId),
     scenes: (): Promise<{ id: string; name: string; description: string }[]> => ipcRenderer.invoke(CH.ai.scenes),
     copyAndPaste: (text: string): Promise<PasteResult> => ipcRenderer.invoke(CH.ai.copyAndPaste, text),
+    // 历史由主进程写（Ruling 5）：渲染层只有读与删，没有"写一条历史"的方法。
+    history: (limit?: number): Promise<OptimizeHistoryEntry[]> => ipcRenderer.invoke(CH.ai.history, limit),
+    historyRemove: (id: string): Promise<void> => ipcRenderer.invoke(CH.ai.historyRemove, id),
+    historyClear: (): Promise<void> => ipcRenderer.invoke(CH.ai.historyClear),
     onChanged: (cb: () => void): (() => void) => on(EV.aiChanged, cb),
     onOptimizeDelta: (cb: (delta: OptimizeDelta) => void): (() => void) => on(EV.aiOptimizeDelta, cb),
+  },
+  capture: {
+    begin: (): Promise<CaptureTarget[] | null> => ipcRenderer.invoke(CH.capture.begin),
+    target: (displayId: number): Promise<CaptureTarget | null> => ipcRenderer.invoke(CH.capture.target, displayId),
+    finish: (payload: CaptureFinishPayload): Promise<CaptureResult> => ipcRenderer.invoke(CH.capture.finish, payload),
+    cancel: (): Promise<void> => ipcRenderer.invoke(CH.capture.cancel),
+  },
+  ocr: {
+    // ★ 识别引擎只在主进程跑（tesseract.js 是 CJS + worker + WASM，渲染进程跑不了），
+    //   所以这里全是 invoke，渲染层拿到的只有文本。
+    status: (): Promise<OcrStatus> => ipcRenderer.invoke(CH.ocr.status),
+    download: (): Promise<OcrStatus> => ipcRenderer.invoke(CH.ocr.download),
+    recognize: (id: string): Promise<OcrResult> => ipcRenderer.invoke(CH.ocr.recognize, id),
+    onProgress: (cb: (p: OcrProgress) => void): (() => void) => on(EV.ocrProgress, cb),
   },
   capabilities,
 };

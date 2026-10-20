@@ -123,6 +123,7 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
         return importResult;
       },
       getText: async () => '',
+      saveText: async () => ({ ok: true, id: 'saved-1' }),
       trashList: async (q: { limit?: number; offset?: number }) => {
         trashListCalls.push(q);
         const offset = q.offset ?? 0;
@@ -195,7 +196,7 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       setWidgetSize: async () => {},
       setWidgetHeight: async () => {},
       resizeBy: async (_dw: number, _dh: number, _shape?: boolean) => {},
-      getHotkeyStatus: async () => ({ activate: true, widget: true, conflicts: [] }),
+      getHotkeyStatus: async () => ({ activate: true, widget: true, capture: true, conflicts: [] }),
       getAutoStart: async () => false,
       setAutoStart: async () => true,
       openDataFolder: async () => {},
@@ -234,8 +235,23 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       cancel: async () => {},
       scenes: async () => [],
       copyAndPaste: async () => ({ ok: false, reason: 'send-failed' }),
+      history: async () => [],
+      historyRemove: async () => {},
+      historyClear: async () => {},
       onChanged: () => () => {},
       onOptimizeDelta: () => () => {},
+    },
+    capture: {
+      begin: async () => null,
+      target: async () => null,
+      finish: async () => ({ ok: false, reason: '未实现' }),
+      cancel: async () => {},
+    },
+    ocr: {
+      status: async () => ({ ready: false, languages: [], missing: [] }),
+      download: async () => ({ ready: false, languages: [], missing: [] }),
+      recognize: async () => ({ text: '', confidence: 0, ms: 0 }),
+      onProgress: () => () => {},
     },
     capabilities: {
       autoPaste: true,

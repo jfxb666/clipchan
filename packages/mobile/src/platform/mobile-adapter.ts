@@ -349,6 +349,12 @@ export function createMobileAdapter(): PlatformAdapter {
         return rec && rec.kind !== 'image' ? (rec.content ?? '') : '';
       },
 
+      async saveText(text: string): Promise<{ ok: boolean; id?: string }> {
+        // 与桌面端同语义：空白串回 ok:false（不造一条空记录）。
+        if (typeof text !== 'string' || text.trim().length === 0) return { ok: false };
+        return { ok: true, id: addText(text).id };
+      },
+
       // ★ 手机端没有回收站（内存数组里没有 deleted_at 这层）。如实 reject 而不是返回
       //   空数组/假成功：界面据此显示"当前平台不支持回收站"，而不是一个永远空的面板。
       async trashList(_q: TrashQuery): Promise<ClipItemDTO[]> {
@@ -446,6 +452,7 @@ export function createMobileAdapter(): PlatformAdapter {
         return {
           activate: false,
           widget: false,
+          capture: false,
           conflicts: ['手机端不支持全局热键'],
         };
       },
@@ -530,8 +537,47 @@ export function createMobileAdapter(): PlatformAdapter {
       async scenes(): Promise<never> {
         throw new Error('手机端暂不支持 AI 提示词优化');
       },
+      async history(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async historyRemove(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async historyClear(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 提示词优化');
+      },
       onChanged: (): Unsub => () => {},
       onOptimizeDelta: (): Unsub => () => {},
+    },
+
+    capture: {
+      // 截图 overlay 依赖 desktopCapturer 与多显示器窗口：手机端如实报不可用。
+      async begin(): Promise<never> {
+        throw new Error('手机端不支持桌面截图');
+      },
+      async target(): Promise<never> {
+        throw new Error('手机端不支持桌面截图');
+      },
+      async finish(): Promise<never> {
+        throw new Error('手机端不支持桌面截图');
+      },
+      async cancel(): Promise<void> {
+        // 取消是"什么都不做"的语义：没开过 overlay 就没有可关的，不 throw。
+      },
+    },
+
+    ocr: {
+      // OCR 引擎只在桌面主进程跑（worker + WASM），手机端没有这条通道。
+      async status(): Promise<never> {
+        throw new Error('手机端暂不支持文字识别');
+      },
+      async download(): Promise<never> {
+        throw new Error('手机端暂不支持文字识别');
+      },
+      async recognize(): Promise<never> {
+        throw new Error('手机端暂不支持文字识别');
+      },
+      onProgress: (): Unsub => () => {},
     },
 
     capabilities: { ...CAPABILITIES },

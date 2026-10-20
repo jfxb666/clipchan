@@ -36,6 +36,8 @@ const EXPECTED = {
     'restore',
     'purge',
     'emptyTrash',
+    // v0.5.0 T1：OCR 结果「存为一条新记录」
+    'saveText',
   ],
   settings: ['get', 'set'],
   ghost: ['get', 'set'],
@@ -63,7 +65,14 @@ const EXPECTED = {
     'cancel',
     'scenes',
     'copyAndPaste',
+    // v0.5.0 T1：提示词优化历史
+    'history',
+    'historyRemove',
+    'historyClear',
   ],
+  // v0.5.0 T1：截图与 OCR 两组新通道
+  capture: ['begin', 'target', 'finish', 'cancel'],
+  ocr: ['status', 'download', 'recognize'],
 } as const;
 
 describe('channels 契约', () => {
@@ -152,5 +161,59 @@ describe('app:toast 订阅（v0.3.0）：主进程推的提示必须能到界面
 
   it('app:toast 是事件而不是 invoke 通道（渲染层只能被动收）', () => {
     expect(ALL_INVOKE_CHANNELS).not.toContain(EV.toast);
+  });
+});
+
+describe('v0.5.0 T1：截图 / OCR / 优化历史通道', () => {
+  /** 与回收站那组同样的四重同步：通道键 → ALL_INVOKE_CHANNELS → preload 方法 → 不手写字符串。 */
+  const NEW_CHANNELS: [string, string, string][] = [
+    ['items', 'saveText', 'items:saveText'],
+    ['capture', 'begin', 'capture:begin'],
+    ['capture', 'target', 'capture:target'],
+    ['capture', 'finish', 'capture:finish'],
+    ['capture', 'cancel', 'capture:cancel'],
+    ['ocr', 'status', 'ocr:status'],
+    ['ocr', 'download', 'ocr:download'],
+    ['ocr', 'recognize', 'ocr:recognize'],
+    ['ai', 'history', 'ai:history'],
+    ['ai', 'historyRemove', 'ai:historyRemove'],
+    ['ai', 'historyClear', 'ai:historyClear'],
+  ];
+
+  it('① 通道名逐条对齐（含 items.saveText 的字面值）', () => {
+    expect(CH.items.saveText).toBe('items:saveText');
+    for (const [group, key, channel] of NEW_CHANNELS) {
+      const table = (CH as Record<string, Record<string, string> | undefined>)[group];
+      expect(table, '缺少分组 ' + group).toBeTruthy();
+      expect(table?.[key], '通道名不对: ' + group + '.' + key).toBe(channel);
+    }
+  });
+
+  it('② capture 与 ocr 两组整组进了 ALL_INVOKE_CHANNELS', () => {
+    for (const channel of Object.values(CH.capture)) {
+      expect(ALL_INVOKE_CHANNELS, channel + ' 没进 ALL_INVOKE_CHANNELS').toContain(channel);
+    }
+    for (const channel of Object.values(CH.ocr)) {
+      expect(ALL_INVOKE_CHANNELS, channel + ' 没进 ALL_INVOKE_CHANNELS').toContain(channel);
+    }
+    for (const [, , channel] of NEW_CHANNELS) {
+      expect(ALL_INVOKE_CHANNELS, channel + ' 没进 ALL_INVOKE_CHANNELS').toContain(channel);
+    }
+  });
+
+  it('③ preload 里 11 个新方法各自 invoke 到对应常量（不是手写字符串）', () => {
+    for (const [group, key, channel] of NEW_CHANNELS) {
+      const re = new RegExp(key + ':[^\\n]*ipcRenderer\\.invoke\\(CH\\.' + group + '\\.' + key);
+      expect(PRELOAD_SRC, 'preload 缺少 ' + key + ' 或没走 CH.' + group + '.' + key).toMatch(re);
+      expect(PRELOAD_SRC, '手写了通道字符串 ' + channel).not.toContain("'" + channel + "'");
+    }
+  });
+
+  it('④ ocr.onProgress 订阅 EV.ocrProgress 并返回取消函数', () => {
+    expect(EV.ocrProgress).toBe('ocr:progress');
+    // 进度是主进程主动推的：必须是事件名，不能是 invoke 通道
+    expect(ALL_INVOKE_CHANNELS).not.toContain(EV.ocrProgress);
+    expect(PRELOAD_SRC).toMatch(/onProgress:\s*\(cb:[^)]*\)[^\n]*on\(EV\.ocrProgress, cb\)/);
+    expect(PRELOAD_SRC).not.toContain("'ocr:progress'");
   });
 });

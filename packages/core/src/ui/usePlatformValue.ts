@@ -27,7 +27,7 @@ export function usePlatformValue<T>(load: () => Promise<T>, fallback: T): T {
   return value;
 }
 
-const FALLBACK_HOTKEYS: HotkeyStatus = { activate: false, widget: false, conflicts: [] };
+const FALLBACK_HOTKEYS: HotkeyStatus = { activate: false, widget: false, capture: false, conflicts: [] };
 
 /** 热键注册状态（设置页快捷键分区用）。 */
 export function useHotkeyStatus(): HotkeyStatus {

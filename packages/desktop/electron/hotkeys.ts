@@ -10,15 +10,24 @@ import type { Settings } from '@clipchan/core';
 export interface HotkeyHandlers {
   onActivate: () => void;
   onWidget: () => void;
+  /**
+   * v0.5.0 截图标注。
+   * ★ 可选：T1 只交付契约层，接线（main.ts 的 beginCapture）在 T6；标成必填会让
+   *   主进程在 T1 阶段就编译不过。缺省时按 no-op 注册，行为与"热键生效但没人接"一致，
+   *   T6 接上后自然变成真处理。
+   */
+  onCapture?: () => void;
 }
 
 export interface HotkeyRegistration {
   activate: boolean;
   widget: boolean;
+  /** v0.5.0 截图热键是否注册成功（设置页要如实显示"注册失败"）。 */
+  capture: boolean;
   conflicts: string[];
 }
 
-/** 注册两个全局快捷键；先清空旧的，避免重设设置时叠加。 */
+/** 注册三个全局快捷键；先清空旧的，避免重设设置时叠加。 */
 export function registerHotkeys(settings: Settings, handlers: HotkeyHandlers): HotkeyRegistration {
   globalShortcut.unregisterAll();
   const conflicts: string[] = [];
@@ -42,7 +51,8 @@ export function registerHotkeys(settings: Settings, handlers: HotkeyHandlers): H
 
   const activate = reg(settings.hotkeyActivate, handlers.onActivate);
   const widget = reg(settings.hotkeyWidget, handlers.onWidget);
-  return { activate, widget, conflicts };
+  const capture = reg(settings.hotkeyCapture, handlers.onCapture ?? (() => {}));
+  return { activate, widget, capture, conflicts };
 }
 
 export function unregisterHotkeys(): void {

@@ -31,6 +31,8 @@ export const CH = {
     restore: 'items:restore',
     purge: 'items:purge',
     emptyTrash: 'items:emptyTrash',
+    // v0.5.0：OCR 结果「存为一条新记录」。
+    saveText: 'items:saveText',
   },
   settings: { get: 'settings:get', set: 'settings:set' },
   ghost: { get: 'ghost:get', set: 'ghost:set' },
@@ -57,6 +59,23 @@ export const CH = {
     cancel: 'ai:cancel',
     scenes: 'ai:scenes',
     copyAndPaste: 'ai:copyAndPaste',
+    // v0.5.0：提示词优化历史（主进程写、渲染层只读）。
+    history: 'ai:history',
+    historyRemove: 'ai:historyRemove',
+    historyClear: 'ai:historyClear',
+  },
+  // ★ 截图 overlay 是独立渲染页面（capture.html），所以这四条与主窗口的 items.* 分开：
+  //   它们服务的是一次性的截图会话，不是列表数据。
+  capture: {
+    begin: 'capture:begin',
+    target: 'capture:target',
+    finish: 'capture:finish',
+    cancel: 'capture:cancel',
+  },
+  ocr: {
+    status: 'ocr:status',
+    download: 'ocr:download',
+    recognize: 'ocr:recognize',
   },
 } as const;
 
@@ -73,6 +92,8 @@ export const EV = {
   burstHint: 'items:burstHint',
   /** provider 增删改后通知界面重取列表（Key 本身绝不随事件下发）。 */
   aiChanged: 'ai:changed',
+  /** OCR 下载/识别进度（主进程 -> 界面；语言包下载可能几十秒，没有进度就是假死）。 */
+  ocrProgress: 'ocr:progress',
 } as const;
 
 /** 所有 invoke 通道的扁平清单（--smoke 用来断言"一个都没漏"）。 */
@@ -84,4 +105,6 @@ export const ALL_INVOKE_CHANNELS: string[] = [
   ...Object.values(CH.wordcloud),
   ...Object.values(CH.clipboard),
   ...Object.values(CH.ai),
+  ...Object.values(CH.capture),
+  ...Object.values(CH.ocr),
 ];

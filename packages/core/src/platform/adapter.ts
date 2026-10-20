@@ -31,6 +31,7 @@ const stub: PlatformAdapter = {
     exportAll: () => Promise.reject(new Error('当前环境没有实现 items.exportAll')),
     importAll: () => Promise.reject(new Error('当前环境没有实现 items.importAll')),
     getText: () => Promise.reject(new Error('当前环境没有实现 items.getText')),
+    saveText: () => Promise.reject(new Error('当前环境没有实现 items.saveText')),
     trashList: () => Promise.reject(new Error('当前环境没有实现 items.trashList')),
     trashCount: () => Promise.reject(new Error('当前环境没有实现 items.trashCount')),
     restore: () => Promise.reject(new Error('当前环境没有实现 items.restore')),
@@ -81,8 +82,24 @@ const stub: PlatformAdapter = {
     cancel: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     scenes: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     copyAndPaste: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    history: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    historyRemove: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    historyClear: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     onChanged: () => unsubscribe(),
     onOptimizeDelta: () => unsubscribe(),
+  },
+  capture: {
+    begin: () => Promise.reject(new Error('当前环境没有实现 capture.begin')),
+    target: () => Promise.reject(new Error('当前环境没有实现 capture.target')),
+    finish: () => Promise.reject(new Error('当前环境没有实现 capture.finish')),
+    cancel: () => Promise.reject(new Error('当前环境没有实现 capture.cancel')),
+  },
+  ocr: {
+    status: () => Promise.reject(new Error('当前环境没有实现 ocr.status')),
+    download: () => Promise.reject(new Error('当前环境没有实现 ocr.download')),
+    recognize: () => Promise.reject(new Error('当前环境没有实现 ocr.recognize')),
+    // 订阅类一律 no-op 而不是 reject（同 onToast）：挂载时订阅，抛错会拖崩界面。
+    onProgress: () => unsubscribe(),
   },
   capabilities: {
     autoPaste: false,

@@ -76,6 +76,8 @@ export interface Settings {
   autoPaste: boolean;
   hotkeyActivate: string;
   hotkeyWidget: string;
+  /** 截图标注热键（v0.5.0）。 */
+  hotkeyCapture: string;
   /** 回收站上限（条）。超出后硬删最旧的回收站记录并删盘。 */
   trashLimit: number;
   /** 列表布局模式（v0.4.0）。只影响排列，不影响筛选。 */
@@ -92,6 +94,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoPaste: true,
   hotkeyActivate: 'Control+' + '\u0060',
   hotkeyWidget: 'Alt+C',
+  hotkeyCapture: 'Control+Alt+S',
   trashLimit: 200,
   listLayout: 'list',
 };
@@ -99,8 +102,80 @@ export const DEFAULT_SETTINGS: Settings = {
 export interface HotkeyStatus {
   activate: boolean;
   widget: boolean;
+  /** v0.5.0 截图热键是否注册成功。 */
+  capture: boolean;
   /** 快捷键被系统或其他程序占用时，界面上要如实说明。 */
   conflicts: string[];
+}
+
+/** 截图一次的目标显示器（主进程 → overlay 渲染层）。 */
+export interface CaptureTarget {
+  /** screen.Display.id */
+  displayId: number;
+  /** 该显示器在 DIP 空间的矩形（overlay 窗口就摆在这）。 */
+  bounds: { x: number; y: number; width: number; height: number };
+  /** DPI 缩放：底图物理像素 = CSS 像素 × scaleFactor。 */
+  scaleFactor: number;
+  /** 底图（PNG data URL，物理像素尺寸）。 */
+  dataUrl: string;
+}
+
+export type CaptureAction = 'copy' | 'paste' | 'save';
+
+export interface CaptureFinishPayload {
+  displayId: number;
+  /** 裁剪后的 PNG data URL。 */
+  pngDataUrl: string;
+  action: CaptureAction;
+}
+
+export interface CaptureResult {
+  ok: boolean;
+  /** 落库后的记录 id（成功时必有）。 */
+  id?: string;
+  /** 用户存文件时点了取消 / 按 Esc 取消截图。 */
+  cancelled?: boolean;
+  /** ok:false 且非取消时的中文原因。 */
+  reason?: string;
+}
+
+export type OcrLang = 'eng' | 'chi_sim';
+
+export interface OcrStatus {
+  ready: boolean;
+  languages: OcrLang[];
+  missing: OcrLang[];
+  /** 上次失败的中文原因；没失败过为 undefined。 */
+  error?: string;
+}
+
+export interface OcrProgress {
+  phase: 'download' | 'recognize';
+  /** 0–1；未知总量时为 -1。 */
+  ratio: number;
+  message: string;
+}
+
+export interface OcrResult {
+  text: string;
+  /** tesseract 给的 0–100 置信度。 */
+  confidence: number;
+  ms: number;
+}
+
+/** 一次提示词优化的历史记录（v0.5.0）。 */
+export interface OptimizeHistoryEntry {
+  id: string;
+  /** 送进去的原文。 */
+  source: string;
+  /** 拿回来的结果全文。 */
+  output: string;
+  sceneId: string;
+  mode: 'user' | 'system';
+  providerId: string;
+  /** provider 名字的快照：provider 后来被删也能看懂这条是谁生成的。 */
+  providerName: string;
+  createdAt: number;
 }
 
 export interface GhostState {
@@ -277,6 +352,8 @@ export interface ClipchanApi {
     importAll(): Promise<ImportResult>;
     /** 正文全文（列表预览是截断的）；图片行或 id 不存在 → ''。 */
     getText(id: string): Promise<string>;
+    /** 把一段纯文本存成一条普通记录（kind='text'）。空串回 ok:false。 */
+    saveText(text: string): Promise<{ ok: boolean; id?: string }>;
     /** 回收站列表（按删除时间倒序）；缩略图同样走协议 URL。 */
     trashList(q: TrashQuery): Promise<ClipItemDTO[]>;
     /** 回收站总条数（分页显示"共 N 条"）。 */
@@ -354,9 +431,31 @@ export interface ClipchanApi {
     scenes(): Promise<{ id: string; name: string; description: string }[]>;
     /** 把优化结果写进剪贴板并贴回目标窗口（不进历史、不刷新排序）。 */
     copyAndPaste(text: string): Promise<PasteResult>;
+    /** 优化历史（最新在前）。主进程在 ai.optimize 成功后自动写入，渲染层只读。 */
+    history(limit?: number): Promise<OptimizeHistoryEntry[]>;
+    historyRemove(id: string): Promise<void>;
+    historyClear(): Promise<void>;
     onChanged(cb: () => void): () => void;
     /** 流式增量：requestId 与发起时一致才采用。 */
     onOptimizeDelta(cb: (delta: OptimizeDelta) => void): () => void;
+  };
+  capture: {
+    /** 抓全部屏幕并建 overlay；已有 overlay 时先取消旧的。用户按 Esc 取消 → null。 */
+    begin(): Promise<CaptureTarget[] | null>;
+    /** overlay 页面启动时按 displayId 取自己那块底图。 */
+    target(displayId: number): Promise<CaptureTarget | null>;
+    /** 标注完成：落库 + 按 action 分发。 */
+    finish(payload: CaptureFinishPayload): Promise<CaptureResult>;
+    /** 取消截图（Esc / 右键）：关掉全部 overlay，不留记录。 */
+    cancel(): Promise<void>;
+  };
+  ocr: {
+    status(): Promise<OcrStatus>;
+    /** 一键下载缺失语言包；返回下载后的状态。失败回 ok:false 状态 + error。 */
+    download(): Promise<OcrStatus>;
+    /** 识别一条图片记录（id 是 items.id）。 */
+    recognize(id: string): Promise<OcrResult>;
+    onProgress(cb: (p: OcrProgress) => void): () => void;
   };
   capabilities: Capabilities;
 }

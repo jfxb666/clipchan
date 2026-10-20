@@ -671,3 +671,169 @@ describe('软删与回收站（v0.3.0）', () => {
     expect(db.setSettings({ trashLimit: 7 }).trashLimit).toBe(7);
   });
 });
+
+describe('v0.5.0 T1：hotkeyCapture + optimize_history', () => {
+  it('hotkeyCapture 走 sanitizeSettings 白名单：默认值 / 空串回落 / 生效', () => {
+    // 默认值必须在 DEFAULT_SETTINGS 里，否则下面两行断言的就是同一个"错值"
+    expect(DEFAULT_SETTINGS.hotkeyCapture).toBe('Control+Alt+S');
+    const db = mem();
+    // 与 db.spec.ts 的 toEqual(DEFAULT_SETTINGS) 是同一条保证：白名单漏一个键这里就红
+    expect(db.getSettings().hotkeyCapture).toBe('Control+Alt+S');
+    expect(db.setSettings({ hotkeyCapture: '' }).hotkeyCapture).toBe('Control+Alt+S');
+    expect(db.setSettings({ hotkeyCapture: 'Alt+Shift+X' }).hotkeyCapture).toBe('Alt+Shift+X');
+    // 非字符串（旧库被手改成数字）也回落默认值，不是变成 '123'
+    expect(db.setSettings({ hotkeyCapture: 123 as unknown as string }).hotkeyCapture).toBe('Control+Alt+S');
+  });
+
+  it('addOptimizeHistory 写入后能读回，字段逐一对齐且 id 是字符串', () => {
+    const db = mem();
+    const created = db.addOptimizeHistory({
+      source: '原文一段',
+      output: '优化后一段',
+      sceneId: 'polish',
+      mode: 'user',
+      providerId: 'p1',
+      providerName: '我的 DeepSeek',
+      createdAt: 1000,
+    });
+    expect(typeof created.id).toBe('string');
+    expect(created.id.length).toBeGreaterThan(0);
+
+    const list = db.listOptimizeHistory();
+    expect(list).toHaveLength(1);
+    // id 出库必须是 string：库里是 INTEGER AUTOINCREMENT，直接透传会变 number
+    expect(list[0]).toEqual(created);
+    expect(list[0]!.source).toBe('原文一段');
+    expect(list[0]!.output).toBe('优化后一段');
+    expect(list[0]!.sceneId).toBe('polish');
+    expect(list[0]!.mode).toBe('user');
+    expect(list[0]!.providerId).toBe('p1');
+    expect(list[0]!.providerName).toBe('我的 DeepSeek');
+    expect(list[0]!.createdAt).toBe(1000);
+  });
+
+  it('listOptimizeHistory 按 createdAt 倒序（最新的在最前）', () => {
+    const db = mem();
+    const at = (ts: number) => db.addOptimizeHistory({
+      source: 's' + ts, output: 'o' + ts, sceneId: 'sc', mode: 'system',
+      providerId: 'p', providerName: 'P', createdAt: ts,
+    });
+    at(3000); at(1000); at(2000);
+    expect(db.listOptimizeHistory().map((e) => e.createdAt)).toEqual([3000, 2000, 1000]);
+  });
+
+  it('历史上限 100 条：写 105 条只剩最新的 100 条（最旧 5 条被硬删）', () => {
+    const db = mem();
+    const idAt = (ts: number) => db.addOptimizeHistory({
+      source: 's' + ts, output: 'o' + ts, sceneId: 'sc', mode: 'user',
+      providerId: 'p', providerName: 'P', createdAt: ts,
+    }).id;
+    const firstIds: string[] = [];
+    for (let i = 0; i < 105; i += 1) {
+      const id = idAt(1000 + i);
+      if (i < 5) firstIds.push(id);
+    }
+
+    const list = db.listOptimizeHistory();
+    expect(list).toHaveLength(100);
+    // 留下的是最新的 100 条：最旧那 5 条（1000–1004）必须消失
+    expect(list[0]!.createdAt).toBe(1104);
+    expect(list[99]!.createdAt).toBe(1005);
+    for (const id of firstIds) {
+      expect(db.listOptimizeHistory().some((e) => e.id === id), '最旧的那条没被淘汰: ' + id).toBe(false);
+    }
+    // 是硬删而不是软删：表里真的只剩 100 行
+    const rows = db.raw.prepare('SELECT COUNT(*) AS n FROM optimize_history').get() as { n: number };
+    expect(rows.n).toBe(100);
+  });
+
+  it('listOptimizeHistory(limit) 只取前 N 条', () => {
+    const db = mem();
+    for (let i = 0; i < 5; i += 1) {
+      db.addOptimizeHistory({
+        source: 's' + i, output: 'o' + i, sceneId: 'sc', mode: 'user',
+        providerId: 'p', providerName: 'P', createdAt: 1000 + i,
+      });
+    }
+    expect(db.listOptimizeHistory(2).map((e) => e.createdAt)).toEqual([1004, 1003]);
+  });
+
+  it('removeOptimizeHistory 删掉返回 true；删不存在的返回 false', () => {
+    const db = mem();
+    const a = db.addOptimizeHistory({
+      source: 's', output: 'o', sceneId: 'sc', mode: 'user',
+      providerId: 'p', providerName: 'P', createdAt: 1000,
+    });
+    expect(db.removeOptimizeHistory(a.id)).toBe(true);
+    expect(db.listOptimizeHistory()).toHaveLength(0);
+    // 同一个 id 再删一次就是"不存在"
+    expect(db.removeOptimizeHistory(a.id)).toBe(false);
+    expect(db.removeOptimizeHistory('999999')).toBe(false);
+  });
+
+  it('clearOptimizeHistory 返回删除条数，之后列表为空', () => {
+    const db = mem();
+    for (let i = 0; i < 3; i += 1) {
+      db.addOptimizeHistory({
+        source: 's' + i, output: 'o' + i, sceneId: 'sc', mode: 'user',
+        providerId: 'p', providerName: 'P', createdAt: 1000 + i,
+      });
+    }
+    expect(db.clearOptimizeHistory()).toBe(3);
+    expect(db.listOptimizeHistory()).toEqual([]);
+    // 空表再清一次是 0，不是抛
+    expect(db.clearOptimizeHistory()).toBe(0);
+  });
+
+  it('老库升级：user_version 1 → 2 后 optimize_history 表存在', () => {
+    const dir = tmpDir();
+    const file = join(dir, 'clipchan.db');
+    // v0.4.0 形态的库：有 items / settings、user_version = 1，但没有 optimize_history
+    const old = new Database(file);
+    old.exec(`
+      CREATE TABLE items (
+        id TEXT PRIMARY KEY, kind TEXT NOT NULL, content TEXT, content_hash TEXT,
+        image_path TEXT, image_hash TEXT, thumb_path TEXT,
+        width INTEGER, height INTEGER, bytes INTEGER,
+        source TEXT NOT NULL DEFAULT 'clip', pinned INTEGER NOT NULL DEFAULT 0,
+        truncated INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, seq INTEGER NOT NULL,
+        deleted_at INTEGER, source_app TEXT
+      );
+      CREATE INDEX idx_order ON items(pinned DESC, created_at DESC, seq DESC);
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `);
+    old.prepare('INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run('c'.repeat(32), 'text', '老库数据', 'hash-v1', 'clip', 0, 0, 1000, 1);
+    old.pragma('user_version = 1');
+    old.close();
+
+    expect(SCHEMA_VERSION).toBe(2);
+    const db = openDb(file);
+    opened.push(db);
+
+    const table = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='optimize_history'")
+      .get() as { name: string } | undefined;
+    expect(table?.name).toBe('optimize_history');
+    const index = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_opt_hist'")
+      .get() as { name: string } | undefined;
+    expect(index?.name).toBe('idx_opt_hist');
+    expect(db.raw.pragma('user_version', { simple: true })).toBe(2);
+    // 升级不该动老数据
+    expect(db.list()).toHaveLength(1);
+    // 表真的可用
+    expect(db.addOptimizeHistory({
+      source: 's', output: 'o', sceneId: 'sc', mode: 'user',
+      providerId: 'p', providerName: 'P', createdAt: 2000,
+    }).id).toBeTypeOf('string');
+  });
+
+  it('全新库也直接拿到 optimize_history 表（SCHEMA_SQL 幂等建表）', () => {
+    const db = mem();
+    const table = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='optimize_history'")
+      .get() as { name: string } | undefined;
+    expect(table?.name).toBe('optimize_history');
+  });
+});

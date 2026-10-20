@@ -191,7 +191,7 @@ const INITIAL_CAPABILITIES: Capabilities = {
 
 const INITIAL_GHOST: GhostState = { active: false, remainingMs: 0, until: null };
 
-const INITIAL_HOTKEYS: HotkeyStatus = { activate: false, widget: false, conflicts: [] };
+const INITIAL_HOTKEYS: HotkeyStatus = { activate: false, widget: false, capture: false, conflicts: [] };
 
 /** 收藏置顶 → 时间倒序（与 SQL 的 ORDER BY pinned DESC, created_at DESC 一致）。 */
 function sortItems(items: ClipItemDTO[]): ClipItemDTO[] {

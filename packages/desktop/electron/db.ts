@@ -26,6 +26,7 @@ import {
   type Kind,
   type KindFilter,
   type ListQuery,
+  type OptimizeHistoryEntry,
   type Settings,
 } from '@clipchan/core';
 
@@ -35,6 +36,9 @@ export const TEXT_LIMIT = 100000;
 /** 列表默认每页条数 / 上限（spec §8.1）。 */
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 500;
+
+/** 优化历史的保留条数（计划 Ruling 6：上限 100 条，超出淘汰最旧）。 */
+export const OPTIMIZE_HISTORY_LIMIT = 100;
 
 /** 库里的来源标记（spec §9.2 用的是 'clip'，core 的 DTO 用的是 'capture'）。 */
 type DbSource = 'clip' | 'merge';
@@ -50,6 +54,25 @@ type DbSource = 'clip' | 'merge';
 const UNIQUE_INDEX_SQL = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash ON items(content_hash) WHERE content_hash IS NOT NULL AND deleted_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_image_hash   ON items(image_hash)   WHERE image_hash   IS NOT NULL AND deleted_at IS NULL;`;
+
+/**
+ * v0.5.0 新增的 optimize_history 表 DDL。
+ *
+ * ★ 抽成常量而不是在 SCHEMA_SQL 与迁移里各抄一份：两处必须逐字一致，
+ *   抄两份的唯一结果就是某天只改了一处（老库升级后没有表，全新库有）。
+ */
+const OPTIMIZE_HISTORY_SQL = `
+CREATE TABLE IF NOT EXISTS optimize_history (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  source      TEXT NOT NULL,
+  output      TEXT NOT NULL,
+  scene_id    TEXT NOT NULL,
+  mode        TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  provider_name TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_opt_hist ON optimize_history(created_at DESC, id DESC);`;
 
 /**
  * 建表 SQL —— ★ 逐字抄 spec §9.2，不要"顺手优化"。
@@ -83,6 +106,7 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+${OPTIMIZE_HISTORY_SQL}
 `;
 
 /** items 表的一行（只列出我们真正读的列）。 */
@@ -106,6 +130,18 @@ export interface ItemRow {
   deleted_at: number | null;
   /** 来源 exe 名（如 Code.exe）；未知为 null —— 不写任何兜底串。 */
   source_app: string | null;
+}
+
+/** optimize_history 表的一行（id 在库里是 INTEGER AUTOINCREMENT）。 */
+interface OptimizeHistoryRow {
+  id: number;
+  source: string;
+  output: string;
+  scene_id: string;
+  mode: string;
+  provider_id: string;
+  provider_name: string;
+  created_at: number;
 }
 
 /** 图片记录在库里的那几列（Task 6 的 getFullImage、Task 8 的清理都用它）。 */
@@ -216,6 +252,13 @@ export interface Db {
    * 图片行 content 为 NULL、id 不存在 → 一律返回 ''，不抛。
    */
   getText(id: string): string;
+  /** 写一条优化历史；写完立刻把超出 OPTIMIZE_HISTORY_LIMIT 的最旧行硬删。 */
+  addOptimizeHistory(e: Omit<OptimizeHistoryEntry, 'id'>): OptimizeHistoryEntry;
+  /** 按 created_at DESC, id DESC 取（最新在前）；limit 缺省取全部（最多也就 100 条）。 */
+  listOptimizeHistory(limit?: number): OptimizeHistoryEntry[];
+  removeOptimizeHistory(id: string): boolean;
+  /** 清空并返回实际删除条数。 */
+  clearOptimizeHistory(): number;
   getImageRow(id: string): ImageRow | null;
   /** 全部图片行；unpinnedOnly=true 时只要未收藏的（清空未收藏 / 预算淘汰用）。 */
   allImageRows(opts?: { unpinnedOnly?: boolean }): ImageRow[];
@@ -305,6 +348,24 @@ function rowToDto(row: ItemRow): ClipItemDTO {
     truncated: row.truncated === 1,
     source,
     ...extra,
+  };
+}
+
+/**
+ * optimize_history 行 → DTO。
+ * ★ id 出库必须是 string：库里是 INTEGER AUTOINCREMENT，直接透传会让界面拿到 number，
+ *   而 ClipchanApi 上所有 id 都是 string（remove 再传回去时才不会静默匹配不到）。
+ */
+function rowToOptimizeHistory(row: OptimizeHistoryRow): OptimizeHistoryEntry {
+  return {
+    id: String(row.id),
+    source: row.source,
+    output: row.output,
+    sceneId: row.scene_id,
+    mode: row.mode === 'system' ? 'system' : 'user',
+    providerId: row.provider_id,
+    providerName: row.provider_name,
+    createdAt: row.created_at,
   };
 }
 
@@ -416,6 +477,7 @@ function sanitizeSettings(input: Partial<Settings>): Settings {
     autoPaste: input.autoPaste === undefined ? d.autoPaste : !!input.autoPaste,
     hotkeyActivate: typeof input.hotkeyActivate === 'string' && input.hotkeyActivate.length > 0 ? input.hotkeyActivate : d.hotkeyActivate,
     hotkeyWidget: typeof input.hotkeyWidget === 'string' && input.hotkeyWidget.length > 0 ? input.hotkeyWidget : d.hotkeyWidget,
+    hotkeyCapture: typeof input.hotkeyCapture === 'string' && input.hotkeyCapture.length > 0 ? input.hotkeyCapture : d.hotkeyCapture,
     trashLimit: input.trashLimit === undefined ? d.trashLimit : clampInt(input.trashLimit, 1, 9999, d.trashLimit),
     listLayout: input.listLayout === undefined ? d.listLayout : normalizeLayout(input.listLayout),
   };
@@ -527,6 +589,22 @@ export function openDb(file: string): Db {
     });
     tx(ids);
     return ids;
+  }
+
+
+  /**
+   * 优化历史的上限淘汰：只保留最新 OPTIMIZE_HISTORY_LIMIT 条，多的**硬删**。
+   *
+   * ★ 与 items 的上限淘汰不同，这里不软删也不进回收站：历史是"重新灌回输入框"的
+   *   便签，留 100 条以外的东西既没人翻也占库；而用户要的"清空全部"已经另有入口。
+   */
+  function trimOptimizeHistory(): void {
+    raw.prepare(
+      `DELETE FROM optimize_history
+        WHERE id NOT IN (
+          SELECT id FROM optimize_history ORDER BY created_at DESC, id DESC LIMIT ?
+        )`,
+    ).run(OPTIMIZE_HISTORY_LIMIT);
   }
 
   const api: Db = {
@@ -767,6 +845,38 @@ export function openDb(file: string): Db {
       return row ?? null;
     },
 
+    addOptimizeHistory(e: Omit<OptimizeHistoryEntry, 'id'>): OptimizeHistoryEntry {
+      const info = raw.prepare(
+        `INSERT INTO optimize_history (source, output, scene_id, mode, provider_id, provider_name, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(e.source, e.output, e.sceneId, e.mode, e.providerId, e.providerName, e.createdAt);
+      // 上限淘汰紧跟插入：不这样做的话，一次批量写入会把上限拖到下一次读才发现。
+      trimOptimizeHistory();
+      const row = raw.prepare('SELECT * FROM optimize_history WHERE id = ?').get(info.lastInsertRowid) as
+        | OptimizeHistoryRow
+        | undefined;
+      // 刚插入就被淘汰说明上限 <= 0（不可能，常量是 100），兜底按入参回显而不是抛。
+      return row ? rowToOptimizeHistory(row) : { ...e, id: String(info.lastInsertRowid) };
+    },
+
+    listOptimizeHistory(limit?: number): OptimizeHistoryEntry[] {
+      const sql = 'SELECT * FROM optimize_history ORDER BY created_at DESC, id DESC';
+      const rows = typeof limit === 'number' && Number.isFinite(limit)
+        ? raw.prepare(sql + ' LIMIT ?').all(Math.max(0, Math.floor(limit))) as OptimizeHistoryRow[]
+        : raw.prepare(sql).all() as OptimizeHistoryRow[];
+      return rows.map(rowToOptimizeHistory);
+    },
+
+    removeOptimizeHistory(id: string): boolean {
+      // id 是 TEXT AUTOINCREMENT 的字符串投影：非数字 id 直接当"不存在"，不让 SQLite 静默转 0。
+      if (!/^\d+$/.test(id)) return false;
+      return raw.prepare('DELETE FROM optimize_history WHERE id = ?').run(Number(id)).changes > 0;
+    },
+
+    clearOptimizeHistory(): number {
+      return raw.prepare('DELETE FROM optimize_history').run().changes;
+    },
+
     getText(id: string): string {
       const row = raw.prepare('SELECT content, kind FROM items WHERE id = ?').get(id) as
         | { content: string | null; kind: string }
@@ -819,7 +929,7 @@ function loadSettings(raw: Database.Database): Settings {
 }
 
 /** 当前 schema 版本（PRAGMA user_version 的值）。 */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * v0.2.0 → v0.3.0 的 schema 迁移：重建两个唯一索引，把谓词补成 `AND deleted_at IS NULL`。
@@ -839,6 +949,10 @@ function migrateTrashSchema(raw: Database.Database): void {
       raw.exec('DROP INDEX IF EXISTS idx_content_hash');
       raw.exec('DROP INDEX IF EXISTS idx_image_hash');
       raw.exec(UNIQUE_INDEX_SQL);
+      // v0.5.0：老库（user_version=1）也要拿到 optimize_history。
+      // SCHEMA_SQL 是幂等建表，理论上 openDb 已经建过；这里再跑一次是为了让
+      // "版本升级"这件事本身带上表结构，而不是依赖它上面那句 exec 的成功。
+      raw.exec(OPTIMIZE_HISTORY_SQL);
       raw.pragma('user_version = ' + SCHEMA_VERSION);
     });
     tx();
