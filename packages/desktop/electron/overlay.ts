@@ -62,6 +62,16 @@ export function createOverlayWindows(opts: CreateOverlayOpts): BrowserWindow[] {
         preload: opts.preload,
       },
     });
+    // ★ 必须再 setBounds 一次：new BrowserWindow 的 height 会被系统夹到**工作区**高度
+    //   （实测 1920x1080 建出来 getBounds 是 1920x1040，少了任务栏那 40px），
+    //   而截图要能框到屏幕最下面一行像素。setBounds 之后再 getBounds 才是全屏，
+    //   且 loadURL 之后不会被夹回去。
+    win.setBounds({
+      x: target.bounds.x,
+      y: target.bounds.y,
+      width: target.bounds.width,
+      height: target.bounds.height,
+    });
     // 'screen-saver' 层级才能盖住任务栏与其它置顶窗 —— 普通 'alwaysOnTop' 会被
     // 系统任务栏挡住底部一条，而截图要能框到屏幕最下面一行像素。
     win.setAlwaysOnTop(true, 'screen-saver');
