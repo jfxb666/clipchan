@@ -1,4 +1,4 @@
-import { Code2, FileText, Image as ImageIcon, Layers, Link2, Settings, Star, Trash2 } from 'lucide-react';
+import { Code2, FileText, Image as ImageIcon, Layers, Link2, Settings, Sparkles, Star, Trash2 } from 'lucide-react';
 import type { KindFilter } from '../types';
 import type { View } from '../state/store';
 import { cn } from './util';
@@ -34,14 +34,17 @@ export function Sidebar({
   onSelectKind,
   onOpenTrash,
   onOpenSettings,
+  onOpenOptimize,
 }: {
   kind: KindFilter;
   view: View;
   onSelectKind: (kind: KindFilter) => void;
   onOpenTrash: () => void;
   onOpenSettings: () => void;
+  /** 传入才渲染常驻「优化」入口；不传时侧栏与旧版完全一致。 */
+  onOpenOptimize?: () => void;
 }) {
-  /** 分类项与底部两个入口共用同一套外观，避免三处各写一遍尺寸与配色。 */
+  /** 分类项、优化入口与底部两个入口共用同一套外观，避免各处各写一遍尺寸与配色。 */
   const itemClass = (active: boolean): string =>
     cn(
       'flex h-[52px] w-[52px] flex-col items-center justify-center gap-[3px] rounded-button transition-colors',
@@ -68,6 +71,13 @@ export function Sidebar({
           </button>
         );
       })}
+      {/* ★ 优化入口同样不进 NAV_ITEMS：它打开优化面板（View = 'optimize'），不参与分类筛选。 */}
+      {onOpenOptimize ? (
+        <button type="button" onClick={onOpenOptimize} className={itemClass(false)} title="提示词优化">
+          <Sparkles size={17} aria-hidden />
+          <span className="text-[10px] leading-none">优化</span>
+        </button>
+      ) : null}
       <div className="flex-1" />
       {/* 回收站紧贴设置上方：两者都是"工具型"入口，放在分类之后、底部收口。 */}
       <button type="button" title="回收站" onClick={onOpenTrash} className={itemClass(view === 'trash')}>
