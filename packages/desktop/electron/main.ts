@@ -65,7 +65,7 @@ import { closeOverlays, createOverlayWindows } from './overlay';
 import { createOcr, upscaleSize } from './ocr';
 import type { OcrApi } from './ocr';
 import type { RecordSink } from './watcher';
-import { DRAG_HINT_MULTI_FILE, dragHintFor, dragPayloadFor } from './dragout';
+import { DRAG_HINT_NO_FILE, dragHintFor, dragPayloadFor } from './dragout';
 import { buildDropFiles } from './dropfiles';
 import { Updater } from './updater';
 
@@ -664,7 +664,8 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       return { ok: true, id: result.id };
     },
     // ★ 拖出到外部应用（P1-5）：真正发起拖拽的只能是主进程（webContents.startDrag）。
-    //   本轮只支持图片与"恰好一个文件"的记录，其余在 dragPayloadFor 里回 null。
+    //   ★ startDrag 会阻塞到拖放结束（内部是 Windows 的 DoDragDrop 模态循环），所以这个
+    //     handler 期间主进程是停住的：里面不要再 await 任何东西，也不要再广播别的消息。
     [CH.items.startDrag]: (e, id: string) => {
       const db = needDb();
       const row = db.getRow(String(id));
@@ -672,17 +673,21 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
         dataDir: rt.dataDir,
         filePaths: row ? db.getFilePaths(String(id)) : [],
         imageAbs: (rel) => imageAbs(rt.dataDir, rel),
+        // 原图被清理策略删掉、或文件记录指向的文件已不在：startDrag 拿到不存在的路径
+        // 会抛在主进程里，异常既到不了界面也留不下提示，所以先在这里筛掉。
+        exists: (p) => fs.existsSync(p),
       });
       if (!spec) {
-        // ★ 不静默：用户拖了没反应只会以为程序卡了。文本/多文件各有各的原因，分开说。
-        const hint = (row ? dragHintFor(row.kind) : null) ?? DRAG_HINT_MULTI_FILE;
+        // ★ 不静默：用户拖了没反应只会以为程序卡了。文本/文件各有各的原因，分开说。
+        const hint = (row ? dragHintFor(row.kind) : null) ?? DRAG_HINT_NO_FILE;
         broadcast.toast(hint, 'info');
         return;
       }
       // ★ startDrag 的 icon 必须是真实存在的文件，否则它直接抛（主进程弹错误框）。
       //   文件记录在 dragout 里回的是空串，这里用应用图标兜底。
       const icon = spec.icon.length > 0 ? spec.icon : assetPath('build', 'icon.ico');
-      e.sender.startDrag({ file: spec.file, icon });
+      // files 优先于 file（Electron 的 Item 里写明了 files 会覆盖 file），多文件一次拖出去。
+      e.sender.startDrag({ file: spec.file, files: spec.files, icon });
     },
     // ★ 片段库（v0.6.0）：四个通道都回整表，界面拿返回值直接 setSnippets，不用再查一次。
     //   广播用 broadcast.send(EV.snippetsChanged) —— Broadcaster 没有 snippetsChanged 方法

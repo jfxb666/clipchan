@@ -48,6 +48,9 @@ export function ClipCard({
   onDragStart,
 }: ClipCardProps) {
   const isCode = item.kind === 'code';
+  // ★ 只有图片与文件记录真的能拖出去（Electron 的 startDrag 只认文件路径）。
+  //   文本类也挂 draggable 只会让用户拖半天等一句"拖不出去"，所以干脆不给拖拽手柄。
+  const canDrag = onDragStart !== undefined && (item.kind === 'image' || item.kind === 'files');
   const segments = highlightSegments(item.preview, term);
   // ★ 铁律二：有搜索词时只做搜索词高亮（shouldHighlight 已把 term 非空判掉），
   //   语法高亮为 null 就原样走 segments 分支。
@@ -71,7 +74,7 @@ export function ClipCard({
       //   framer-motion 的 filterProps 在 draggable 为真时会把 onDragStart 透传给
       //   DOM 节点（见其 filter-props：props["draggable"] && key.startsWith("onDrag")），
       //   所以这两个属性必须成对出现。
-      draggable={onDragStart !== undefined}
+      draggable={canDrag}
       onDragStart={(event) => {
         event.preventDefault();
         onDragStart?.(item.id);
@@ -82,7 +85,7 @@ export function ClipCard({
       }}
       onMouseEnter={() => onHover?.(item.id)}
       onMouseLeave={() => onHover?.(null)}
-      title="单击选中 · 双击粘贴"
+      title={canDrag ? '单击选中 · 双击粘贴 · 可拖到其它程序' : '单击选中 · 双击粘贴'}
       // ★ 用户实测反馈：右侧两个按钮原先写的是 opacity-0 + group-hover 才显形，
       //   打包版里 computed opacity 恒为 0 —— 用户根本找不到优化入口。改成常态半透明
       //   （opacity-60）+ 悬停不透明，不再依赖 hover 才可见（也不再需要 group）。
