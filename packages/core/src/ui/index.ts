@@ -46,6 +46,28 @@ export {
   shouldShowEmptyTrash,
   trashTitle,
 } from './trashViewLogic';
+export { SnippetView, type SnippetViewProps } from './SnippetViewCard';
+export {
+  SNIPPET_CONFIRM_TTL_MS,
+  SNIPPET_CONTENT_MAX,
+  SNIPPET_TITLE_MAX,
+  emptySnippetHint,
+  snippetLabel,
+  snippetMeta,
+  snippetPreview,
+  sortSnippets,
+  validateSnippet,
+} from './snippetView';
+export { batchActions, batchBarText, canBatchRemove, type BatchAction } from './batchBar';
+export {
+  EXCLUDE_APPS_MAX,
+  addExcludeApp,
+  excludeAppsHint,
+  normalizeAppEntry,
+  removeExcludeApp,
+  suggestExcludeApps,
+} from './excludeApps';
+export { canClickUpdate, updateButtonLabel, updateStatusText } from './updateView';
 export { OptimizeView, type OptimizeScene, type OptimizeViewProps } from './OptimizeViewCard';
 export { OPTIMIZE_MODES, degradedHint, type OptimizeMode } from './optimizeView';
 export {

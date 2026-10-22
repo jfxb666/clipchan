@@ -10,6 +10,9 @@ import type {
   OptimizeDelta,
   OptimizeRequest,
   Settings,
+  Snippet,
+  SnippetInput,
+  UpdateStatus,
 } from '../types';
 import { getPlatform } from '../platform/adapter';
 import { bindClipStore, useClipStore, type AppMode, type View } from '../state/store';
@@ -34,6 +37,8 @@ import { ocrErrorText, ocrSavedToast } from './ocrView';
 import { WordCloudView } from './WordCloudView';
 import { resolveKey, shouldPreventDefault } from './keymap';
 import { useAutoStart, useHotkeyStatus } from './usePlatformValue';
+import { SnippetView } from './SnippetViewCard';
+import { batchActions, batchBarText, canBatchRemove } from './batchBar';
 import { cn } from './util';
 
 /**
@@ -90,6 +95,17 @@ export function App() {
   const trashLoading = useClipStore((s) => s.trashLoading);
   /** 优化面板的原文初值：由卡片「优化」按钮写进来。 */
   const optimizeSource = useClipStore((s) => s.optimizeSource);
+
+  /**
+   * 片段库全表。
+   * ★ 不进 store：片段只有这一个视图用得到，且四个动作（保存 / 删除 / 使用）
+   *   都由主进程返回**整张表**，放本地 state 比在 store 里再开一份切片简单。
+   */
+  const [snippets, setSnippets] = useState<Snippet[]>([]);
+  const [snippetsLoading, setSnippetsLoading] = useState(false);
+
+  /** 更新检查状态；null = 还没点过（设置页据此显示「当前版本」而不是「已是最新」）。 */
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
 
   const searchRef = useRef<HTMLInputElement | null>(null);
   // ★ 传整个 settings 当 refreshKey：设置页改完快捷键后要重新读一次注册结果，
@@ -183,6 +199,49 @@ export function App() {
   }, []);
 
   /**
+   * 更新状态：只订阅，不主动检查。
+   * ★ 启动时检查更新会打一次 GitHub 请求（未打包时还会在控制台刷错），
+   *   所以主进程只在设置页手动点「检查更新」时才发请求，这里负责接结果。
+   */
+  useEffect(() => {
+    const platform = getPlatform();
+    const off = platform.app.onUpdate((s) => setUpdateStatus(s));
+    return () => off();
+  }, []);
+
+  /**
+   * 片段库：进视图时拉一次全表，并订阅主进程的变更（别的窗口/托盘改了也同步）。
+   * ★ 只在视图打开期间订阅：片段表可能有几十条，没必要常驻一份。
+   */
+  useEffect(() => {
+    if (view !== 'snippets') return;
+    const platform = getPlatform();
+    let alive = true;
+    const refresh = () => {
+      platform.snippets
+        .list()
+        .then((list) => {
+          if (alive) setSnippets(list);
+        })
+        .catch(() => {
+          // 非 Electron 环境没有实现：保持空表，页面显示空状态而不是报错。
+        })
+        .finally(() => {
+          if (alive) setSnippetsLoading(false);
+        });
+    };
+    setSnippetsLoading(true);
+    refresh();
+    // ★ onChanged 不带参数（主进程只说"变了"），所以订阅里再拉一次全表 ——
+    //   与 ai.onChanged 同一套写法。
+    const off = platform.snippets.onChanged(refresh);
+    return () => {
+      alive = false;
+      off();
+    };
+  }, [view]);
+
+  /**
    * 设置页要显示语言包状态，而它平时是 null（只有 OCR 面板会去问）。
    * ★ 进设置页时补一次：不问就永远停在「正在读取状态…」，而主进程的 status 只是
    *   看两个文件在不在（不起 worker），代价可以忽略。
@@ -259,6 +318,12 @@ export function App() {
         case 'paste':
           void store.pasteSelected();
           return;
+        case 'paste-plain': {
+          // 键盘路径与右键菜单同一个动作：只贴当前选中项，失败静默（主进程会自己 toast）。
+          const id = store.selectedIds[0];
+          if (id) void pastePlain(id);
+          return;
+        }
         case 'undo':
           void store.undoRemove();
           return;
@@ -313,6 +378,31 @@ export function App() {
       useClipStore.getState().openOptimize(text);
     } catch {
       useClipStore.getState().toast('读取全文失败，请重试', 'warn');
+    }
+  }, []);
+
+  /**
+   * 只贴纯文本（丢掉原记录的富文本）：右键菜单与 Ctrl+Shift+V 共用。
+   * 失败静默 —— 主进程已经处理了 toast，这里再弹一次会重复。
+   */
+  const pastePlain = useCallback(async (id: string) => {
+    try {
+      await getPlatform().items.pastePlain(id);
+    } catch {
+      // 浏览器预览 / 主进程未实现：忽略。
+    }
+  }, []);
+
+  /**
+   * 拖出到外部应用：主进程接管 startDrag，失败静默（拖拽本身已经是"尽力而为"的交互）。
+   * ★ 这条链路是 ClipCard → ListPanel（含三种布局）→ 主进程 webContents.startDrag：
+   *   ListBodyProps 少了 onDragStart 就会一路编译通过但拖不动，改的时候四处都要看。
+   */
+  const startDrag = useCallback(async (id: string) => {
+    try {
+      await getPlatform().items.startDrag(id);
+    } catch {
+      // 同上。
     }
   }, []);
 
@@ -430,6 +520,9 @@ export function App() {
         case 'paste':
           void paste(id);
           return;
+        case 'paste-plain':
+          void pastePlain(id);
+          return;
         case 'view':
           void openViewer(id);
           return;
@@ -447,7 +540,7 @@ export function App() {
           return;
       }
     },
-    [copyItem, openOcr, openOptimize, openViewer, paste],
+    [copyItem, openOcr, openOptimize, openViewer, paste, pastePlain],
   );
 
   // 优化面板的平台动作：组件不碰 getPlatform，一律由 App 注入（与设置页一致）。
@@ -469,6 +562,27 @@ export function App() {
   const removeHistory = useCallback((id: string) => getPlatform().ai.historyRemove(id), []);
   const clearHistory = useCallback(() => getPlatform().ai.historyClear(), []);
   const toast = useCallback((text: string, tone?: ToastTone) => useClipStore.getState().toast(text, tone), []);
+
+  /**
+   * 检查更新 / 重启安装。
+   * ★ 状态不在这里存 —— 主进程推 EV.updateStatus，上面那个订阅统一 setUpdateStatus，
+   *   所以这里只发请求、不做乐观更新（否则会和推送来的真实状态打架）。
+   *   失败也不 toast：设置页那一行会把 error 文案显示出来。
+   */
+  const checkUpdate = useCallback(async () => {
+    try {
+      setUpdateStatus(await getPlatform().app.checkUpdate());
+    } catch {
+      setUpdateStatus({ state: 'error', message: '检查更新失败，请稍后重试' });
+    }
+  }, []);
+  const applyUpdate = useCallback(async () => {
+    try {
+      await getPlatform().app.applyUpdate();
+    } catch {
+      useClipStore.getState().toast('重启安装失败，请手动退出后重开', 'warn');
+    }
+  }, []);
 
   // OCR 面板的平台动作：组件不碰 getPlatform，全部由 App 注入（与优化面板一致）。
   /**
@@ -526,6 +640,88 @@ export function App() {
     setOcrLoading(false);
   }, []);
 
+  /**
+   * 片段库的四个动作：主进程一律返回整张表，直接替换本地 state 即可（不再多拉一次）。
+   * ★ 失败要出声：片段是用户亲手存的东西，"点了保存没反应"比报错难受得多。
+   */
+  const createSnippet = useCallback(async (input: SnippetInput) => {
+    try {
+      setSnippets(await getPlatform().snippets.save(input));
+    } catch (err) {
+      useClipStore.getState().toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  }, []);
+
+  const updateSnippet = useCallback(async (input: SnippetInput) => {
+    try {
+      setSnippets(await getPlatform().snippets.save(input));
+    } catch (err) {
+      useClipStore.getState().toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  }, []);
+
+  const removeSnippet = useCallback(async (id: string) => {
+    try {
+      setSnippets(await getPlatform().snippets.remove(id));
+    } catch (err) {
+      useClipStore.getState().toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  }, []);
+
+  const useSnippet = useCallback(async (id: string) => {
+    try {
+      setSnippets(await getPlatform().snippets.use(id));
+    } catch (err) {
+      useClipStore.getState().toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  }, []);
+
+  /**
+   * 批量操作（P2-8）：三个动作做完都要刷新列表并清空选择。
+   * 选择清空的时机不同：删除必须清（那些行已经没了），粘贴/收藏成功后也清
+   * —— 操作栏留在屏幕上会让人以为还能再点一次同一批。
+   */
+  const batchPaste = useCallback(async () => {
+    const store = useClipStore.getState();
+    const ids = store.selectedIds;
+    if (ids.length === 0) return;
+    try {
+      const { text, tone } = pasteToast(await getPlatform().items.pasteMany(ids));
+      store.toast(text, tone);
+    } catch (err) {
+      store.toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+    store.select(null);
+    await store.load();
+  }, []);
+
+  const batchPin = useCallback(async (pinned: boolean) => {
+    const store = useClipStore.getState();
+    const ids = store.selectedIds;
+    if (ids.length === 0) return;
+    try {
+      await getPlatform().items.pinMany(ids, pinned);
+    } catch (err) {
+      store.toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+    store.select(null);
+    await store.load();
+  }, []);
+
+  const batchRemove = useCallback(async () => {
+    const store = useClipStore.getState();
+    const ids = store.selectedIds;
+    if (!canBatchRemove(ids.length)) return;
+    try {
+      await getPlatform().items.removeMany(ids);
+    } catch (err) {
+      store.toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+    // 删除后选择必须清空：ids 里那些行已经不在列表里了。
+    store.select(null);
+    await store.load();
+  }, []);
+
   const openWordCloud = useCallback(() => {
     useClipStore.getState().setView('wordcloud');
     void useClipStore.getState().loadWordCloud();
@@ -564,6 +760,15 @@ export function App() {
   );
 
   const listAiModels = useCallback((id: string): Promise<string[]> => getPlatform().ai.listModels(id), []);
+
+  /**
+   * 批量操作栏的输入。
+   * ★ 只看**已加载**的选中项：选中集里可能还留着上一页的 id（换分类时 store 会过滤，
+   *   但翻页期间不会），拿不到的项当"未收藏"处理 —— 宁可显示「收藏」也不要显示
+   *   一个会对空集合执行的「取消收藏」。
+   */
+  const selectedItems = items.filter((it) => selectedIds.includes(it.id));
+  const batchAllPinned = selectedItems.length > 0 && selectedItems.every((it) => it.pinned);
 
   const glassClass = capabilities.frostedGlass ? 'cc-shell--glass' : 'cc-shell--glass-fallback';
 
@@ -609,6 +814,7 @@ export function App() {
             onOpenTrash={() => void useClipStore.getState().openTrash()}
             onOpenSettings={() => useClipStore.getState().setView('settings')}
             onOpenOptimize={() => useClipStore.getState().openOptimize('')}
+            onOpenSnippets={() => useClipStore.getState().openSnippets()}
           />
         ) : null}
 
@@ -678,6 +884,45 @@ export function App() {
                 </div>
               ) : null}
 
+              {/*
+                批量操作栏（P2-8）：选中集非空时出现。
+                ★ 按钮集合由 batchBar 的纯函数决定（能单测），这里只负责派发。
+              */}
+              {selectedIds.length > 0 ? (
+                <div className="cc-no-drag mx-base mb-snug flex shrink-0 items-center gap-tight rounded-button border border-line bg-surface-2 px-snug py-[6px] text-[11px] text-ink-2">
+                  <span>{batchBarText(selectedIds.length)}</span>
+                  <div className="flex-1" />
+                  {batchActions(selectedIds.length, batchAllPinned).map((action) => (
+                    <button
+                      key={action.key}
+                      type="button"
+                      disabled={action.key === 'remove' && !canBatchRemove(selectedIds.length)}
+                      onClick={() => {
+                        if (action.key === 'paste') void batchPaste();
+                        else if (action.key === 'pin') void batchPin(true);
+                        else if (action.key === 'unpin') void batchPin(false);
+                        else void batchRemove();
+                      }}
+                      className={cn(
+                        'shrink-0 rounded-button border px-snug py-[3px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+                        action.danger
+                          ? 'border-line text-ink-2 hover:bg-surface hover:text-[var(--cc-accent)]'
+                          : 'border-line text-ink-2 hover:bg-surface hover:text-ink',
+                      )}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => useClipStore.getState().select(null)}
+                    className="shrink-0 rounded-button px-[6px] py-[3px] text-ink-3 hover:bg-surface hover:text-ink"
+                  >
+                    取消选择
+                  </button>
+                </div>
+              ) : null}
+
               <ListPanel
                 items={items}
                 kind={kind}
@@ -690,6 +935,7 @@ export function App() {
                 onOptimize={(id) => void openOptimize(id)}
                 onLoadMore={() => void useClipStore.getState().loadMore()}
                 onContextMenu={(id, x, y) => setMenu({ id, x, y })}
+                onDragStart={(id) => void startDrag(id)}
                 layout={settings.listLayout}
               />
 
@@ -737,6 +983,9 @@ export function App() {
               ocrStatus={ocrStatus}
               ocrProgress={ocrProgress}
               onOcrDownload={() => void downloadOcr()}
+              updateStatus={updateStatus}
+              onCheckUpdate={() => void checkUpdate()}
+              onApplyUpdate={() => void applyUpdate()}
             />
           ) : null}
 
@@ -767,6 +1016,17 @@ export function App() {
               onRestore={(id) => void useClipStore.getState().restoreFromTrash(id)}
               onPurge={(id) => void useClipStore.getState().purgeFromTrash(id)}
               onEmptyTrash={() => void useClipStore.getState().emptyTrash()}
+            />
+          ) : null}
+
+          {view === 'snippets' ? (
+            <SnippetView
+              snippets={snippets}
+              loading={snippetsLoading}
+              onCreate={(input) => void createSnippet(input)}
+              onUpdate={(input) => void updateSnippet(input)}
+              onRemove={(id) => void removeSnippet(id)}
+              onUse={(id) => void useSnippet(id)}
             />
           ) : null}
 

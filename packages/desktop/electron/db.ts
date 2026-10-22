@@ -28,7 +28,11 @@ import {
   type ListQuery,
   type OptimizeHistoryEntry,
   type Settings,
+  type Snippet,
+  type SnippetInput,
 } from '@clipchan/core';
+import { pinyin } from 'pinyin-pro';
+import { baseNameOf, filesDesc } from './dropfiles';
 
 /** 单条文本字符上限（抄 legacy/src/Store.cs:15 MaxChars）。 */
 export const TEXT_LIMIT = 100000;
@@ -74,6 +78,25 @@ CREATE TABLE IF NOT EXISTS optimize_history (
 );
 CREATE INDEX IF NOT EXISTS idx_opt_hist ON optimize_history(created_at DESC, id DESC);`;
 
+/** 片段库上限：超出淘汰 updated_at 最旧的（片段是用户手存的，比历史更值得留，所以上限高）。 */
+export const SNIPPET_LIMIT = 200;
+
+/**
+ * v0.6.0 片段库 DDL。
+ *
+ * ★ 与 OPTIMIZE_HISTORY_SQL 同理抽成常量：SCHEMA_SQL 与迁移必须逐字一致，
+ *   否则老库升级后没有这张表，而全新库有。
+ */
+const SNIPPET_SQL = `
+CREATE TABLE IF NOT EXISTS snippets (
+  id         TEXT PRIMARY KEY,
+  title      TEXT NOT NULL DEFAULT '',
+  content    TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  use_count  INTEGER NOT NULL DEFAULT 0
+);`;
+
 /**
  * 建表 SQL —— ★ 逐字抄 spec §9.2，不要"顺手优化"。
  *
@@ -99,7 +122,10 @@ CREATE TABLE IF NOT EXISTS items (
   created_at   INTEGER NOT NULL,
   seq          INTEGER NOT NULL,
   deleted_at   INTEGER,
-  source_app   TEXT
+  source_app   TEXT,
+  file_paths   TEXT,
+  rich_html    TEXT,
+  search_index TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_order ON items(pinned DESC, created_at DESC, seq DESC);
 CREATE TABLE IF NOT EXISTS settings (
@@ -107,6 +133,7 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 ${OPTIMIZE_HISTORY_SQL}
+${SNIPPET_SQL}
 `;
 
 /** items 表的一行（只列出我们真正读的列）。 */
@@ -130,6 +157,22 @@ export interface ItemRow {
   deleted_at: number | null;
   /** 来源 exe 名（如 Code.exe）；未知为 null —— 不写任何兜底串。 */
   source_app: string | null;
+  /** 文件记录的绝对路径 JSON 数组（v0.6.0）；非文件记录为 null。绝不出主进程。 */
+  file_paths: string | null;
+  /** 富文本原样 text/html（v0.6.0）；纯文本行为 null。 */
+  rich_html: string | null;
+  /** 自建的拼音/小写检索列（v0.6.0）；由 buildSearchIndex 在 Node 里算好再写。 */
+  search_index: string | null;
+}
+
+/** snippets 表的一行。 */
+export interface SnippetRow {
+  id: string;
+  title: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+  use_count: number;
 }
 
 /** optimize_history 表的一行（id 在库里是 INTEGER AUTOINCREMENT）。 */
@@ -179,6 +222,20 @@ export interface InsertTextOpts {
   source?: 'capture' | 'merge';
   /** 来源 exe 名；未知就不传（不落兜底串）。去重命中时不覆盖已有来源。 */
   sourceApp?: string;
+  /** 剪贴板里的 text/html 原样（v0.6.0）；纯文本不传。 */
+  richHtml?: string;
+}
+
+/** insertFiles 的可选参数（形状与 InsertImageOpts 对齐）。 */
+export interface InsertFilesOpts {
+  pinned?: boolean;
+  createdAt?: number;
+  /** createdAt 的别名（测试 / 调用方更顺手的写法）。 */
+  now?: number;
+  seq?: number;
+  source?: 'capture' | 'merge';
+  /** 来源 exe 名；未知就不传。 */
+  sourceApp?: string;
 }
 
 /** insertImage 的元数据。 */
@@ -219,12 +276,20 @@ export interface Db {
   readonly raw: Database.Database;
   insertText(text: string, opts?: InsertTextOpts): InsertResult;
   insertImage(meta: ImageMeta, opts?: InsertImageOpts): InsertResult;
+  /** 记录一条"复制的文件"（v0.6.0）；空数组不落库，直接回 { id: '', touched: false }。 */
+  insertFiles(paths: string[], opts?: InsertFilesOpts): InsertResult;
+  /** 读文件记录的路径列表；坏数据 / 行不存在一律回 []，绝不抛。 */
+  getFilePaths(id: string): string[];
+  /** 读富文本原样；没有就回 null。 */
+  getRichHtml(id: string): string | null;
   list(q?: ListQuery): ClipItemDTO[];
   /** 与 list 同条件的总条数（分页时界面显示"共 N 条"）。 */
   count(q?: ListQuery): number;
   remove(id: string): ItemRow | null;
   removeMany(ids: string[]): ItemRow[];
   togglePin(id: string): boolean;
+  /** 批量置位/取消收藏，只影响活跃行；返回实际改动条数。 */
+  pinMany(ids: string[], pinned: boolean): number;
   clearUnpinned(): ItemRow[];
   clearAll(): number;
   /** 回收站列表（按删除时间倒序）。谓词与 buildWhere 相反，所以不复用它。 */
@@ -263,6 +328,14 @@ export interface Db {
   /** 全部图片行；unpinnedOnly=true 时只要未收藏的（清空未收藏 / 预算淘汰用）。 */
   allImageRows(opts?: { unpinnedOnly?: boolean }): ImageRow[];
   touch(id: string): void;
+  /** 片段库：按 updated_at DESC, id DESC（最近改过的在前）。 */
+  listSnippets(): Snippet[];
+  /** 新增或更新一条片段，写完按 SNIPPET_LIMIT 淘汰最旧，返回更新后的全表。 */
+  saveSnippet(input: SnippetInput): Snippet[];
+  removeSnippet(id: string): Snippet[];
+  /** 用一次：use_count + 1，**不动** updated_at（用一次不算编辑）。 */
+  touchSnippet(id: string): Snippet[];
+  getSnippet(id: string): Snippet | null;
   close(): void;
 }
 
@@ -276,6 +349,26 @@ export function hashText(text: string): string {
 /** 图片字节的 sha256（去重键）。 */
 export function hashBuffer(buf: Buffer | Uint8Array): string {
   return createHash('sha256').update(buf).digest('hex');
+}
+
+/**
+ * 生成检索列：原文 + 全拼 + 首字母，统一小写。
+ *
+ * ★ 为什么不用 FTS5 trigram：实测 SQLite 3.53 的 trigram 分词要求查询串 ≥3 字符，
+ *   中文两字词（"验收"）永远不命中——而那正是中文用户最常输入的搜索长度。
+ *   所以走"自建一列 + LIKE"，代价是写入时多算一次，读时全表扫（历史几千条量级可接受）。
+ *
+ * ★ pinyin 抛错时只回原文小写：检索列算不出来不该让整条记录写不进库。
+ */
+export function buildSearchIndex(text: string): string {
+  if (typeof text !== 'string' || text.length === 0) return '';
+  try {
+    const full = pinyin(text, { toneType: 'none', type: 'array' }).join('');
+    const initials = pinyin(text, { pattern: 'first', toneType: 'none', type: 'array' }).join('');
+    return (text + ' ' + full + ' ' + initials).toLowerCase();
+  } catch {
+    return text.toLowerCase();
+  }
 }
 
 function nextSeqOf(raw: Database.Database): number {
@@ -299,7 +392,7 @@ function sourceToDto(s: string): 'capture' | 'merge' {
 
 function toKind(v: string): Kind {
   switch (v) {
-    case 'text': case 'link': case 'code': case 'path': case 'number': case 'image':
+    case 'text': case 'link': case 'code': case 'path': case 'number': case 'image': case 'files':
       return v;
     default:
       return 'text';
@@ -318,9 +411,10 @@ function rowToDto(row: ItemRow): ClipItemDTO {
   const kind = toKind(row.kind);
   const pinned = row.pinned === 1;
   const source = sourceToDto(row.source);
-  const extra: Pick<ClipItemDTO, 'sourceApp' | 'deletedAt'> = {};
+  const extra: Pick<ClipItemDTO, 'sourceApp' | 'deletedAt' | 'hasRich'> = {};
   if (row.source_app) extra.sourceApp = row.source_app;
   if (typeof row.deleted_at === 'number') extra.deletedAt = row.deleted_at;
+  if (typeof row.rich_html === 'string' && row.rich_html.length > 0) extra.hasRich = true;
   if (kind === 'image') {
     const w = row.width ?? 0;
     const h = row.height ?? 0;
@@ -339,6 +433,9 @@ function rowToDto(row: ItemRow): ClipItemDTO {
       ...extra,
     };
   }
+  const textExtra: Pick<ClipItemDTO, 'fileCount'> = kind === 'files'
+    ? { fileCount: parseFilePaths(row.file_paths).length }
+    : {};
   return {
     id: row.id,
     kind,
@@ -347,6 +444,7 @@ function rowToDto(row: ItemRow): ClipItemDTO {
     pinned,
     truncated: row.truncated === 1,
     source,
+    ...textExtra,
     ...extra,
   };
 }
@@ -366,6 +464,33 @@ function rowToOptimizeHistory(row: OptimizeHistoryRow): OptimizeHistoryEntry {
     providerId: row.provider_id,
     providerName: row.provider_name,
     createdAt: row.created_at,
+  };
+}
+
+/**
+ * 解析 file_paths 列。坏 JSON / 非数组 / null 一律回 []：这是"显示文件个数"的路径，
+ * 一条脏数据不该让整个列表读不出来。
+ */
+function parseFilePaths(v: string | null): string[] {
+  if (typeof v !== 'string' || v.length === 0) return [];
+  try {
+    const parsed = JSON.parse(v) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === 'string');
+  } catch {
+    return [];
+  }
+}
+
+/** snippets 行 → DTO（字段名转 camelCase）。 */
+export function rowToSnippet(row: SnippetRow): Snippet {
+  return {
+    id: row.id,
+    title: row.title,
+    content: row.content,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    useCount: row.use_count,
   };
 }
 
@@ -425,8 +550,14 @@ function buildWhere(q: ListQuery): { where: string; params: unknown[] } {
 
   const term = typeof q.q === 'string' ? q.q.trim() : '';
   if (term.length > 0) {
-    where.push(`(content LIKE '%' || ? || '%' OR (kind = 'image' AND ${IMAGE_DESC_SQL} LIKE '%' || ? || '%'))`);
-    params.push(term, term);
+    // search_index 存的是小写（见 buildSearchIndex），查询串必须同样小写才能命中拼音段。
+    // content 那一路也用小写：SQLite 的 LIKE 对 ASCII 本来就大小写不敏感，用同一个小写串
+    // 不会漏匹配，却省掉一组额外参数。
+    const lowered = term.toLowerCase();
+    where.push(
+      `(content LIKE '%' || ? || '%' OR search_index LIKE '%' || ? || '%' OR (kind = 'image' AND ${IMAGE_DESC_SQL} LIKE '%' || ? || '%'))`,
+    );
+    params.push(lowered, lowered, lowered);
   }
   return { where: where.join(' AND '), params };
 }
@@ -628,6 +759,21 @@ export function openDb(file: string): Db {
     ).run(OPTIMIZE_HISTORY_LIMIT);
   }
 
+  /**
+   * 片段上限淘汰：只保留 updated_at 最新的 SNIPPET_LIMIT 条，多的**硬删**。
+   *
+   * ★ 与 optimize_history 同理不软删：片段库没有回收站入口，删了就该真的没了；
+   *   而"上限到了还往里存"本身是用户的显式动作，不该让他事后在回收站里翻。
+   */
+  function trimSnippets(): void {
+    raw.prepare(
+      `DELETE FROM snippets
+        WHERE id NOT IN (
+          SELECT id FROM snippets ORDER BY updated_at DESC, id DESC LIMIT ?
+        )`,
+    ).run(SNIPPET_LIMIT);
+  }
+
   const api: Db = {
     raw,
 
@@ -635,6 +781,8 @@ export function openDb(file: string): Db {
       if (typeof text !== 'string') throw new Error('insertText: text 必须是字符串');
       const cleaned = text.replace(/\0/g, '');
       if (cleaned.length === 0) throw new Error('insertText: 空文本不入库');
+
+      const richHtml = typeof opts.richHtml === 'string' && opts.richHtml.length > 0 ? opts.richHtml : null;
 
       let content = cleaned;
       let truncated = opts.truncated === true;
@@ -645,10 +793,15 @@ export function openDb(file: string): Db {
 
       const hash = hashText(content);
       // ★ 去重只认活跃行：命中回收站里的行会刷新一条已删记录的排序，用户复制完什么都不出现。
-      const hit = raw.prepare('SELECT id FROM items WHERE content_hash = ? AND deleted_at IS NULL').get(hash) as
-        | { id: string }
+      const hit = raw.prepare('SELECT id, rich_html FROM items WHERE content_hash = ? AND deleted_at IS NULL').get(hash) as
+        | { id: string; rich_html: string | null }
         | undefined;
       if (hit) {
+        // ★ 旧行没有富文本、这次有：补写。否则同一段文字先从纯文本来源复制过、
+        //   再从网页复制，就永远拿不到 text/html —— 用户看到的加粗/表格全丢了。
+        if (richHtml !== null && (hit.rich_html === null || hit.rich_html.length === 0)) {
+          raw.prepare('UPDATE items SET rich_html = ? WHERE id = ?').run(richHtml, hit.id);
+        }
         touchRow(hit.id, typeof opts.now === 'number' ? opts.now : undefined);
         return { id: hit.id, touched: true };
       }
@@ -660,11 +813,12 @@ export function openDb(file: string): Db {
       const seq = typeof opts.seq === 'number' ? opts.seq : nextSeq();
       const kind = opts.kind ?? classify(content);
       raw.prepare(
-        `INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq, source_app)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq, source_app,
+                            rich_html, search_index)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id, kind, content, hash, sourceToDb(opts.source), opts.pinned ? 1 : 0, truncated ? 1 : 0, createdAt, seq,
-        sourceAppToDb(opts.sourceApp),
+        sourceAppToDb(opts.sourceApp), richHtml, buildSearchIndex(content),
       );
       evictOverLimit();
       return { id, touched: false };
@@ -702,6 +856,60 @@ export function openDb(file: string): Db {
       );
       evictOverLimit();
       return { id, touched: false };
+    },
+
+    /**
+     * 记录"复制的文件"。
+     *
+     * ★ 去重键是路径列表整体（\n 连接后的 sha256），不是文件个数：复制同一批文件两次
+     *   要命中同一行；复制同名但不同目录的文件必须是两条。
+     * ★ 命中时不覆盖已有 file_paths —— 内容相同就是同一批路径，覆盖只会把用户
+     *   更早那次（可能是短名）的记录改掉。
+     */
+    insertFiles(paths: string[], opts: InsertFilesOpts = {}): InsertResult {
+      const list = Array.isArray(paths) ? paths.filter((x) => typeof x === 'string' && x.length > 0) : [];
+      if (list.length === 0) return { id: '', touched: false };
+
+      const hash = hashText(list.join('\n'));
+      const hit = raw.prepare('SELECT id FROM items WHERE content_hash = ? AND deleted_at IS NULL').get(hash) as
+        | { id: string }
+        | undefined;
+      if (hit) {
+        touchRow(hit.id, typeof opts.now === 'number' ? opts.now : undefined);
+        return { id: hit.id, touched: true };
+      }
+
+      const content = filesDesc(list.length, baseNameOf(list[0] ?? ''));
+      const id = randomUUID().replace(/-/g, '');
+      const createdAt = typeof opts.now === 'number' ? opts.now
+        : typeof opts.createdAt === 'number' ? opts.createdAt
+        : Date.now();
+      const seq = typeof opts.seq === 'number' ? opts.seq : nextSeq();
+      raw.prepare(
+        `INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq, source_app,
+                            file_paths, search_index)
+         VALUES (?, 'files', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+      ).run(
+        id, content, hash, sourceToDb(opts.source), opts.pinned ? 1 : 0, createdAt, seq,
+        sourceAppToDb(opts.sourceApp), JSON.stringify(list), buildSearchIndex(content),
+      );
+      evictOverLimit();
+      return { id, touched: false };
+    },
+
+    getFilePaths(id: string): string[] {
+      const row = raw.prepare('SELECT file_paths FROM items WHERE id = ?').get(id) as
+        | { file_paths: string | null }
+        | undefined;
+      return parseFilePaths(row?.file_paths ?? null);
+    },
+
+    getRichHtml(id: string): string | null {
+      const row = raw.prepare('SELECT rich_html FROM items WHERE id = ?').get(id) as
+        | { rich_html: string | null }
+        | undefined;
+      const html = row?.rich_html ?? null;
+      return typeof html === 'string' && html.length > 0 ? html : null;
     },
 
     list(q: ListQuery = {}): ClipItemDTO[] {
@@ -755,6 +963,17 @@ export function openDb(file: string): Db {
     togglePin(id: string): boolean {
       const info = raw.prepare('UPDATE items SET pinned = CASE pinned WHEN 1 THEN 0 ELSE 1 END WHERE id = ?').run(id);
       return info.changes > 0;
+    },
+
+    pinMany(ids: string[], pinned: boolean): number {
+      const list = Array.isArray(ids) ? ids.filter((x) => typeof x === 'string' && x.length > 0) : [];
+      if (list.length === 0) return 0;
+      // 占位符按条数拼，id 永远走参数绑定 —— 拼字符串就是 SQL 注入。
+      const marks = list.map(() => '?').join(', ');
+      const info = raw
+        .prepare(`UPDATE items SET pinned = ? WHERE id IN (${marks}) AND deleted_at IS NULL`)
+        .run(pinned ? 1 : 0, ...list);
+      return info.changes;
     },
 
     clearUnpinned(): ItemRow[] {
@@ -923,6 +1142,57 @@ export function openDb(file: string): Db {
       touchRow(id);
     },
 
+    listSnippets(): Snippet[] {
+      return raw
+        .prepare('SELECT * FROM snippets ORDER BY updated_at DESC, id DESC')
+        .all()
+        .map((row) => rowToSnippet(row as SnippetRow));
+    },
+
+    /**
+     * 新增或更新一条片段。
+     *
+     * ★ 更新分支**不动** created_at 与 use_count：改标题/内容不该让"创建时间"和
+     *   "用了多少次"归零，否则常用的片段一编辑就掉到列表末尾。
+     * ★ title 允许空串：UI 用内容首行兜底，db 层不替它编一个名字出来。
+     */
+    saveSnippet(input: SnippetInput): Snippet[] {
+      const title = typeof input?.title === 'string' ? input.title : '';
+      const content = typeof input?.content === 'string' ? input.content : '';
+      const at = Date.now();
+      const id = typeof input?.id === 'string' && input.id.length > 0 ? input.id : '';
+
+      const existing = id.length > 0
+        ? raw.prepare('SELECT id FROM snippets WHERE id = ?').get(id) as { id: string } | undefined
+        : undefined;
+
+      if (existing) {
+        raw.prepare('UPDATE snippets SET title = ?, content = ?, updated_at = ? WHERE id = ?').run(title, content, at, id);
+      } else {
+        raw.prepare(
+          `INSERT INTO snippets (id, title, content, created_at, updated_at, use_count)
+           VALUES (?, ?, ?, ?, ?, 0)`,
+        ).run(id.length > 0 ? id : randomUUID().replace(/-/g, ''), title, content, at, at);
+      }
+      trimSnippets();
+      return api.listSnippets();
+    },
+
+    removeSnippet(id: string): Snippet[] {
+      raw.prepare('DELETE FROM snippets WHERE id = ?').run(id);
+      return api.listSnippets();
+    },
+
+    touchSnippet(id: string): Snippet[] {
+      raw.prepare('UPDATE snippets SET use_count = use_count + 1 WHERE id = ?').run(id);
+      return api.listSnippets();
+    },
+
+    getSnippet(id: string): Snippet | null {
+      const row = raw.prepare('SELECT * FROM snippets WHERE id = ?').get(id) as SnippetRow | undefined;
+      return row ? rowToSnippet(row) : null;
+    },
+
     close(): void {
       raw.close();
     },
@@ -950,7 +1220,7 @@ function loadSettings(raw: Database.Database): Settings {
 }
 
 /** 当前 schema 版本（PRAGMA user_version 的值）。 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * v0.2.0 → v0.3.0 的 schema 迁移：重建两个唯一索引，把谓词补成 `AND deleted_at IS NULL`。
@@ -974,6 +1244,9 @@ function migrateTrashSchema(raw: Database.Database): void {
       // SCHEMA_SQL 是幂等建表，理论上 openDb 已经建过；这里再跑一次是为了让
       // "版本升级"这件事本身带上表结构，而不是依赖它上面那句 exec 的成功。
       raw.exec(OPTIMIZE_HISTORY_SQL);
+      // v0.6.0：片段库同理，老库要拿到这张表。
+      raw.exec(SNIPPET_SQL);
+      backfillSearchIndex(raw);
       raw.pragma('user_version = ' + SCHEMA_VERSION);
     });
     tx();
@@ -983,6 +1256,26 @@ function migrateTrashSchema(raw: Database.Database): void {
   // 版本已是新版但索引被外部删掉了（手工修库、备份恢复）：补建但不重复改谓词。
   // 这一步同时也是全新库拿到索引的地方（建表段故意不建，见 SCHEMA_SQL 注释）。
   raw.exec(UNIQUE_INDEX_SQL);
+}
+
+/**
+ * 给已有活跃行回填 search_index。
+ *
+ * ★ 必须在 Node 里逐行算：拼音转换不是 SQL 能力，SQLite 里算不出来。
+ *   只在迁移时跑一次（版本闸门挡住重复执行），老库的几千条也就是一次启动的代价。
+ * ★ 只补**活跃**行：回收站行的检索列没人用，而它们可能很多。
+ * ★ 不用逐行 UPDATE 事务包（外层已经是事务）——这里直接复用同一个连接。
+ */
+function backfillSearchIndex(raw: Database.Database): void {
+  const rows = raw.prepare('SELECT id, content FROM items WHERE deleted_at IS NULL').all() as {
+    id: string;
+    content: string | null;
+  }[];
+  if (rows.length === 0) return;
+  const upd = raw.prepare('UPDATE items SET search_index = ? WHERE id = ?');
+  for (const row of rows) {
+    upd.run(buildSearchIndex(row.content ?? ''), row.id);
+  }
 }
 
 /** 旧库补列（本轮 schema 是新库，留一个最小自愈入口）。 */
@@ -998,6 +1291,10 @@ function ensureColumns(raw: Database.Database): void {
     // v0.3.0：回收站时间戳与来源 exe 名。都允许 NULL —— 活跃行与"来源未知"都是 NULL。
     ['deleted_at', 'INTEGER'],
     ['source_app', 'TEXT'],
+    // v0.6.0：文件路径 / 富文本 / 拼音检索列。都允许 NULL —— 老行与新写的纯文本行都是 NULL。
+    ['file_paths', 'TEXT'],
+    ['rich_html', 'TEXT'],
+    ['search_index', 'TEXT'],
   ];
   for (const [name, decl] of wanted) {
     if (!cols.has(name)) raw.exec(`ALTER TABLE items ADD COLUMN ${name} ${decl}`);

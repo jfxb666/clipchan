@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { filePathsSignature, readFilePaths } from './files';
 import type { NativeImageLike } from './images';
 
 /** 轮询间隔（spec §7.1）。 */
@@ -34,13 +35,31 @@ export const IMAGE_SIG_HEAD_BYTES = 4096;
 /** Windows 上"复制了文件"的剪贴板格式名（spec §7.1）。 */
 export const FILE_NAME_FORMAT = 'FileNameW';
 
+/**
+ * 富文本最多留多少字符。
+ *
+ * 够贴回一个网页片段（一屏文章），但不该把整个网页的 DOM 塞进库里：
+ * 那些行既搜不到也用不上，只会把数据库撑大、把列表查询拖慢。
+ */
+export const RICH_HTML_MAX = 200_000;
+
 export type SkipKind = 'skip-files' | 'skip-rich' | 'none';
 
+/** 轻提示的种类：两类"跳过" + 一类"按来源排除"（不含 'none'，它从不需要提示）。 */
+export type NoticeKind = 'skip-files' | 'skip-rich' | 'excluded';
+
 /** 跳过时的轻提示文案（每类只提示一次）。 */
-export const SKIP_NOTICE: Record<'skip-files' | 'skip-rich', string> = {
-  'skip-files': '检测到文件列表，本轮不记录文件',
-  'skip-rich': '只有 HTML、没有纯文本，本轮不记录',
+export const SKIP_NOTICE: Record<NoticeKind, string> = {
+  // 文件列表现在会真的落库；提示只在"认出是文件却解不出路径"时出现。
+  'skip-files': '检测到文件列表，但解不出可用的文件路径',
+  'skip-rich': '只有 HTML、没有纯文本',
+  excluded: '已跳过该来源应用的剪贴板内容',
 };
+
+/** 按来源排除时的文案（带上 exe 名，用户才知道是哪条规则生效了）。 */
+export function excludedNotice(exe: string): string {
+  return '已跳过 ' + exe + ' 的剪贴板内容';
+}
 
 /**
  * 剪贴板窄接口：Electron 的 `clipboard` 结构上就满足它。
@@ -64,10 +83,13 @@ export interface ClipboardLike {
 export class LastSeen {
   text: string | null = null;
   imageSig: string | null = null;
+  /** 上一批文件列表的签名（三者互斥：文本 / 图片 / 文件）。 */
+  filesSig: string | null = null;
 
   reset(): void {
     this.text = null;
     this.imageSig = null;
+    this.filesSig = null;
   }
 }
 
@@ -76,8 +98,10 @@ export interface RecordSink {
   /** 与轮询器共享的"上次值"。 */
   readonly lastSeen: LastSeen;
   /** sourceApp 未知（助手不可用 / 超时 / 排除自身）时传 undefined，**绝不因此不记录**。 */
-  recordText(text: string, sourceApp?: string): unknown;
+  recordText(text: string, sourceApp?: string, richHtml?: string): unknown;
   recordImage(img: NativeImageLike, sig?: string | null, sourceApp?: string): unknown;
+  /** 复制文件：paths 是绝对路径列表（**绝对路径不出主进程**，落库只存计数与相对信息）。 */
+  recordFiles(paths: string[], sig?: string | null, sourceApp?: string): unknown;
 }
 
 /**
@@ -116,14 +140,27 @@ export function hasTextFormat(formats: string[]): boolean {
   return lower(formats).some((f) => f.split(';')[0]!.trim() === 'text/plain');
 }
 
+/** 有没有 text/html（忽略 `; charset=...` 后缀）。 */
+export function hasHtmlFormat(formats: string[]): boolean {
+  return lower(formats).some((f) => f.split(';')[0]!.trim() === 'text/html');
+}
+
+/** 有没有 text/uri-list（读它之前必须先问一句：别的格式下 readText() 是无关内容）。 */
+export function hasUriListFormat(formats: string[]): boolean {
+  return lower(formats).some((f) => f.split(';')[0]!.trim() === 'text/uri-list');
+}
+
 /**
- * 这一跳要不要跳过（纯函数）。
+ * 这一跳属于哪一类（纯函数）。
  *
- * - `text/uri-list` / `FileNameW` → `skip-files`（文件列表，本轮不做）；
+ * - `text/uri-list` / `FileNameW` → `skip-files`（文件列表，**要采集**）；
  * - 含 `image/*` → `none`（图片优先级高于 html）；
  * - 含 `text/plain` → `none`；
- * - 只有 `text/html` 而无 `text/plain` → `skip-rich`；
+ * - 只有 `text/html` 而无 `text/plain` → `skip-rich`（**也要采集**）；
  * - 其余（空剪贴板等）→ `none`。
+ *
+ * ★ v0.6.0 起 `skip-files` / `skip-rich` 都不再表示"丢弃"：这两类现在真的会落库，
+ *   枚举值只为兼容旧调用点而保留。tick 里**不能**因为它们而 return。
  */
 export function shouldSkipFormats(formats: string[]): SkipKind {
   const list = lower(formats);
@@ -248,8 +285,8 @@ export interface ClipboardWatcherDeps {
   isGhostActive?: () => boolean;
   /** 轮询间隔，默认 300ms（测试可调小）。 */
   intervalMs?: number;
-  /** 跳过文件列表 / 富文本时的轻提示（每类只回调一次）。 */
-  onNotice?: (kind: 'skip-files' | 'skip-rich', message: string) => void;
+  /** 轻提示（跳过文件列表 / 富文本、按来源排除；同类只回调一次）。 */
+  onNotice?: (kind: NoticeKind, message: string) => void;
   /** 诊断日志出口，默认走 `writeWatcherTrace`。 */
   onTrace?: (message: string) => void;
   /**
@@ -257,6 +294,22 @@ export interface ClipboardWatcherDeps {
    * （每跳都问助手等于每 300ms 一次 IPC），缺省视为"来源未知"。
    */
   foregroundExe?: () => Promise<string | null>;
+  /**
+   * 被排除的来源应用（小写 exe 名列表）。命中即**整条丢弃**、不落库——
+   * 这是给密码管理器留的闸门：密码明文一旦进了库就是永久的，删记录也不代表磁盘上没留下。
+   *
+   * 传取值函数而不是数组：设置页随时会改，快照会失效。
+   */
+  excludeApps?: () => string[];
+  /**
+   * 读剪贴板上的文件路径（原生助手）。**只有真的检测到文件格式时才会调用。**
+   *
+   * ★ 为什么不直接用 clip.readBuffer('FileNameW')：实测 Electron 37 读别的程序写的
+   *   CF_HDROP 会返回空字节（has 是 true，readBuffer 却是 0 字节），只有原生助手能拿到
+   *   全部路径。返回 null 表示"助手没答上来"（不可用/超时/剪贴板被占用），
+   *   调用方要退回 Electron 的通道，**不能**当成"没有文件"。
+   */
+  readFiles?: () => Promise<string[] | null>;
 }
 
 /**
@@ -270,9 +323,18 @@ export class ClipboardWatcher {
   private readonly recorder: RecordSink;
   private readonly isGhostActive: () => boolean;
   private readonly intervalMs: number;
-  private readonly onNotice: ((kind: 'skip-files' | 'skip-rich', message: string) => void) | undefined;
+  private readonly onNotice: ((kind: NoticeKind, message: string) => void) | undefined;
   private readonly onTrace: ((message: string) => void) | undefined;
   private readonly foregroundExe: (() => Promise<string | null>) | undefined;
+  private readonly excludeApps: () => string[];
+  private readonly readFiles: (() => Promise<string[] | null>) | undefined;
+  /**
+   * 正在等助手回文件列表。
+   *
+   * ★ 文件列表要比对文本多一次异步往返（IPC 到原生助手），而剪贴板里躺着一批文件时
+   *   每 300ms 都会跳进 handleFiles。没有这个闸门就会并发起 N 条重复记录。
+   */
+  private filesPending = false;
   /** 记录串行链（见 enqueueRecord）。 */
   private recordChain: Promise<void> = Promise.resolve();
   /** 已提示过的跳过类别：第一次给一次轻提示，之后不再打扰。 */
@@ -291,6 +353,8 @@ export class ClipboardWatcher {
     this.onNotice = deps.onNotice;
     this.onTrace = deps.onTrace;
     this.foregroundExe = deps.foregroundExe;
+    this.excludeApps = deps.excludeApps ?? (() => []);
+    this.readFiles = deps.readFiles;
   }
 
   /** 开始轮询（幂等）。 */
@@ -335,27 +399,27 @@ export class ClipboardWatcher {
     try {
       const fmts = this.readFormats();
 
+      // ★ 文件分支必须排在图片与文本**之前**：命中文件就整跳结束，
+      //   否则那一串路径会被 handleText 当成一条纯文本再记一遍。
+      // ★ 判定用 has() 而不是格式列表：Electron 写 FileNameW 之后 availableFormats()
+      //   只报 text/uri-list（见 files.ts 文件头）。shouldSkipFormats 兜住"只写 uri-list"的程序。
       if (this.clip.has(FILE_NAME_FORMAT) || shouldSkipFormats(fmts) === 'skip-files') {
-        this.notice('skip-files');
+        this.handleFiles(fmts, suppressed);
         this.failures = 0;
         return;
       }
-      if (shouldSkipFormats(fmts) === 'skip-rich') {
-        this.notice('skip-rich');
-        this.failures = 0;
-        return;
-      }
+      // skip-rich 不再丢弃：有 text/html 就带着 HTML 一起记（见 handleText）。
       if (hasImageFormat(fmts)) {
         this.handleImage(fmts, suppressed);
         this.failures = 0;
         return;
       }
-      if (hasTextFormat(fmts)) {
-        this.handleText(suppressed);
+      if (hasTextFormat(fmts) || hasHtmlFormat(fmts)) {
+        this.handleText(fmts, suppressed);
         this.failures = 0;
         return;
       }
-      // 空剪贴板 / 只有 html 且被上面挡掉等：什么都不做
+      // 空剪贴板 / 只有我们认不出的格式：什么都不做
       this.failures = 0;
     } catch (e) {
       this.failures += 1;
@@ -379,6 +443,7 @@ export class ClipboardWatcher {
       if (probe.sig === seen.imageSig) return;
       seen.imageSig = probe.sig;
       seen.text = null;
+      seen.filesSig = null;
     }
 
     // 自己刚写进去的：只更新"上次值"，不入库
@@ -388,22 +453,116 @@ export class ClipboardWatcher {
     if (!img || (typeof img.isEmpty === 'function' && img.isEmpty())) return;
     this.enqueueRecord(async () => {
       const sourceApp = await this.resolveSourceApp();
+      if (this.dropExcluded(sourceApp)) return;
       this.recorder.recordImage(img, probe.sig, sourceApp);
     });
   }
 
-  private handleText(suppressed: boolean): void {
+  /**
+   * 复制文件（P0-1）。
+   *
+   * 只在真的变了才落库：同一批文件在剪贴板里躺着时，300ms 一跳会一直读到它。
+   * 命中文件时 text / imageSig 一律清空——三者互斥，留着"上次是文本"的残留
+   * 会让紧接着的一次复制文本被判成重复而丢掉。
+   */
+  private handleFiles(fmts: string[], suppressed: boolean): void {
+    if (this.filesPending) {
+      // 上一批还在等助手回包：这一跳先不重入。
+      // ★ 但要把它这次的自我抑制标记留下来——丢掉的话，程序自己写进剪贴板的那批文件
+      //   会在助手回包后被当成一次真实复制记进历史。
+      if (suppressed) this.suppress = true;
+      return;
+    }
+    const readFiles = this.readFiles;
+    if (!readFiles) {
+      this.processFiles(fmts, suppressed, null);
+      return;
+    }
+    this.filesPending = true;
+    void readFiles()
+      .catch(() => null)
+      .then((helperPaths) => {
+        this.filesPending = false;
+        // ★ 空数组按"没答上来"处理：助手在 OpenClipboard 失败时也回 []，
+        //   而 has('FileNameW') 明明为真——那正是需要退到 Electron 通道的场合。
+        const answered = Array.isArray(helperPaths) && helperPaths.length > 0 ? helperPaths : null;
+        this.processFiles(fmts, suppressed, answered);
+      });
+  }
+
+  /** handleFiles 的实际工作；helperPaths 为 null 表示助手没答上来（走 Electron 退路）。 */
+  private processFiles(fmts: string[], suppressed: boolean, helperPaths: string[] | null): void {
+    const seen = this.recorder.lastSeen;
+
+    // 读字节失败（格式存在但被别的进程抢走）不该让整跳记成一次"剪贴板读取失败"：
+    // 那种失败会每 300ms 累加一次，把 trace 刷成噪音。
+    // ★ 助手已经给出路径时不再碰这条通道：实测它对别的程序写的 CF_HDROP 会返回空字节，
+    //   白读一次只增加被抢占的概率。
+    let fileNameW: Buffer | null = null;
+    if (helperPaths === null && typeof this.clip.readBuffer === 'function') {
+      try {
+        fileNameW = this.clip.readBuffer(FILE_NAME_FORMAT) ?? null;
+      } catch {
+        fileNameW = null;
+      }
+    }
+    // ★ 只有格式列表里真有 text/uri-list 才读文本：readText() 在纯文件剪贴板上
+    //   可能拿到别的内容（某些程序顺手写一条纯文本），那会把无关文字当路径解。
+    const uriList = hasUriListFormat(fmts) ? (this.clip.readText() ?? null) : null;
+    const paths = readFilePaths({ formats: fmts, fileNameW, uriList, helperPaths });
+
+    if (paths.length === 0) {
+      // 认出是文件剪贴板却解不出路径（短名/坏字节/只有目录 URI）：保持原有轻提示，别静默。
+      this.notice('skip-files');
+      return;
+    }
+
+    const sig = filePathsSignature(paths);
+    if (seen.filesSig === sig) return;
+    seen.filesSig = sig;
+    seen.text = null;
+    seen.imageSig = null;
+
+    if (suppressed) return;
+
+    this.enqueueRecord(async () => {
+      const sourceApp = await this.resolveSourceApp();
+      if (this.dropExcluded(sourceApp)) return;
+      this.recorder.recordFiles(paths, sig, sourceApp);
+    });
+  }
+
+  private handleText(fmts: string[], suppressed: boolean): void {
     const seen = this.recorder.lastSeen;
     const text = this.clip.readText() ?? '';
-    if (text.length === 0) return;
+    const richHtml = hasHtmlFormat(fmts) ? this.readRichHtml() : undefined;
+    // 只有 HTML、没有纯文本时 text 为空，但 HTML 本身就是要记的东西。
+    if (text.length === 0 && richHtml === undefined) return;
     if (text === seen.text) return;
     seen.text = text;
     seen.imageSig = null;
+    seen.filesSig = null;
     if (suppressed) return;
     this.enqueueRecord(async () => {
       const sourceApp = await this.resolveSourceApp();
-      this.recorder.recordText(text, sourceApp);
+      if (this.dropExcluded(sourceApp)) return;
+      this.recorder.recordText(text, sourceApp, richHtml);
     });
+  }
+
+  /** 读 text/html 原始字节（拿不到 / 空串 → undefined，调用方按"没有富文本"处理）。 */
+  private readRichHtml(): string | undefined {
+    if (typeof this.clip.readBuffer !== 'function') return undefined;
+    try {
+      const buf = this.clip.readBuffer('text/html');
+      if (!buf || buf.length === 0) return undefined;
+      const html = buf.toString('utf8');
+      if (html.length === 0) return undefined;
+      return html.length > RICH_HTML_MAX ? html.slice(0, RICH_HTML_MAX) : html;
+    } catch {
+      // 读不到富文本不影响纯文本记录
+      return undefined;
+    }
   }
 
   /**
@@ -443,11 +602,47 @@ export class ClipboardWatcher {
     }
   }
 
-  private notice(kind: 'skip-files' | 'skip-rich'): void {
-    if (this.noticed.has(kind)) return;
-    this.noticed.add(kind);
+  /**
+   * 这个来源应用被排除吗（纯比较，不做 IO）。
+   *
+   * 大小写不敏感：设置里存的是小写，但助手/旧数据可能给别的写法。
+   */
+  private isExcluded(sourceApp?: string): boolean {
+    if (typeof sourceApp !== 'string') return false;
+    const exe = sourceApp.trim().toLowerCase();
+    if (exe.length === 0) return false;
+    let list: string[];
     try {
-      this.onNotice?.(kind, SKIP_NOTICE[kind]);
+      list = this.excludeApps() ?? [];
+    } catch {
+      // 设置读失败就当没配排除——宁可多记一条，也不要因为读设置失败把整条采集停掉。
+      return false;
+    }
+    for (const item of list) {
+      if (typeof item === 'string' && item.trim().toLowerCase() === exe) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 排除命中时给一次轻提示并返回 true（调用方据此放弃落库）。
+   *
+   * ★ 语义是**整条丢弃**，不是"记了但隐藏"：被排除应用的内容一旦入库就是永久的，
+   *   删记录也不代表磁盘上没有残留，所以这条路径必须真的不写。
+   */
+  private dropExcluded(sourceApp?: string): boolean {
+    if (!this.isExcluded(sourceApp)) return false;
+    // 按"种类 + 应用名"去重：同一个密码管理器只提醒一次，换一个应用再提醒一次。
+    this.notice('excluded', excludedNotice(sourceApp ?? ''), 'excluded:' + (sourceApp ?? '').toLowerCase());
+    return true;
+  }
+
+  private notice(kind: NoticeKind, message?: string, dedupeKey?: string): void {
+    const key = dedupeKey ?? kind;
+    if (this.noticed.has(key)) return;
+    this.noticed.add(key);
+    try {
+      this.onNotice?.(kind, message ?? SKIP_NOTICE[kind]);
     } catch {
       // 提示失败不影响轮询
     }

@@ -57,6 +57,42 @@ describe('parseHelperLine', () => {
     }
   });
 
+  // ★ 用 JSON.stringify 造行：手写转义太容易数错反斜杠，而真实助手发的就是 JSON。
+  it('FILES <json数组>：解析出路径列表', () => {
+    const paths = ['C:\\a\\b.txt', 'D:\\c.txt'];
+    expect(parseHelperLine('FILES ' + JSON.stringify(paths))).toEqual({ kind: 'FILES', paths });
+    expect(parseHelperLine('FILES []')).toEqual({ kind: 'FILES', paths: [] });
+  });
+
+  it('FILES 的路径里有空格也照收（不能按空白切分）', () => {
+    const paths = ['C:\\Program Files\\a.txt'];
+    expect(parseHelperLine('FILES ' + JSON.stringify(paths))).toEqual({ kind: 'FILES', paths });
+  });
+
+  it('FILES 畸形行返回 UNKNOWN：缺 JSON / 非数组 / 元素全非字符串', () => {
+    for (const line of ['FILES', 'FILES ', 'FILES not-json', 'FILES {"a":1}', 'FILES [1,2]']) {
+      expect(parseHelperLine(line)).toEqual({ kind: 'UNKNOWN', raw: line });
+    }
+  });
+
+  it('FILES 数组里混了非字符串元素时只留字符串', () => {
+    expect(parseHelperLine('FILES ' + JSON.stringify(['C:\\a.txt', 3]))).toEqual({
+      kind: 'FILES',
+      paths: ['C:\\a.txt'],
+    });
+  });
+
+  it('FILESET <返回码>：0 成功，非 0 是失败码', () => {
+    expect(parseHelperLine('FILESET 0')).toEqual({ kind: 'FILESET', code: 0 });
+    expect(parseHelperLine('FILESET 5')).toEqual({ kind: 'FILESET', code: 5 });
+  });
+
+  it('FILESET 畸形行返回 UNKNOWN：缺码 / 非十进制 / 多一段', () => {
+    for (const line of ['FILESET', 'FILESET ', 'FILESET x', 'FILESET -1', 'FILESET 0 1']) {
+      expect(parseHelperLine(line)).toEqual({ kind: 'UNKNOWN', raw: line });
+    }
+  });
+
   it('PONG <标记>', () => {
     expect(parseHelperLine('PONG tag')).toEqual({ kind: 'PONG', tag: 'tag' });
   });
@@ -232,6 +268,74 @@ describe('HelperClient 与假助手进程', () => {
     });
     const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl });
     await expect(client.foregroundExe()).resolves.toBeNull();
+    await client.dispose();
+  });
+
+  it('readFiles 拿到 FILES 行的路径列表', async () => {
+    const { spawnImpl } = makeFake((line, child) => {
+      if (line === 'FILES') {
+        child.stdout.emit('data', 'FILES ' + JSON.stringify(['C:\\a.txt', 'C:\\b.txt']) + '\n');
+      }
+    });
+    const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl });
+    await expect(client.readFiles()).resolves.toEqual(['C:\\a.txt', 'C:\\b.txt']);
+    await client.dispose();
+  });
+
+  it('readFiles 拿到空数组（剪贴板上没有文件）', async () => {
+    const { spawnImpl } = makeFake((line, child) => {
+      if (line === 'FILES') child.stdout.emit('data', 'FILES []\n');
+    });
+    const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl });
+    await expect(client.readFiles()).resolves.toEqual([]);
+    await client.dispose();
+  });
+
+  it('助手不回 FILES → 超时兜底返回 null（不能当成"没有文件"）', async () => {
+    const { spawnImpl } = makeFake(() => {});
+    const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl, timeoutMs: 30 });
+    await expect(client.readFiles()).resolves.toBeNull();
+    await client.dispose();
+  });
+
+  it('writeFiles 发的是单行 JSON，且码 0 → true', async () => {
+    const seen: string[] = [];
+    const { spawnImpl } = makeFake((line, child) => {
+      seen.push(line);
+      if (line.startsWith('FILESET ')) child.stdout.emit('data', 'FILESET 0\n');
+    });
+    const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl });
+    const paths = ['C:\\Program Files\\a.txt', 'D:\\b.txt'];
+    await expect(client.writeFiles(paths)).resolves.toBe(true);
+    // 路径里有空格，必须是整段 JSON 而不是空格分隔的多段。
+    expect(seen).toContain('FILESET ' + JSON.stringify(paths));
+    await client.dispose();
+  });
+
+  it('writeFiles 收到非 0 码 → false（助手写不出标准 CF_HDROP）', async () => {
+    const { spawnImpl } = makeFake((line, child) => {
+      if (line.startsWith('FILESET ')) child.stdout.emit('data', 'FILESET 5\n');
+    });
+    const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl });
+    await expect(client.writeFiles(['C:\\a.txt'])).resolves.toBe(false);
+    await client.dispose();
+  });
+
+  it('writeFiles 助手不回包 → 超时 false，不抛异常', async () => {
+    const { spawnImpl } = makeFake(() => {});
+    const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl, timeoutMs: 30 });
+    await expect(client.writeFiles(['C:\\a.txt'])).resolves.toBe(false);
+    await client.dispose();
+  });
+
+  it('writeFiles 空数组直接 false，不打扰助手', async () => {
+    const seen: string[] = [];
+    const { spawnImpl } = makeFake((line) => {
+      seen.push(line);
+    });
+    const client = new HelperClient({ exePath: 'C:\\fake\\x.exe', spawnImpl });
+    await expect(client.writeFiles([])).resolves.toBe(false);
+    expect(seen.filter((l) => l.startsWith('FILESET'))).toEqual([]);
     await client.dispose();
   });
 

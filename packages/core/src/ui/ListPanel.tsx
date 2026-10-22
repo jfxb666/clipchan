@@ -57,6 +57,7 @@ export function ListPanel({
   onOptimize,
   onLoadMore,
   onContextMenu,
+  onDragStart,
 }: {
   items: ClipItemDTO[];
   kind: KindFilter;
@@ -74,6 +75,8 @@ export function ListPanel({
   onLoadMore: () => void;
   /** 右键菜单入口；未传则卡片不响应右键。 */
   onContextMenu?: (id: string, x: number, y: number) => void;
+  /** 拖出到外部应用（v0.6.0）；未传则卡片不可拖。 */
+  onDragStart?: (id: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -94,6 +97,7 @@ export function ListPanel({
     onHover,
     onOptimize,
     onContextMenu,
+    onDragStart,
   };
 
   return (
@@ -132,6 +136,7 @@ export function ListPanel({
                   onHover={onHover}
                   onOptimize={onOptimize}
                   onContextMenu={onContextMenu}
+                  onDragStart={onDragStart}
                 />
               ))}
             </div>

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Download, FolderOpen, Ghost, Upload } from 'lucide-react';
+import { Download, FolderOpen, Ghost, Upload, X } from 'lucide-react';
 import type {
   AiError,
   AiProvider,
@@ -11,6 +11,7 @@ import type {
   OcrStatus,
   Settings,
   ThemeMode,
+  UpdateStatus,
 } from '../types';
 import { DEFAULT_SETTINGS } from '../types';
 import { cn, formatClock, formatRemaining } from './util';
@@ -19,6 +20,14 @@ import { HotkeyRecorder } from './HotkeyRecorder';
 import { AiProviderForm } from './AiProviderFormCard';
 import { aiErrorMessage, protocolLabel } from './aiProviderForm';
 import { ocrProgressText, ocrStatusText } from './ocrView';
+import { canClickUpdate, updateButtonLabel, updateStatusText } from './updateView';
+import {
+  EXCLUDE_APPS_MAX,
+  addExcludeApp,
+  excludeAppsHint,
+  removeExcludeApp,
+  suggestExcludeApps,
+} from './excludeApps';
 
 /**
  * 设置页（spec §6.7）：快捷键 / 外观 / 历史 / 小组件 / 数据 五个分区。
@@ -48,7 +57,7 @@ export const WIDGET_SIZE_MAX = 400;
 export const GHOST_MAX_MINUTES = 720;
 export const GHOST_PRESETS = [5, 10, 30, 60] as const;
 /** 底部展示的版本号。 */
-export const APP_VERSION = '0.5.0';
+export const APP_VERSION = '0.6.0';
 
 const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: 'auto', label: '跟随系统' },
@@ -153,6 +162,9 @@ export function SettingsView({
   ocrStatus,
   ocrProgress,
   onOcrDownload,
+  updateStatus,
+  onCheckUpdate,
+  onApplyUpdate,
 }: {
   settings: Settings;
   ghost: GhostState;
@@ -188,6 +200,11 @@ export function SettingsView({
   ocrProgress: OcrProgress | null;
   /** 下载缺失语言包。设置页不 getPlatform，一律由 App 注入（同 aiProviders 那一组）。 */
   onOcrDownload: () => void;
+  /** 更新检查的当前状态；null = 还没点过（不显示「已是最新」误导人）。 */
+  updateStatus: UpdateStatus | null;
+  onCheckUpdate: () => void;
+  /** 只有 downloaded 状态才真的重启安装，其余状态按钮不出现。 */
+  onApplyUpdate: () => void;
 }) {
   // 危险操作两次点击确认（spec §6.7）：第一次点变成"再点一次"，3 秒后自动复位。
   const [pendingClear, setPendingClear] = useState<'unpinned' | 'all' | null>(null);
@@ -214,6 +231,9 @@ export function SettingsView({
   const custom = Number(customMinutes);
   const customValid = Number.isFinite(custom) && custom > 0 && custom <= GHOST_MAX_MINUTES;
 
+  /** 「排除的应用」输入框的草稿；提交后清空。 */
+  const [excludeDraft, setExcludeDraft] = useState('');
+
   // 「AI 模型」区：'new' = 新增中，字符串 = 正在编辑的 provider id，null = 都没展开。
   const [aiEditing, setAiEditing] = useState<'new' | string | null>(null);
   const [aiTesting, setAiTesting] = useState<string | null>(null);
@@ -234,6 +254,16 @@ export function SettingsView({
     } finally {
       setAiTesting(null);
     }
+  }
+
+  /**
+   * 加一条排除项。
+   * ★ 归一化与去重都在 excludeApps 的纯函数里（能单测）；这里只负责把结果写回 settings，
+   *   输入框无论成功与否都清空 —— 留着原文会让人以为没加上而再点一次。
+   */
+  function addExclude() {
+    onUpdate({ excludeApps: addExcludeApp(settings.excludeApps, excludeDraft) });
+    setExcludeDraft('');
   }
 
   async function removeProvider(id: string) {
@@ -398,6 +428,79 @@ export function SettingsView({
             {mode === 'widget' ? '切回主面板' : '切换到小组件'}
           </button>
         </Row>
+      </Section>
+
+      <Section title="排除的应用">
+        <Row
+          label="不记录这些来源"
+          hint="填 exe 文件名（也可以直接粘完整路径），来自它们的复制不会被记录"
+        >
+          <input
+            value={excludeDraft}
+            onChange={(event) => setExcludeDraft(event.target.value)}
+            onKeyDown={(event) => {
+              // 回车即添加：这类「输入 + 加一条」的框，用户按回车的概率远高于点按钮。
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                addExclude();
+              }
+            }}
+            placeholder="例如 chrome.exe"
+            className="w-[180px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]"
+          />
+          <button
+            type="button"
+            disabled={excludeDraft.trim() === '' || settings.excludeApps.length >= EXCLUDE_APPS_MAX}
+            onClick={addExclude}
+            className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            添加
+          </button>
+        </Row>
+
+        {/* 常用项一键添加：只列出还没加过的，免得点出一堆重复。 */}
+        {(() => {
+          const pending = suggestExcludeApps().filter((name) => !settings.excludeApps.includes(name));
+          if (pending.length === 0) return null;
+          return (
+            <div className="flex flex-wrap items-center gap-[4px]">
+              <span className="text-[11px] text-ink-3">常用：</span>
+              {pending.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => onUpdate({ excludeApps: addExcludeApp(settings.excludeApps, name) })}
+                  className="rounded-full border border-line px-snug py-[2px] text-[11px] text-ink-2 hover:bg-surface-2 hover:text-ink"
+                >
+                  + {name}
+                </button>
+              ))}
+            </div>
+          );
+        })()}
+
+        {settings.excludeApps.length > 0 ? (
+          <ul className="flex flex-col gap-[2px]">
+            {settings.excludeApps.map((name) => (
+              <li
+                key={name}
+                className="flex items-center gap-snug rounded-button bg-surface-2 px-snug py-[3px]"
+              >
+                <span className="min-w-0 flex-1 truncate text-[11px] text-ink">{name}</span>
+                <button
+                  type="button"
+                  title={'不再排除 ' + name}
+                  onClick={() => onUpdate({ excludeApps: removeExcludeApp(settings.excludeApps, name) })}
+                  className="shrink-0 rounded-full p-[2px] text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+                >
+                  <X size={11} aria-hidden />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        <p className="text-[11px] leading-[1.6] text-ink-3">{excludeAppsHint(settings.excludeApps)}</p>
       </Section>
 
       <Section title="AI 模型">
@@ -673,6 +776,27 @@ export function SettingsView({
             打开文件夹
           </button>
         </Row>
+      </Section>
+
+      <Section title="版本与更新">
+        <Row label="自动更新" hint={updateStatusText(updateStatus, APP_VERSION)}>
+          <button
+            type="button"
+            onClick={updateStatus?.state === 'downloaded' ? onApplyUpdate : onCheckUpdate}
+            disabled={!canClickUpdate(updateStatus)}
+            className={cn(
+              'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px]',
+              canClickUpdate(updateStatus)
+                ? 'text-ink-2 hover:bg-surface-2'
+                : 'cursor-not-allowed text-ink-3 opacity-60',
+            )}
+          >
+            {updateButtonLabel(updateStatus)}
+          </button>
+        </Row>
+        <p className="text-[11px] leading-[1.6] text-ink-3">
+          更新包从 GitHub Releases 下载，不上传任何本地数据；下载完成后重启应用生效。
+        </p>
       </Section>
 
       <p className="pt-base text-center text-[11px] text-ink-3">剪贴板酱 v{APP_VERSION}</p>

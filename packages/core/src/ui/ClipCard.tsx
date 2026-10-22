@@ -31,6 +31,8 @@ export interface ClipCardProps {
   onOptimize?: (id: string) => void;
   /** 右键菜单入口：回调里带出屏幕坐标，菜单由上层定位。 */
   onContextMenu?: (id: string, x: number, y: number) => void;
+  /** 拖出到外部应用（v0.6.0）：传入才让卡片可拖，不传则与旧版一致。 */
+  onDragStart?: (id: string) => void;
 }
 
 export function ClipCard({
@@ -43,6 +45,7 @@ export function ClipCard({
   onHover,
   onOptimize,
   onContextMenu,
+  onDragStart,
 }: ClipCardProps) {
   const isCode = item.kind === 'code';
   const segments = highlightSegments(item.preview, term);
@@ -61,6 +64,18 @@ export function ClipCard({
         onSelect(item.id, multi ? { multi: true } : undefined);
       }}
       onDoubleClick={() => onPaste(item.id)}
+      // ★ 拖出到外部（P1-5）：HTML5 拖拽在这里必须被**阻止**。
+      //   浏览器默认的 dataTransfer 拖拽出不了窗口；真正把内容交给资源管理器 / 其它
+      //   应用的是主进程的 webContents.startDrag，所以这里只把 id 报上去，
+      //   preventDefault 掉默认行为（否则 Electron 会先跑一遍空的 HTML5 拖拽）。
+      //   framer-motion 的 filterProps 在 draggable 为真时会把 onDragStart 透传给
+      //   DOM 节点（见其 filter-props：props["draggable"] && key.startsWith("onDrag")），
+      //   所以这两个属性必须成对出现。
+      draggable={onDragStart !== undefined}
+      onDragStart={(event) => {
+        event.preventDefault();
+        onDragStart?.(item.id);
+      }}
       onContextMenu={(event) => {
         event.preventDefault();
         onContextMenu?.(item.id, event.clientX, event.clientY);

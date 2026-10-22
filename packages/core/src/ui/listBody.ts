@@ -16,4 +16,6 @@ export interface ListBodyProps {
   onHover?: (id: string | null) => void;
   onOptimize?: (id: string) => void;
   onContextMenu?: (id: string, x: number, y: number) => void;
+  /** 拖出到外部应用（v0.6.0）；未传则卡片不可拖。 */
+  onDragStart?: (id: string) => void;
 }

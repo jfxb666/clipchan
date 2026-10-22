@@ -1,4 +1,15 @@
-import { Code2, FileText, Image as ImageIcon, Layers, Link2, Settings, Sparkles, Star, Trash2 } from 'lucide-react';
+import {
+  Bookmark,
+  Code2,
+  FileText,
+  Image as ImageIcon,
+  Layers,
+  Link2,
+  Settings,
+  Sparkles,
+  Star,
+  Trash2,
+} from 'lucide-react';
 import type { KindFilter } from '../types';
 import type { View } from '../state/store';
 import { cn } from './util';
@@ -35,6 +46,7 @@ export function Sidebar({
   onOpenTrash,
   onOpenSettings,
   onOpenOptimize,
+  onOpenSnippets,
 }: {
   kind: KindFilter;
   view: View;
@@ -43,6 +55,8 @@ export function Sidebar({
   onOpenSettings: () => void;
   /** 传入才渲染常驻「优化」入口；不传时侧栏与旧版完全一致。 */
   onOpenOptimize?: () => void;
+  /** 传入才渲染「片段」入口（v0.6.0 片段库）；不传时侧栏与旧版完全一致。 */
+  onOpenSnippets?: () => void;
 }) {
   /** 分类项、优化入口与底部两个入口共用同一套外观，避免各处各写一遍尺寸与配色。 */
   const itemClass = (active: boolean): string =>
@@ -76,6 +90,18 @@ export function Sidebar({
         <button type="button" onClick={onOpenOptimize} className={itemClass(false)} title="提示词优化">
           <Sparkles size={17} aria-hidden />
           <span className="text-[10px] leading-none">优化</span>
+        </button>
+      ) : null}
+      {/* 片段库同理：View = 'snippets'，是独立视图而非分类筛选。 */}
+      {onOpenSnippets ? (
+        <button
+          type="button"
+          onClick={onOpenSnippets}
+          className={itemClass(view === 'snippets')}
+          title="片段库"
+        >
+          <Bookmark size={17} aria-hidden />
+          <span className="text-[10px] leading-none">片段</span>
         </button>
       ) : null}
       <div className="flex-1" />

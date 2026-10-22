@@ -18,6 +18,7 @@ export function SourceGroupList({
   onHover,
   onOptimize,
   onContextMenu,
+  onDragStart,
 }: ListBodyProps) {
   const groups = groupBySource(items);
 
@@ -44,6 +45,7 @@ export function SourceGroupList({
                 onHover={onHover}
                 onOptimize={onOptimize}
                 onContextMenu={onContextMenu}
+                onDragStart={onDragStart}
               />
             ))}
           </div>

@@ -27,12 +27,16 @@ import { DEFAULT_IMAGE_BUDGET_MB } from './images-policy';
 import { imageAbs, imagesDir, thumbsDir, toRelativePath } from './paths';
 import {
   LastSeen,
+  RICH_HTML_MAX,
   hasImageFormat,
   hasTextFormat,
   probeImage,
   shouldSkipFormats,
   type ClipboardLike,
 } from './watcher';
+
+/** 只有 text/html、没有纯文本时写进 content 的占位描述（见 recordText 里的注释）。 */
+const RICH_ONLY_PLACEHOLDER = '（富文本内容，无纯文本）';
 
 export interface RecorderDeps {
   db: Db;
@@ -127,12 +131,21 @@ export class Recorder {
    * 截断与去重 db 层也会做一遍（两层结果一致），这里显式做是为了把
    * "10 万字符上限 + truncated 标记"这条规格钉在记录管线里，而不是散落在存储层。
    */
-  recordText(text: string, sourceApp?: string): InsertResult | null {
+  recordText(text: string, sourceApp?: string, richHtml?: string): InsertResult | null {
     if (typeof text !== 'string') return null;
     const cleaned = text.replace(/\0/g, '');
-    if (cleaned.length === 0) return null;
+    // 采集层已按 RICH_HTML_MAX 截过一次，这里只是兜底：绕开采集层直接调用时也不会撑爆库。
+    const rich =
+      typeof richHtml === 'string' && richHtml.trim().length > 0
+        ? richHtml.slice(0, RICH_HTML_MAX)
+        : '';
+    // 只有 text/html、没有纯文本的剪贴板（Word / 网页富文本）走的就是这条：text 为空但有 richHtml。
+    if (cleaned.length === 0 && rich.length === 0) return null;
 
-    let content = cleaned;
+    // ★ 纯 HTML 记录的 content 用一句占位描述：db.insertText 对空文本直接抛
+    //   'insertText: 空文本不入库'，而 items.content 正是列表预览的来源。留空会让这条
+    //   记录在列表里显示成一行空白，用户只会以为程序坏了。
+    let content = cleaned.length > 0 ? cleaned : RICH_ONLY_PLACEHOLDER;
     let truncated = false;
     if (content.length > TEXT_LIMIT) {
       content = content.slice(0, TEXT_LIMIT);
@@ -148,12 +161,36 @@ export class Recorder {
           // 去重命中时 db 不刷新来源：已有行记的是"最初那条"的真实来源，
           // 拿后来的来源覆盖它才是错的。
           sourceApp: normalizeSourceApp(sourceApp),
+          richHtml: rich.length > 0 ? rich : undefined,
         }),
       );
       this.afterWrite();
       return result;
     } catch (e) {
       this.log('文本记录失败（已忽略）：' + describeError(e));
+      return null;
+    }
+  }
+
+  /**
+   * 记录一次文件复制（资源管理器里 Ctrl+C 的 CF_HDROP）。
+   *
+   * `sig` 当前不使用：去重由 db 的 content_hash 负责（同一组路径算出同一个 hash），
+   * 采集层也已经用它自己的 filesSig 挡掉了重复 tick。签名保留是为了与 RecordSink 对齐。
+   */
+  recordFiles(paths: string[], sig?: string | null, sourceApp?: string): InsertResult | null {
+    if (!Array.isArray(paths)) return null;
+    const list = paths.filter((p) => typeof p === 'string' && p.length > 0);
+    if (list.length === 0) return null;
+
+    try {
+      const result = this.withEvictionWatch(() =>
+        this.db.insertFiles(list, { now: this.nowFn(), sourceApp: normalizeSourceApp(sourceApp) }),
+      );
+      this.afterWrite();
+      return result;
+    } catch (e) {
+      this.log('文件记录失败（已忽略）：' + describeError(e));
       return null;
     }
   }

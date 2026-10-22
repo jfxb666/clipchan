@@ -22,6 +22,7 @@ export function MasonryList({
   onHover,
   onOptimize,
   onContextMenu,
+  onDragStart,
 }: ListBodyProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(INITIAL_WIDTH);
@@ -60,6 +61,7 @@ export function MasonryList({
               onHover={onHover}
               onOptimize={onOptimize}
               onContextMenu={onContextMenu}
+              onDragStart={onDragStart}
             />
           ))}
         </div>

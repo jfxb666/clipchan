@@ -86,3 +86,12 @@ extraResources:
     to: clipchan-helper.exe
   - from: ../../build/icon.ico
     to: build/icon.ico
+
+# 自动更新（P0-3）：GitHub Releases 分发，不需要自建服务器。
+# ★ provider 必须是 github 且 owner/repo 与实际仓库一致，否则 electron-updater
+#   拼出来的 latest.yml 地址是 404，界面永远显示「已是最新」。
+# ★ 本轮手动上传，不加 --publish always（只让 electron-builder 额外产出 latest.yml）。
+publish:
+  provider: github
+  owner: jfxb666
+  repo: clipchan

@@ -46,11 +46,11 @@ export const TOAST_TTL_MS = 3000;
 export const CLEAR_CONFIRM_TTL_MS = 3000;
 
 /**
- * 顶层视图：列表 / 设置 / 今日词云 / 优化面板 / 回收站（spec §6.9 词云是应用内视图）。
+ * 顶层视图：列表 / 设置 / 今日词云 / 优化面板 / 回收站 / 片段库（spec §6.9 词云是应用内视图）。
  *
  * ★ 回收站也在这里，但**不持久化**：view 只是内存状态，重启回 'list'（既有行为，别顺手改）。
  */
-export type View = 'list' | 'settings' | 'wordcloud' | 'optimize' | 'trash';
+export type View = 'list' | 'settings' | 'wordcloud' | 'optimize' | 'trash' | 'snippets';
 /** 窗口形态：主面板 900×620 / 小组件 280×420（spec §6.6）。 */
 export type AppMode = 'main' | 'widget';
 
@@ -111,6 +111,11 @@ export interface ClipStoreActions {
   openOptimize(text: string): void;
   /** 关闭优化面板并清空原文。 */
   closeOptimize(): void;
+  /**
+   * 打开片段库（侧栏入口）。
+   * ★ 与 openOptimize 分开：片段库不需要带初值，也没有"关闭时清空"的配套状态。
+   */
+  openSnippets(): void;
   setMode(mode: AppMode): void;
   /** 切侧栏分类：清空选中并立刻重新请求（不走防抖）。 */
   setKind(kind: KindFilter): void;
@@ -304,6 +309,8 @@ export const useClipStore = create<ClipStore>((set, get) => ({
   openOptimize: (text) => set({ view: 'optimize', optimizeSource: text }),
 
   closeOptimize: () => set({ view: 'list', optimizeSource: '' }),
+
+  openSnippets: () => set({ view: 'snippets' }),
 
   setMode: (mode) => set({ mode }),
 

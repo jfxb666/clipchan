@@ -36,16 +36,29 @@ describe('menuItemsFor', () => {
     expect(labels({ kind: 'text', pinned: true })).not.toContain('收藏');
   });
 
-  it('顺序：view → copy → paste → optimize → pin → remove', () => {
+  it('顺序：view → copy → paste → paste-plain → optimize → pin → remove', () => {
     expect(actions({ kind: 'text', pinned: false, truncated: true })).toEqual([
       'view',
       'copy',
       'paste',
+      'paste-plain',
       'optimize',
       'pin',
       'remove',
     ]);
     expect(actions({ kind: 'image', pinned: true })).toEqual(['view', 'ocr', 'copy', 'paste', 'pin', 'remove']);
+  });
+
+  it('文本记录有 paste-plain，且紧跟在 paste 之后', () => {
+    const list = actions({ kind: 'text', pinned: false });
+    expect(list).toContain('paste-plain');
+    expect(list.indexOf('paste-plain')).toBe(list.indexOf('paste') + 1);
+    const plain = menuItemsFor({ kind: 'text', pinned: false }).find((e) => e.action === 'paste-plain');
+    expect(plain?.label).toBe('粘贴为纯文本');
+  });
+
+  it('图片记录没有 paste-plain（没有纯文本可贴）', () => {
+    expect(actions({ kind: 'image', pinned: false })).not.toContain('paste-plain');
   });
 
   it('图片菜单有 ocr 项，文案是「识别文字」', () => {

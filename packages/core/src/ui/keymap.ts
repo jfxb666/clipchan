@@ -33,6 +33,7 @@ export type KeyAction =
   | { type: 'remove-selected' }
   | { type: 'move'; delta: number; fromSearch?: boolean }
   | { type: 'paste' }
+  | { type: 'paste-plain' }
   | { type: 'undo' }
   | { type: 'none' };
 
@@ -68,6 +69,12 @@ export function resolveKey(event: KeyEventLike, ctx: KeyContext): KeyAction {
 
   if (key === 'ArrowDown') return { type: 'move', delta: 1 };
   if (key === 'ArrowUp') return { type: 'move', delta: -1 };
+  // ★ Ctrl+Shift+V / Ctrl+Shift+Enter = 只贴纯文本（丢掉原记录的富文本格式）。
+  //   shiftKey 必须单独读：按住 Shift 时 event.key 是大写 'V'，但输入法与布局
+  //   不一定给大写，只看字符大小写会漏判。判定放在 inSearch 之后 —— 搜索框里
+  //   Ctrl+Shift+V 仍是输入框自己的粘贴（与 Ctrl+Z 同一条"输入框优先"约定）。
+  if (mod && event.shiftKey === true && (key === 'v' || key === 'V')) return { type: 'paste-plain' };
+  if (mod && event.shiftKey === true && key === 'Enter') return { type: 'paste-plain' };
   if (key === 'Enter') return { type: 'paste' };
   return { type: 'none' };
 }

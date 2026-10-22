@@ -239,7 +239,14 @@ export interface GhostState {
 
 export interface PasteResult {
   ok: boolean;
-  reason?: 'no-target' | 'elevated' | 'send-failed';
+  /**
+   * 失败原因。
+   * - `no-target`：没有可粘贴的目标窗口（或窗口已失效）
+   * - `elevated`：目标窗口以管理员权限运行，助手无法投递
+   * - `send-failed`：投递失败
+   * - `missing`：记录还在但内容没了（文件路径列表为空、原文件被删）
+   */
+  reason?: 'no-target' | 'elevated' | 'send-failed' | 'missing';
 }
 
 export interface Capabilities {

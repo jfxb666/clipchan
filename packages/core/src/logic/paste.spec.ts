@@ -33,4 +33,10 @@ describe('pasteHintOf', () => {
   it('成功文案', () => {
     expect(pasteHintOf({ ok: true })).toBe('已粘贴');
   });
+
+  it('missing（记录内容已丢失）不能提示成"按 Ctrl+V"', () => {
+    const hint = pasteHintOf({ ok: false, reason: 'missing' });
+    expect(hint).not.toContain('Ctrl+V');
+    expect(hint).toContain('丢失');
+  });
 });

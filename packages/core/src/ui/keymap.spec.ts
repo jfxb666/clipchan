@@ -86,6 +86,30 @@ describe('resolveKey', () => {
   it('不带修饰键的 z 在列表里也不触发 undo', () => {
     expect(resolveKey(key('z'), ctx(false))).toEqual({ type: 'none' });
   });
+
+  it('Ctrl+Shift+V → paste-plain（大小写都认）', () => {
+    expect(resolveKey(key('v', { ctrl: true, shift: true }), ctx(false))).toEqual({ type: 'paste-plain' });
+    expect(resolveKey(key('V', { ctrl: true, shift: true }), ctx(false))).toEqual({ type: 'paste-plain' });
+    expect(resolveKey(key('V', { meta: true, shift: true }), ctx(false))).toEqual({ type: 'paste-plain' });
+  });
+
+  it('Ctrl+Shift+Enter → paste-plain', () => {
+    expect(resolveKey(key('Enter', { ctrl: true, shift: true }), ctx(false))).toEqual({ type: 'paste-plain' });
+  });
+
+  it('Ctrl+V 不拦（留给浏览器 / 输入框自己的粘贴）', () => {
+    expect(resolveKey(key('v', { ctrl: true }), ctx(false))).toEqual({ type: 'none' });
+  });
+
+  it('新增的 paste-plain 不影响 mod+M / mod+D / mod+Z', () => {
+    expect(resolveKey(key('m', { ctrl: true, shift: true }), ctx(false))).toEqual({ type: 'merge' });
+    expect(resolveKey(key('d', { ctrl: true, shift: true }), ctx(false, ['a']))).toEqual({ type: 'pin', id: 'a' });
+    expect(resolveKey(key('z', { ctrl: true, shift: true }), ctx(false))).toEqual({ type: 'undo' });
+  });
+
+  it('搜索框内 Ctrl+Shift+V 不拦（输入框优先，与 Ctrl+Z 同一约定）', () => {
+    expect(resolveKey(key('v', { ctrl: true, shift: true }), ctx(true))).toEqual({ type: 'none' });
+  });
 });
 
 describe('shouldPreventDefault', () => {
@@ -100,6 +124,7 @@ describe('shouldPreventDefault', () => {
       { type: 'move', delta: 1 },
       { type: 'move', delta: -1, fromSearch: true },
       { type: 'paste' },
+      { type: 'paste-plain' },
       { type: 'undo' },
     ];
     for (const action of actions) expect(shouldPreventDefault(action)).toBe(true);

@@ -24,6 +24,8 @@ import type {
   OptimizeRequest,
   OptimizeResult,
   Settings,
+  SnippetInput,
+  UpdateStatus,
 } from '@clipchan/core';
 import { adapterFor } from '@clipchan/ai';
 import { optimize as runOptimize } from '@clipchan/ai';
@@ -63,6 +65,9 @@ import { closeOverlays, createOverlayWindows } from './overlay';
 import { createOcr, upscaleSize } from './ocr';
 import type { OcrApi } from './ocr';
 import type { RecordSink } from './watcher';
+import { DRAG_HINT_MULTI_FILE, dragHintFor, dragPayloadFor } from './dragout';
+import { buildDropFiles } from './dropfiles';
+import { Updater } from './updater';
 
 const SMOKE = process.argv.includes('--smoke');
 /** 启动即为小组件形态（--widget，旧版 --ghost 的位置）。 */
@@ -122,6 +127,8 @@ let mergeSvc: MergeService | null = null;
 let burstDetector: BurstDetector | null = null;
 /** 面板不可见时攒下的预选 id，等下次显示面板再发给界面（照抄 legacy MainForm.cs:596-598）。 */
 let pendingBurstIds: string[] = [];
+/** 自动更新（P0-3）。开发环境整体禁用，见构造处注释。 */
+let updater: Updater | null = null;
 
 /**
  * 一次截图会话的两个句柄：overlay 窗与它们各自的底图。
@@ -332,15 +339,19 @@ function setupServices(dataDir: string): void {
 
   // ★ 连续复制检测与面板刷新都挂在"记录成功"这一刻：Recorder 没有回调，
   // 所以这里包一层 sink 转发 lastSeen，并在拿到 InsertResult 后做后处理。
-  // ★ sourceApp 是**可选参数**：只写 `(text) => recorder.recordText(text)` 也能编译通过，
-  //   于是类型检查全绿、来源功能却是死的（T5 的坑）。这里必须逐个参数显式转发。
+  // ★ sourceApp / richHtml 都是**可选参数**：只写 `(text) => recorder.recordText(text)` 也能
+  //   编译通过，于是类型检查全绿、来源与富文本功能却是死的（T5 的坑）。这里必须逐个参数显式转发。
+  //   recordFiles 同理 —— 漏掉它就编译不过（RecordSink 把它列为必需），反而是好事。
   const sink: RecordSink = {
     get lastSeen() {
       return recorder.lastSeen;
     },
-    recordText: (text: string, sourceApp?: string) => afterRecord(recorder.recordText(text, sourceApp)),
+    recordText: (text: string, sourceApp?: string, richHtml?: string) =>
+      afterRecord(recorder.recordText(text, sourceApp, richHtml)),
     recordImage: (img, sig?: string | null, sourceApp?: string) =>
       afterRecord(recorder.recordImage(img, sig, sourceApp)),
+    recordFiles: (paths: string[], sig?: string | null, sourceApp?: string) =>
+      afterRecord(recorder.recordFiles(paths, sig, sourceApp)),
   };
 
   watcher = new ClipboardWatcher({
@@ -351,6 +362,13 @@ function setupServices(dataDir: string): void {
     //   undefined，source_app 永远是 NULL —— 编译通过、功能全死。
     //   助手不可用/超时/前台是 clipchan 自己时 watcher 会归一成 undefined，照常记录。
     foregroundExe: () => helperClient?.foregroundExe() ?? Promise.resolve(null),
+    // ★ 传取值函数而不是快照：设置页改了排除列表必须立刻生效（密码管理器留的闸门，
+    //   改成快照就等于"重启前一律不生效"）。
+    excludeApps: () => rt.settings?.excludeApps ?? [],
+    // ★ 文件列表只能问原生助手：Electron 37 读别的程序写的 CF_HDROP 会返回空字节
+    //   （has('FileNameW') 为 true，readBuffer() 却是 0 字节），实测同一份剪贴板数据
+    //   C# 的 DragQueryFileW 能拿到全部路径。助手不可用时回 null，watcher 会退回 Electron 通道。
+    readFiles: () => helperClient?.readFiles() ?? Promise.resolve(null),
     onNotice: (_kind, message) => makeBroadcaster(() => rt.win).toast(message, 'info'),
   });
 
@@ -379,6 +397,26 @@ function setupServices(dataDir: string): void {
       writeImage: (bytes: Buffer) => {
         watcher?.suppressNext();
         clipboard.writeImage(nativeImage.createFromBuffer(bytes));
+      },
+      // ★ 写文件必须走原生助手。Electron 的 clipboard.writeBuffer('FileNameW', buf) 注册出来的
+      //   是**自定义格式**（EnumClipboardFormats 实测 id=49159、名字 FileNameW），根本不是标准
+      //   CF_HDROP(15)；资源管理器与 WinForms 的 GetFileDropList() 一律读不到，表现就是
+      //   "复制了文件记录但粘贴不出文件"。writeBuffer('CF_HDROP', ...) 同样只注册一个
+      //   id=49962 的同名自定义格式。只有助手的 SetClipboardData(15, hGlobal) 是真的。
+      // ★ 也绝不能再补一次 clipboard.writeText：写文本会把文件格式整个清掉。
+      writeFiles: async (paths: string[]): Promise<boolean> => {
+        watcher?.suppressNext();
+        const wrote = (await helperClient?.writeFiles(paths)) === true;
+        if (wrote) return true;
+        // 助手不可用（开发环境没编译 / 被安全软件拦）：退回 Electron 通道。
+        // 它写不出标准 CF_HDROP，但至少本程序自己还能读回自己写的自定义格式。
+        clipboard.writeBuffer('FileNameW', buildDropFiles(paths));
+        return false;
+      },
+      // ★ 富文本：html 与纯文本一起写，接收方能吃格式就吃格式，吃不了退回纯文本。
+      writeRich: (html: string, text: string) => {
+        watcher?.suppressNext();
+        clipboard.write({ text, html });
       },
     },
     dataDir,
@@ -448,6 +486,26 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
         return result;
       });
     },
+    // ★ 纯文本粘贴（Ctrl+Shift+V）：丢掉 text/html 只写纯文本，给"贴到记事本里别带格式"用。
+    //   与 items:paste 一样会刷新排序，成功后必须广播。
+    [CH.items.pastePlain]: (_e, id: string) => {
+      const svc = pasteSvc;
+      if (!svc) return { ok: false, reason: 'send-failed' };
+      return Promise.resolve(svc.pastePlain(String(id))).then((result) => {
+        broadcast.itemsChanged();
+        return result;
+      });
+    },
+    // ★ 批量粘贴（P2-8）：多条按入参顺序拼成一段贴出去。图片行由 pasteMany 内部跳过
+    //   —— 那是语义而不是失败，界面拿 ok:true 时仍应提示"已跳过 N 张图片"。
+    [CH.items.pasteMany]: (_e, ids: string[]) => {
+      const svc = pasteSvc;
+      if (!svc) return { ok: false, reason: 'send-failed' };
+      return Promise.resolve(svc.pasteMany(Array.isArray(ids) ? ids.map(String) : [])).then((result) => {
+        broadcast.itemsChanged();
+        return result;
+      });
+    },
     // ★ v0.3.0 起删除 = 进回收站（软删）：只盖 deleted_at、**不删盘**。
     //   所以这里没有任何"文件删不掉"的 toast —— 根本没删文件，留着那句提示只会误导用户。
     [CH.items.remove]: (_e, id: string) => {
@@ -456,6 +514,22 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
     },
     [CH.items.togglePin]: (_e, id: string) => {
       needDb().togglePin(String(id));
+      broadcast.itemsChanged();
+    },
+    // ★ 批量删除（P2-8）：同样是软删（进回收站）。removeMany 返回的是被删的 ItemRow[]，
+    //   界面契约要的是条数，所以这里取 length 而不是直接透传。
+    [CH.items.removeMany]: (_e, ids: string[]) => {
+      const list = Array.isArray(ids) ? ids.map(String) : [];
+      if (list.length === 0) return 0;
+      const n = needDb().removeMany(list).length;
+      if (n > 0) broadcast.itemsChanged();
+      return n;
+    },
+    // ★ 批量收藏/取消收藏：pinMany 返回改动的条数，但界面契约是 void，不往外透。
+    [CH.items.pinMany]: (_e, ids: string[], pinned: boolean) => {
+      const list = Array.isArray(ids) ? ids.map(String) : [];
+      if (list.length === 0) return;
+      needDb().pinMany(list, Boolean(pinned));
       broadcast.itemsChanged();
     },
     [CH.items.clearUnpinned]: () => {
@@ -589,6 +663,61 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       broadcast.itemsChanged();
       return { ok: true, id: result.id };
     },
+    // ★ 拖出到外部应用（P1-5）：真正发起拖拽的只能是主进程（webContents.startDrag）。
+    //   本轮只支持图片与"恰好一个文件"的记录，其余在 dragPayloadFor 里回 null。
+    [CH.items.startDrag]: (e, id: string) => {
+      const db = needDb();
+      const row = db.getRow(String(id));
+      const spec = dragPayloadFor(String(id), row, {
+        dataDir: rt.dataDir,
+        filePaths: row ? db.getFilePaths(String(id)) : [],
+        imageAbs: (rel) => imageAbs(rt.dataDir, rel),
+      });
+      if (!spec) {
+        // ★ 不静默：用户拖了没反应只会以为程序卡了。文本/多文件各有各的原因，分开说。
+        const hint = (row ? dragHintFor(row.kind) : null) ?? DRAG_HINT_MULTI_FILE;
+        broadcast.toast(hint, 'info');
+        return;
+      }
+      // ★ startDrag 的 icon 必须是真实存在的文件，否则它直接抛（主进程弹错误框）。
+      //   文件记录在 dragout 里回的是空串，这里用应用图标兜底。
+      const icon = spec.icon.length > 0 ? spec.icon : assetPath('build', 'icon.ico');
+      e.sender.startDrag({ file: spec.file, icon });
+    },
+    // ★ 片段库（v0.6.0）：四个通道都回整表，界面拿返回值直接 setSnippets，不用再查一次。
+    //   广播用 broadcast.send(EV.snippetsChanged) —— Broadcaster 没有 snippetsChanged 方法
+    //   （ipc.ts 不在本任务边界内），send 是它已有的通用出口。
+    [CH.snippets.list]: () => needDb().listSnippets(),
+    [CH.snippets.save]: (_e, input: SnippetInput) => {
+      const next = needDb().saveSnippet(input ?? { title: '', content: '' });
+      broadcast.send(EV.snippetsChanged);
+      return next;
+    },
+    [CH.snippets.remove]: (_e, id: string) => {
+      const next = needDb().removeSnippet(String(id));
+      broadcast.send(EV.snippetsChanged);
+      return next;
+    },
+    // ★ 「使用」= 复制并贴回目标窗口。界面层只做 `setSnippets(await snippets.use(id))`
+    //   （packages/core/src/ui/App.tsx 的 useSnippet），自己不碰剪贴板也不模拟粘贴 ——
+    //   所以这两步必须在这里做，否则按钮点下去毫无反应。
+    //   pasteText 内部已先写剪贴板、再尝试贴回，且永不抛（失败回诚实的 PasteResult）。
+    [CH.snippets.use]: (_e, id: string) => {
+      const db = needDb();
+      const snippet = db.getSnippet(String(id));
+      const next = db.touchSnippet(String(id));
+      broadcast.send(EV.snippetsChanged);
+      const svc = pasteSvc;
+      if (snippet && svc) {
+        void svc.pasteText(snippet.content).then((result) => {
+          // 区分两种失败：no-target 是"已复制、只是没处可贴"，其余是压根没写进剪贴板。
+          if (result.ok) return;
+          if (result.reason === 'no-target') broadcast.toast('片段已复制，但没有可粘贴的目标窗口', 'info');
+          else broadcast.toast('片段复制失败', 'warn');
+        });
+      }
+      return next;
+    },
     // ★ 优化结果「复制并粘贴」：同一段文本可能贴多次，不走 items:paste（那是库里的记录，
     //   会刷新排序）。不查库、不 touch，编排与 pasteItem 一致。
     [CH.ai.copyAndPaste]: (_e, text: string) => {
@@ -675,6 +804,10 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
     [CH.app.openDataFolder]: () => {
       void import('electron').then((m) => m.shell.openPath(rt.dataDir));
     },
+    // ★ 自动更新（P0-3）：只做"设置页手动点检查"，不在启动时自动 check
+    //   —— 现在每次启动打一次 GitHub API 没收益，等真实用户量起来再加。
+    [CH.app.checkUpdate]: () => (updater ? updater.check() : { state: 'none', message: '更新器未就绪' }),
+    [CH.app.applyUpdate]: () => (updater ? updater.apply() : Promise.resolve()),
     // 拼接选中项（spec §7.5：跳过收藏项，源条目被新记录取代）。
     [CH.items.mergeSelected]: (_e, ids: string[]) => {
       const svc2 = mergeSvc;
@@ -1269,6 +1402,15 @@ function main(): void {
     // ★ smoke 只验骨架，不碰真实剪贴板，也不启动助手（保持冒烟又快又干净）。
     if (!SMOKE) setupServices(rt.dataDir);
 
+    // ★ 自动更新（P0-3）：开发环境整体禁用（app.isPackaged === false），否则每次启动都会
+    //   去 GitHub 打一次请求并在控制台刷错误。构造完不自动 check —— 见 CH.app.checkUpdate 的注释。
+    updater = new Updater({
+      currentVersion: app.getVersion(),
+      enabled: app.isPackaged,
+      onStatus: (s) => makeBroadcaster(() => rt.win).send(EV.updateStatus, s),
+      onLog: (m) => console.warn('[updater] ' + m),
+    });
+
     // ★ 必须早于 buildHandlers()：处理器表里要展开 needAi().handlers()。
     aiApi = buildAiApi(() => aiBroadcast);
     registerIpc({ handlers: buildHandlers(), capabilities: capabilitiesOf });
@@ -1339,7 +1481,8 @@ function main(): void {
       '，自启目标 ' + autoStartPath(process.env, process.execPath) +
       '，快捷键 activate=' + rt.hotkeyStatus.activate +
       ' widget=' + rt.hotkeyStatus.widget +
-      ' capture=' + rt.hotkeyStatus.capture
+      ' capture=' + rt.hotkeyStatus.capture +
+      ' updater=' + (app.isPackaged ? 'on' : 'off')
     );
   });
 }
@@ -1352,6 +1495,8 @@ app.on('will-quit', () => {
   // 收口：停轮询 → 关幽灵定时器 → 发 QUIT 让助手进程自己退出（2 秒后强杀兜底）。
   watcher?.stop();
   ghostSvc?.dispose();
+  // 摘掉 electron-updater 的事件监听：不留悬挂引用，也让下一次 quit 不重复处理。
+  updater?.dispose();
   void helperClient?.dispose();
 });
 

@@ -21,6 +21,8 @@ export type HelperMessage =
   | { kind: 'BLUR'; hwnd: number; code: number }
   | { kind: 'FG'; hwnd: number }
   | { kind: 'FGEXE'; hwnd: number; exe: string }
+  | { kind: 'FILES'; paths: string[] }
+  | { kind: 'FILESET'; code: number }
   | { kind: 'PONG'; tag: string }
   | { kind: 'UNKNOWN'; raw: string };
 
@@ -36,6 +38,8 @@ const DECIMAL = /^\d+$/;
  *   BLUR <句柄> <码>
  *   FG <十进制句柄>
  *   FGEXE <十进制句柄> <exe名>   取不到时是 "FGEXE 0 -"
+ *   FILES <json数组>            剪贴板上的文件路径，可能是 []
+ *   FILESET <返回码>            写文件列表到剪贴板，0 成功
  *   PONG <标记>
  */
 export function parseHelperLine(line: string): HelperMessage {
@@ -85,6 +89,32 @@ export function parseHelperLine(line: string): HelperMessage {
       const exe = parts[2];
       if (!hwnd || !exe || !DECIMAL.test(hwnd)) return { kind: 'UNKNOWN', raw };
       return { kind: 'FGEXE', hwnd: Number(hwnd), exe };
+    }
+    case 'FILES': {
+      // ★ 不能用 parts.length === 2 判：路径里可以有空格（"C:\Program Files\a.txt"），
+      //   所以按空白切分一定会切碎。这里只剥掉行首的 "FILES "，剩下的整段当 JSON 解。
+      const rest = trimmed.slice('FILES'.length).trim();
+      if (rest.length === 0) return { kind: 'UNKNOWN', raw };
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rest);
+      } catch {
+        return { kind: 'UNKNOWN', raw };
+      }
+      if (!Array.isArray(parsed)) return { kind: 'UNKNOWN', raw };
+      const paths: string[] = [];
+      for (const item of parsed) {
+        if (typeof item === 'string') paths.push(item);
+      }
+      // 元素全不是字符串时说明协议对不上，宁可当畸形行。
+      if (paths.length === 0 && parsed.length > 0) return { kind: 'UNKNOWN', raw };
+      return { kind: 'FILES', paths };
+    }
+    case 'FILESET': {
+      if (parts.length !== 2) return { kind: 'UNKNOWN', raw };
+      const code = parts[1];
+      if (!code || !DECIMAL.test(code)) return { kind: 'UNKNOWN', raw };
+      return { kind: 'FILESET', code: Number(code) };
     }
     case 'PONG': {
       if (parts.length !== 2) return { kind: 'UNKNOWN', raw };
@@ -242,6 +272,48 @@ export class HelperClient {
       null,
       // 助手用 "0 -" 表示"取不到"，与解析层的宽松保持分层：这里才决定它等价于 null。
       (m) => (m.kind === 'FGEXE' && m.hwnd > 0 && m.exe !== '-' ? m.exe : null),
+    );
+  }
+
+  /**
+   * 读剪贴板上的文件路径列表（CF_HDROP）。
+   *
+   * ★ 为什么走助手而不是 Electron 的 clipboard：实测同一份剪贴板数据，Electron 的
+   *   has('FileNameW') 是 true 但 readBuffer()/read() 全空、availableFormats() 还谎报
+   *   text/uri-list；同一时刻 C# 的 GetClipboardData(15) + DragQueryFileW 能拿到全部路径。
+   *   也就是说"有没有文件"问 Electron 是可靠的，"有哪些文件"只能问这里。
+   *
+   * 助手不可用 / 超时 / 剪贴板被占用一律返回 null：调用方据此回退到其它通道，
+   * 但**不能**把 null 当成"没有文件"。
+   */
+  readFiles(): Promise<string[] | null> {
+    return this.request<string[] | null>(
+      'FILES\n',
+      (m) => m.kind === 'FILES',
+      null,
+      (m) => (m.kind === 'FILES' ? m.paths : null),
+    );
+  }
+
+  /**
+   * 把一批路径写成标准 CF_HDROP 放进剪贴板。成功返回 true。
+   *
+   * ★ 为什么写也必须走助手：Electron 的 clipboard.writeBuffer('FileNameW', buf) 注册出来的
+   *   是**自定义格式**（EnumClipboardFormats 实测 id=49159、名字 FileNameW），根本不是标准
+   *   CF_HDROP(15)。资源管理器 / WinForms 的 GetFileDropList() 一律读不到，表现就是
+   *   "复制了文件记录但粘贴不出文件"。writeBuffer('CF_HDROP', ...) 同样只会注册一个
+   *   同名自定义格式（实测 id=49962）。
+   *
+   * 助手不可用 / 超时 / 返回非 0 一律 false：调用方据此回退到 Electron 通道并提示用户。
+   */
+  writeFiles(paths: string[]): Promise<boolean> {
+    if (paths.length === 0) return Promise.resolve(false);
+    // 单行 JSON：路径里有空格，不能按空白切分传参。
+    return this.request<boolean>(
+      'FILESET ' + JSON.stringify(paths) + '\n',
+      (m) => m.kind === 'FILESET',
+      false,
+      (m) => m.kind === 'FILESET' && m.code === 0,
     );
   }
 

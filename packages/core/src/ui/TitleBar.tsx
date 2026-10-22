@@ -33,7 +33,9 @@ export function TitleBar({
           ? '优化提示词'
           : view === 'trash'
             ? '回收站'
-            : '剪贴板酱';
+            : view === 'snippets'
+              ? '片段'
+              : '剪贴板酱';
   return (
     <header className="cc-drag flex h-[38px] shrink-0 items-center gap-tight border-b border-line px-base">
       <div className="flex min-w-0 items-center gap-tight">

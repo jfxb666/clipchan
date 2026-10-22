@@ -19,12 +19,15 @@ export function mapHelperCode(code: number): PasteResult {
   }
 }
 
-/** 粘贴失败时给用户看的中文提示。三种原因必须是三条不同文案。 */
+/** 粘贴失败时给用户看的中文提示。每种原因必须是一条不同文案。 */
 export function pasteHintOf(result: PasteResult): string {
   if (result.ok) return '已粘贴';
   switch (result.reason) {
     case 'no-target': return '已复制，按 Ctrl+V 粘贴';
     case 'elevated': return '目标窗口以管理员运行，无法自动粘贴（已复制）';
+    // ★ 记录内容本身没了（文件路径列表为空 / 原文件被删）不是"粘贴失败"，
+    //   提示成"请按 Ctrl+V"会让用户以为剪贴板里还有东西。
+    case 'missing': return '这条记录的内容已丢失（原文件可能已被删除）';
     default: return '已复制，但自动粘贴失败，请按 Ctrl+V';
   }
 }

@@ -21,6 +21,7 @@ export function TimelineList({
   onHover,
   onOptimize,
   onContextMenu,
+  onDragStart,
 }: ListBodyProps) {
   const groups = groupByDay(items);
 
@@ -42,6 +43,7 @@ export function TimelineList({
                 onHover={onHover}
                 onOptimize={onOptimize}
                 onContextMenu={onContextMenu}
+                onDragStart={onDragStart}
               />
             ))}
           </div>

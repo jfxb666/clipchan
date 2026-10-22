@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDb, type Db } from './db';
 import { Recorder, normalizeSourceApp } from './recorder';
-import { ClipboardWatcher, type ClipboardLike } from './watcher';
+import { ClipboardWatcher, RICH_HTML_MAX, type ClipboardLike } from './watcher';
 import { purgeItemsWithFiles, type NativeImageLike } from './images';
 import { imagesDir, thumbsDir } from './paths';
 
@@ -140,6 +140,69 @@ describe('Recorder.recordText', () => {
     expect(rec.recordText('')).toBeNull();
     expect(rec.recordText('\0\0')).toBeNull();
     expect(db.list({}).length).toBe(0);
+  });
+
+  it('richHtml 第 3 参一路传到 db：getRichHtml 能读回，DTO 带 hasRich', () => {
+    const rec = makeRecorder();
+    const res = rec.recordText('从网页复制的', 'chrome.exe', '<p>从网页复制的</p>')!;
+    expect(res).not.toBeNull();
+    expect(db.getRichHtml(res.id)).toBe('<p>从网页复制的</p>');
+    expect(db.list({}).find((r) => r.id === res.id)?.hasRich).toBe(true);
+  });
+
+  it('只有 text/html、没有纯文本：仍然入库，content 用占位描述（不能是一行空白）', () => {
+    const rec = makeRecorder();
+    const res = rec.recordText('', undefined, '<p>只有富文本</p>');
+    expect(res).not.toBeNull();
+    const row = db.getRow(res!.id)!;
+    expect(row.content).toBe('（富文本内容，无纯文本）');
+    expect(db.getRichHtml(res!.id)).toBe('<p>只有富文本</p>');
+  });
+
+  it('纯文本与 richHtml 都为空：不入库', () => {
+    const rec = makeRecorder();
+    expect(rec.recordText('', undefined, '   ')).toBeNull();
+    expect(db.list({}).length).toBe(0);
+  });
+
+  it('richHtml 超过 RICH_HTML_MAX 时兜底截断（绕开采集层直接调用也不会撑爆库）', () => {
+    const rec = makeRecorder();
+    const huge = 'x'.repeat(RICH_HTML_MAX + 500);
+    const res = rec.recordText('带超长富文本', undefined, huge)!;
+    expect(db.getRichHtml(res.id)!.length).toBe(RICH_HTML_MAX);
+  });
+});
+
+describe('Recorder.recordFiles 文件记录', () => {
+  it('路径列表落库：kind=files，getFilePaths 往返一致', () => {
+    const rec = makeRecorder();
+    const res = rec.recordFiles(['C:\\a.txt', 'C:\\b.txt'])!;
+    expect(res).not.toBeNull();
+    expect(db.getRow(res.id)!.kind).toBe('files');
+    expect(db.getFilePaths(res.id)).toEqual(['C:\\a.txt', 'C:\\b.txt']);
+  });
+
+  it('空数组 / 全是空串 / 非数组 都不入库', () => {
+    const rec = makeRecorder();
+    expect(rec.recordFiles([])).toBeNull();
+    expect(rec.recordFiles(['', ''])).toBeNull();
+    expect(rec.recordFiles(null as unknown as string[])).toBeNull();
+    expect(db.list({}).length).toBe(0);
+  });
+
+  it('同一批路径第二次命中去重（touched=true，不产生第二行）', () => {
+    const rec = makeRecorder();
+    const first = rec.recordFiles(['C:\\same.txt'])!;
+    const second = rec.recordFiles(['C:\\same.txt'])!;
+    expect(second.id).toBe(first.id);
+    expect(second.touched).toBe(true);
+    expect(db.list({}).length).toBe(1);
+  });
+
+  it('来源应用同样落进 source_app', () => {
+    const rec = makeRecorder();
+    const res = rec.recordFiles(['C:\\x.txt'], null, 'explorer.exe')!;
+    expect(db.list({}).find((r) => r.id === res.id)?.sourceApp).toBe('explorer.exe');
   });
 });
 

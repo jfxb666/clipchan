@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS } from '@clipchan/core';
-import { SCHEMA_VERSION, openDb } from './db';
+import { SCHEMA_VERSION, SNIPPET_LIMIT, buildSearchIndex, openDb } from './db';
 import type { Db } from './db';
 
 const opened: Db[] = [];
@@ -807,7 +807,8 @@ describe('v0.5.0 T1：hotkeyCapture + optimize_history', () => {
     old.pragma('user_version = 1');
     old.close();
 
-    expect(SCHEMA_VERSION).toBe(2);
+    // ★ 断言写成"升到当前版本"而不是写死 2：每加一版 schema 都改这里毫无意义。
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(2);
     const db = openDb(file);
     opened.push(db);
 
@@ -819,7 +820,7 @@ describe('v0.5.0 T1：hotkeyCapture + optimize_history', () => {
       .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_opt_hist'")
       .get() as { name: string } | undefined;
     expect(index?.name).toBe('idx_opt_hist');
-    expect(db.raw.pragma('user_version', { simple: true })).toBe(2);
+    expect(db.raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     // 升级不该动老数据
     expect(db.list()).toHaveLength(1);
     // 表真的可用
@@ -837,3 +838,354 @@ describe('v0.5.0 T1：hotkeyCapture + optimize_history', () => {
     expect(table?.name).toBe('optimize_history');
   });
 });
+
+// ---------------- v0.6.0：schema v3 / 拼音搜索 / 文件记录 / 富文本 / 片段库 ----------------
+
+/** v0.5.0 形态的库：items 有 deleted_at/source_app，但还没有 file_paths/rich_html/search_index。 */
+function seedV2Db(file: string): void {
+  const old = new Database(file);
+  old.exec(`
+    CREATE TABLE items (
+      id TEXT PRIMARY KEY, kind TEXT NOT NULL, content TEXT, content_hash TEXT,
+      image_path TEXT, image_hash TEXT, thumb_path TEXT,
+      width INTEGER, height INTEGER, bytes INTEGER,
+      source TEXT NOT NULL DEFAULT 'clip', pinned INTEGER NOT NULL DEFAULT 0,
+      truncated INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, seq INTEGER NOT NULL,
+      deleted_at INTEGER, source_app TEXT
+    );
+    CREATE UNIQUE INDEX idx_content_hash ON items(content_hash) WHERE content_hash IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX idx_image_hash   ON items(image_hash)   WHERE image_hash   IS NOT NULL AND deleted_at IS NULL;
+    CREATE INDEX idx_order ON items(pinned DESC, created_at DESC, seq DESC);
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE optimize_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, output TEXT NOT NULL,
+      scene_id TEXT NOT NULL, mode TEXT NOT NULL, provider_id TEXT NOT NULL,
+      provider_name TEXT NOT NULL, created_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_opt_hist ON optimize_history(created_at DESC, id DESC);
+  `);
+  old.prepare(
+    'INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq) VALUES (?,?,?,?,?,?,?,?,?)',
+  ).run('d'.repeat(32), 'text', '手工验收已完成', 'hash-v2', 'clip', 0, 0, 1000, 1);
+  old.pragma('user_version = 2');
+  old.close();
+}
+
+describe('v0.6.0：schema v3 迁移', () => {
+  it('v2 老库升级：三列补齐、老行 search_index 回填出拼音、snippets 表建好', () => {
+    const file = join(tmpDir(), 'clipchan.db');
+    seedV2Db(file);
+
+    const db = openDb(file);
+    opened.push(db);
+
+    const cols = new Set(
+      (db.raw.prepare('PRAGMA table_info(items)').all() as { name: string }[]).map((c) => c.name),
+    );
+    expect(cols.has('file_paths')).toBe(true);
+    expect(cols.has('rich_html')).toBe(true);
+    expect(cols.has('search_index')).toBe(true);
+
+    const row = db.getRow('d'.repeat(32))!;
+    expect(row.search_index).toBeTruthy();
+    // 全拼与首字母都要在（小写）
+    expect(row.search_index).toContain('yanshou');
+    expect(row.search_index).toContain('ysyw');
+    expect(row.file_paths).toBeNull();
+    expect(row.rich_html).toBeNull();
+
+    const snip = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='snippets'")
+      .get() as { name: string } | undefined;
+    expect(snip?.name).toBe('snippets');
+    expect(db.raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    // 迁移不该动老数据
+    expect(db.list()).toHaveLength(1);
+  });
+
+  it('回填过的老行直接能按两字中文词搜到（不需要重新复制一次）', () => {
+    const file = join(tmpDir(), 'clipchan.db');
+    seedV2Db(file);
+    const db = openDb(file);
+    opened.push(db);
+
+    expect(db.list({ q: '验收' })).toHaveLength(1);
+    expect(db.list({ q: 'ysyw' })).toHaveLength(1);
+  });
+});
+
+describe('v0.6.0：buildSearchIndex', () => {
+  it('中文带全拼与首字母，且整体小写', () => {
+    const idx = buildSearchIndex('手工验收');
+    expect(idx.startsWith('手工验收 ')).toBe(true);
+    expect(idx).toContain('shougongyanshou');
+    expect(idx).toContain('sgys');
+    expect(idx).toBe(idx.toLowerCase());
+  });
+
+  it('英文小写化（原文里的 Hello 也变成 hello）', () => {
+    expect(buildSearchIndex('Hello World')).toContain('hello world');
+  });
+
+  it('空串 / 非字符串回空串', () => {
+    expect(buildSearchIndex('')).toBe('');
+    expect(buildSearchIndex(undefined as unknown as string)).toBe('');
+  });
+});
+
+describe('v0.6.0：中文两字词搜索（P1-4）', () => {
+  it('两字中文词 / 拼音首字母都能命中，list 与 count 一致', () => {
+    const db = mem();
+    db.insertText('手工验收已完成', { now: 1000 });
+    db.insertText('完全无关的一段', { now: 2000 });
+
+    const hit = db.list({ q: '验收' });
+    expect(hit).toHaveLength(1);
+    expect(hit[0]!.preview).toBe('手工验收已完成');
+
+    expect(db.list({ q: 'ysyw' })).toHaveLength(1);
+    expect(db.list({ q: 'shougong' })).toHaveLength(1);
+    expect(db.count({ q: '验收' })).toBe(1);
+    expect(db.count({ q: 'ysyw' })).toBe(1);
+    // 命中不到的词是 0，不是全部
+    expect(db.count({ q: 'zzz' })).toBe(0);
+  });
+
+  it('英文搜索大小写无关（search_index 是小写副本）', () => {
+    const db = mem();
+    db.insertText('Hello Alpha', { now: 1000 });
+    expect(db.list({ q: 'ALPHA' })).toHaveLength(1);
+    expect(db.list({ q: 'alpha' })).toHaveLength(1);
+  });
+});
+
+describe('v0.6.0：文件记录（P0-1）', () => {
+  const paths = ['C:\Users\me\a.txt', 'C:\Users\me\b.txt'];
+
+  it('kind=files、fileCount 正确、getFilePaths 往返一致', () => {
+    const db = mem();
+    const r = db.insertFiles(paths, { now: 1000 });
+    expect(r.touched).toBe(false);
+    expect(r.id).toMatch(/^[0-9a-f]{32}$/);
+
+    const dto = db.list()[0]!;
+    expect(dto.kind).toBe('files');
+    expect(dto.fileCount).toBe(2);
+    expect(dto.preview).toContain('a.txt');
+    expect(db.getFilePaths(r.id)).toEqual(paths);
+  });
+
+  it('同一路径列表插两次：touched=true、库里只有 1 行、路径不被覆盖', () => {
+    const db = mem();
+    const first = db.insertFiles(paths, { now: 1000 });
+    const again = db.insertFiles(paths, { now: 2000 });
+    expect(again.id).toBe(first.id);
+    expect(again.touched).toBe(true);
+    expect(db.count()).toBe(1);
+    expect(db.getFilePaths(first.id)).toEqual(paths);
+  });
+
+  it('路径列表不同则是两条（去重键是整段列表，不是文件名）', () => {
+    const db = mem();
+    db.insertFiles(paths, { now: 1000 });
+    db.insertFiles(['C:\Users\me\a.txt'], { now: 2000 });
+    expect(db.count()).toBe(2);
+  });
+
+  it('空数组不落库', () => {
+    const db = mem();
+    expect(db.insertFiles([], { now: 1000 })).toEqual({ id: '', touched: false });
+    expect(db.count()).toBe(0);
+  });
+
+  it('getFilePaths 对不存在的 id / 坏 JSON 都回 []，不抛', () => {
+    const db = mem();
+    expect(db.getFilePaths('nope')).toEqual([]);
+
+    const r = db.insertFiles(paths, { now: 1000 });
+    db.raw.prepare('UPDATE items SET file_paths = ? WHERE id = ?').run('{不是数组', r.id);
+    expect(db.getFilePaths(r.id)).toEqual([]);
+    // 坏数据不该让列表崩，fileCount 按 0 显示
+    expect(db.list()[0]!.fileCount).toBe(0);
+  });
+
+  it('文件记录也能按文件名搜索（search_index 覆盖 content）', () => {
+    const db = mem();
+    db.insertFiles(paths, { now: 1000 });
+    expect(db.list({ q: 'a.txt' })).toHaveLength(1);
+  });
+});
+
+describe('v0.6.0：富文本（P2-7）', () => {
+  it('带 richHtml 插入后能读回，DTO 上 hasRich=true', () => {
+    const db = mem();
+    const r = db.insertText('加粗的一段', { now: 1000, richHtml: '<b>加粗的一段</b>' });
+    expect(db.getRichHtml(r.id)).toBe('<b>加粗的一段</b>');
+    expect(db.list()[0]!.hasRich).toBe(true);
+  });
+
+  it('不带 richHtml：getRichHtml 回 null，hasRich 是 undefined', () => {
+    const db = mem();
+    const r = db.insertText('纯文本', { now: 1000 });
+    expect(db.getRichHtml(r.id)).toBeNull();
+    expect(db.list()[0]!.hasRich).toBeUndefined();
+  });
+
+  it('★ 去重命中：旧空新非空会补写（否则从网页复制的同一段永远拿不到富文本）', () => {
+    const db = mem();
+    const a = db.insertText('同一段文字', { now: 1000 });
+    expect(db.getRichHtml(a.id)).toBeNull();
+
+    const b = db.insertText('同一段文字', { now: 2000, richHtml: '<i>同一段文字</i>' });
+    expect(b.id).toBe(a.id);
+    expect(b.touched).toBe(true);
+    expect(db.getRichHtml(a.id)).toBe('<i>同一段文字</i>');
+    expect(db.list()[0]!.hasRich).toBe(true);
+  });
+
+  it('去重命中但旧值非空：不覆盖（首次拿到的富文本更可能是用户看到的那份）', () => {
+    const db = mem();
+    const a = db.insertText('同一段文字', { now: 1000, richHtml: '<b>旧的</b>' });
+    db.insertText('同一段文字', { now: 2000, richHtml: '<b>新的</b>' });
+    expect(db.getRichHtml(a.id)).toBe('<b>旧的</b>');
+  });
+
+  it('getRichHtml 对不存在的 id 回 null', () => {
+    expect(mem().getRichHtml('nope')).toBeNull();
+  });
+});
+
+describe('v0.6.0：批量收藏（P2-8）', () => {
+  it('批量置位只影响传入的活跃行', () => {
+    const db = mem();
+    const a = db.insertText('a', { now: 1000 });
+    const b = db.insertText('b', { now: 2000 });
+    const c = db.insertText('c', { now: 3000 });
+
+    expect(db.pinMany([a.id, b.id], true)).toBe(2);
+    expect(db.list({ kind: 'favorite' }).map((x) => x.id).sort()).toEqual([a.id, b.id].sort());
+    expect(db.getRow(c.id)!.pinned).toBe(0);
+
+    db.pinMany([a.id], false);
+    expect(db.getRow(a.id)!.pinned).toBe(0);
+    expect(db.getRow(b.id)!.pinned).toBe(1);
+  });
+
+  it('回收站里的行不受影响', () => {
+    const db = mem();
+    const a = db.insertText('a', { now: 1000 });
+    const b = db.insertText('b', { now: 2000 });
+    db.remove(b.id);
+
+    expect(db.pinMany([a.id, b.id], true)).toBe(1);
+    expect(db.getRow(b.id)!.pinned).toBe(0);
+  });
+
+  it('空数组回 0', () => {
+    expect(mem().pinMany([], true)).toBe(0);
+  });
+});
+
+describe('v0.6.0：片段库（P1-6）', () => {
+  /** saveSnippet 返回的是全表（同一毫秒写入时顺序由 id 决定），按内容取回刚写的那条。 */
+  function saveOne(db: Db, title: string, content: string): { id: string } {
+    db.saveSnippet({ title, content });
+    const row = db.raw.prepare('SELECT id FROM snippets WHERE content = ?').get(content) as { id: string };
+    return row;
+  }
+
+  it('save 新增：created_at = updated_at，use_count = 0', () => {
+    const db = mem();
+    const list = db.saveSnippet({ title: '签名', content: '此致敬礼' });
+    expect(list).toHaveLength(1);
+    const s = list[0]!;
+    expect(s.id.length).toBeGreaterThan(0);
+    expect(s.title).toBe('签名');
+    expect(s.content).toBe('此致敬礼');
+    expect(s.createdAt).toBe(s.updatedAt);
+    expect(s.useCount).toBe(0);
+    expect(db.getSnippet(s.id)).toEqual(s);
+  });
+
+  it('title 允许空串（UI 用内容首行兜底）', () => {
+    const db = mem();
+    const s = db.saveSnippet({ title: '', content: '无标题片段' })[0]!;
+    expect(s.title).toBe('');
+  });
+
+  it('save 更新：created_at 与 use_count 不变，title/content/updated_at 变', () => {
+    const db = mem();
+    const s = db.saveSnippet({ title: '旧', content: '旧内容' })[0]!;
+    db.touchSnippet(s.id);
+    const used = db.getSnippet(s.id)!;
+    expect(used.useCount).toBe(1);
+
+    const after = db.saveSnippet({ id: s.id, title: '新', content: '新内容' })[0]!;
+    expect(after.id).toBe(s.id);
+    expect(after.title).toBe('新');
+    expect(after.content).toBe('新内容');
+    expect(after.createdAt).toBe(s.createdAt);
+    expect(after.useCount).toBe(1);
+    expect(after.updatedAt).toBeGreaterThanOrEqual(used.updatedAt);
+  });
+
+  it('listSnippets 按 updated_at DESC', () => {
+    const db = mem();
+    // ★ 必须按内容取回，不能取 [0]：saveSnippet 返回整表，同一毫秒写入时
+    //   ORDER BY updated_at DESC, id DESC 只能靠随机 uuid 决胜负，[0] 可能是另一条。
+    const a = saveOne(db, 'a', 'a');
+    const b = saveOne(db, 'b', 'b');
+    // 同理，排序断言必须先把时间戳钉死，否则测的是 uuid 的字典序。
+    db.raw.prepare('UPDATE snippets SET updated_at = ? WHERE id = ?').run(1000, a.id);
+    db.raw.prepare('UPDATE snippets SET updated_at = ? WHERE id = ?').run(2000, b.id);
+    expect(db.listSnippets().map((x) => x.id)).toEqual([b.id, a.id]);
+    // 改 a 之后 a 的 updated_at 变成当前时间，排最前
+    db.saveSnippet({ id: a.id, title: 'a2', content: 'a' });
+    expect(db.listSnippets().map((x) => x.id)).toEqual([a.id, b.id]);
+  });
+
+  it('touchSnippet 递增 use_count 且 updated_at 不变', () => {
+    const db = mem();
+    const s = db.saveSnippet({ title: 't', content: 'c' })[0]!;
+    db.touchSnippet(s.id);
+    db.touchSnippet(s.id);
+    const after = db.getSnippet(s.id)!;
+    expect(after.useCount).toBe(2);
+    expect(after.updatedAt).toBe(s.updatedAt);
+  });
+
+  it('touchSnippet 对不存在的 id 原样返回全表', () => {
+    const db = mem();
+    const s = db.saveSnippet({ title: 't', content: 'c' })[0]!;
+    expect(db.touchSnippet('nope')).toEqual([s]);
+  });
+
+  it('removeSnippet 删后返回全表；getSnippet 找不到回 null', () => {
+    const db = mem();
+    const a = saveOne(db, 'a', 'a');
+    const b = saveOne(db, 'b', 'b');
+    expect(db.removeSnippet(a.id).map((x) => x.id)).toEqual([b.id]);
+    expect(db.getSnippet(a.id)).toBeNull();
+    expect(db.getSnippet('nope')).toBeNull();
+  });
+
+  it('超过 SNIPPET_LIMIT 淘汰 updated_at 最旧的', () => {
+    const db = mem();
+    const firstIds: string[] = [];
+    for (let i = 0; i < SNIPPET_LIMIT + 5; i += 1) {
+      db.saveSnippet({ title: 't' + i, content: 'c' + i });
+      const written = db.raw.prepare('SELECT id FROM snippets WHERE content = ?').get('c' + i) as { id: string };
+      // ★ 钉死 updated_at：同一毫秒写入 205 条的话，淘汰谁只由随机 uuid 决定，测不出东西。
+      db.raw.prepare('UPDATE snippets SET updated_at = ? WHERE id = ?').run(1000 + i, written.id);
+      if (i < 5) firstIds.push(written.id);
+    }
+    const list = db.listSnippets();
+    expect(list).toHaveLength(SNIPPET_LIMIT);
+    for (const id of firstIds) {
+      expect(list.some((x) => x.id === id), '最旧的片段没被淘汰: ' + id).toBe(false);
+    }
+    const rows = db.raw.prepare('SELECT COUNT(*) AS n FROM snippets').get() as { n: number };
+    expect(rows.n).toBe(SNIPPET_LIMIT);
+  });
+});
+

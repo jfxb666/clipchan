@@ -20,6 +20,7 @@
 //   静默返回 0，粘贴永远不发生。InputSize 只算一次并复用。
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -179,6 +180,56 @@ namespace Clipchan
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
 
+        // ---- 剪贴板（只读，取 CF_HDROP）----
+        //
+        // ★ 为什么文件列表必须走原生：Electron 37 的 clipboard 读 CF_HDROP 不可靠。
+        //   实测（同一份剪贴板数据，同一时刻）：C# 用 GetClipboardData(15) +
+        //   DragQueryFileW 能拿到全部路径；Electron 的 has('FileNameW') 是 true，但
+        //   readBuffer()/read() 全空、availableFormats() 还谎报 text/uri-list。
+        //   也就是说"有没有文件"问 Electron 是可靠的，"有哪些文件"只能问这里。
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CloseClipboard();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern IntPtr GetClipboardData(uint uFormat);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern uint DragQueryFileW(IntPtr hDrop, uint iFile, StringBuilder lpszFile, uint cch);
+
+        // ---- 剪贴板（写 CF_HDROP）----
+        //
+        // ★ 写也必须走原生：Electron 的 clipboard.writeBuffer('FileNameW', buf) 注册出来的是
+        //   一个**自定义格式**（EnumClipboardFormats 实测 id=49159、名字 FileNameW），
+        //   根本不是标准 CF_HDROP(15)。别的程序（资源管理器、WinForms GetFileDropList）
+        //   一律读不到，表现就是"复制了文件记录但粘贴不出文件"。
+        //   writeBuffer('CF_HDROP', ...) 同理，注册成 id=49962 的自定义格式。
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool EmptyClipboard();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr GlobalAlloc(uint uFlags, UIntPtr dwBytes);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr GlobalLock(IntPtr hMem);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GlobalUnlock(IntPtr hMem);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr GlobalFree(IntPtr hMem);
+
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
@@ -208,6 +259,16 @@ namespace Clipchan
 
         /// <summary>进程映像路径的缓冲字符数：MAX_PATH 之上留足，长路径 exe 不会被截断。</summary>
         private const int IMAGE_NAME_CHARS = 1024;
+
+        // ---- FILES（读写剪贴板文件列表）----
+        private const uint CF_HDROP = 15;
+        private const int CLIPBOARD_OPEN_TRIES = 6;   // 剪贴板是独占资源，被占用时重试
+        private const int CLIPBOARD_OPEN_RETRY_MS = 15;
+        private const uint MAX_DROP_FILES = 500;      // 与 TS 侧 MAX_FILES 对齐
+        private const uint MAX_PATH_CHARS = 4096;     // 单条路径上限，超长的跳过不影响同批
+        private const uint GMEM_MOVEABLE = 0x0002;    // SetClipboardData 只接受可移动内存
+        private const uint GMEM_ZEROINIT = 0x0040;
+        private const int DROPFILES_HEADER_BYTES = 20; // pFiles(4)+pt.x(4)+pt.y(4)+fNC(4)+fWide(4)
 
         private const int RESTORE_TRIES = 4;      // 软失效宽限重试次数
         private const int GRACE_MS = 80;          // 每次重试间隔（4×80ms ≈ 320ms）
@@ -289,6 +350,13 @@ namespace Clipchan
                     case "FGEXE":
                         HandleForegroundExe(stdout);
                         break;
+                    case "FILES":
+                        HandleFiles(stdout);
+                        break;
+                    case "FILESET":
+                        // 入参是单行 JSON 数组，路径里有空格，不能按空白切分，所以取整段。
+                        HandleFileSet(stdout, trimmed.Substring(parts[0].Length).Trim());
+                        break;
                     case "PING":
                         stdout.WriteLine("PONG " + (parts.Length > 1 ? parts[1] : string.Empty));
                         break;
@@ -301,6 +369,395 @@ namespace Clipchan
                 }
             }
             return 0;
+        }
+
+        // ---- FILES ----
+
+        /// <summary>
+        /// FILES —— 读剪贴板上的文件列表（CF_HDROP），输出 `FILES &lt;json数组&gt;`。
+        ///
+        /// ★ 只有这里能可靠地读 CF_HDROP：Electron 的 clipboard 对同一份数据会返回空
+        ///   （详见 NativeMethods 里剪贴板那段的说明）。所以"有哪些文件"必须问助手。
+        /// ★ 绝不抛异常、绝不阻塞 Serve 循环：剪贴板被别的进程占用（OpenClipboard 失败）
+        ///   时重试几次仍失败就回空数组，让调用方按"解不出路径"处理。
+        /// ★ 输出是单行 JSON，路径里的反斜杠 / 引号 / 控制字符都已转义，绝不会把一行撑成两行。
+        /// </summary>
+        private static void HandleFiles(StreamWriter stdout)
+        {
+            string json = "[]";
+            try
+            {
+                List<string> paths = ReadDropFiles();
+                json = ToJsonArray(paths);
+            }
+            catch (Exception e)
+            {
+                Trace("files failed: " + e.Message);
+            }
+            try
+            {
+                stdout.WriteLine("FILES " + json);
+            }
+            catch
+            {
+                // stdout 坏了：这一条只能放弃，但不能让异常冒到 Serve 循环。
+            }
+        }
+
+        /// <summary>读 CF_HDROP 里的全部路径；没有 / 打不开剪贴板时返回空列表。</summary>
+        private static List<string> ReadDropFiles()
+        {
+            var result = new List<string>();
+            // 剪贴板是独占资源：别的进程正在写时 OpenClipboard 会失败，等几毫秒再试。
+            bool opened = false;
+            for (int i = 0; i < CLIPBOARD_OPEN_TRIES && !opened; i++)
+            {
+                if (i > 0)
+                {
+                    Thread.Sleep(CLIPBOARD_OPEN_RETRY_MS);
+                }
+                opened = NativeMethods.OpenClipboard(IntPtr.Zero);
+            }
+            if (!opened)
+            {
+                Trace("files open-clipboard failed");
+                return result;
+            }
+            try
+            {
+                IntPtr drop = NativeMethods.GetClipboardData(CF_HDROP);
+                if (drop == IntPtr.Zero)
+                {
+                    return result;
+                }
+                uint count = NativeMethods.DragQueryFileW(drop, 0xFFFFFFFF, null, 0);
+                if (count == 0)
+                {
+                    return result;
+                }
+                if (count > MAX_DROP_FILES)
+                {
+                    count = MAX_DROP_FILES;
+                }
+                for (uint i = 0; i < count; i++)
+                {
+                    uint need = NativeMethods.DragQueryFileW(drop, i, null, 0);
+                    if (need == 0 || need > MAX_PATH_CHARS)
+                    {
+                        // 超长路径（\? 形式可以到 32k）只跳过它，不影响同批其它文件。
+                        continue;
+                    }
+                    var buffer = new StringBuilder((int)need + 1);
+                    uint got = NativeMethods.DragQueryFileW(drop, i, buffer, (uint)buffer.Capacity);
+                    if (got == 0)
+                    {
+                        continue;
+                    }
+                    string p = buffer.ToString();
+                    if (p.Length > 0)
+                    {
+                        result.Add(p);
+                    }
+                }
+            }
+            finally
+            {
+                NativeMethods.CloseClipboard();
+            }
+            return result;
+        }
+
+        /// <summary>把路径列表编成一行 JSON 数组（自己转义，不引入额外程序集）。</summary>
+        private static string ToJsonArray(List<string> items)
+        {
+            var sb = new StringBuilder();
+            sb.Append('[');
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (i > 0)
+                {
+                    sb.Append(',');
+                }
+                sb.Append('"');
+                string s = items[i];
+                for (int c = 0; c < s.Length; c++)
+                {
+                    char ch = s[c];
+                    if (ch == '"' || ch == '\\')
+                    {
+                        sb.Append('\\').Append(ch);
+                    }
+                    else if (ch < ' ')
+                    {
+                        sb.Append("\\u").Append(((int)ch).ToString("x4"));
+                    }
+                    else
+                    {
+                        sb.Append(ch);
+                    }
+                }
+                sb.Append('"');
+            }
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        // ---- FILESET ----
+
+        /// <summary>
+        /// FILESET —— 把一批路径写成**标准 CF_HDROP** 放进剪贴板，输出 `FILESET &lt;返回码&gt;`。
+        ///
+        /// ★ 为什么写也必须走原生：Electron 的 clipboard.writeBuffer('FileNameW', buf) 注册出来的
+        ///   是**自定义格式**（EnumClipboardFormats 实测 id=49159、名字 FileNameW），根本不是
+        ///   标准 CF_HDROP(15)。资源管理器、WinForms 的 GetFileDropList() 一律读不到，表现就是
+        ///   "复制了文件记录但粘贴不出文件"。只有 OpenClipboard + EmptyClipboard +
+        ///   SetClipboardData(15, hGlobal) 这一条路是真的。
+        ///
+        /// 返回码：0 成功 / 1 入参解析失败 / 2 没有可写的路径 / 3 剪贴板打不开或清空失败 /
+        ///         4 内存分配失败 / 5 SetClipboardData 失败。绝不抛异常、绝不阻塞 Serve 循环。
+        /// </summary>
+        private static void HandleFileSet(StreamWriter stdout, string payload)
+        {
+            int code = 1;
+            try
+            {
+                List<string> paths = ParseJsonArray(payload);
+                code = paths.Count == 0 ? 2 : WriteDropFiles(paths);
+            }
+            catch (Exception e)
+            {
+                Trace("fileset failed: " + e.Message);
+                code = 1;
+            }
+            try
+            {
+                stdout.WriteLine("FILESET " + code.ToString());
+            }
+            catch
+            {
+                // stdout 坏了：这一条只能放弃，但不能让异常冒到 Serve 循环。
+            }
+        }
+
+        /// <summary>
+        /// 把路径列表写成 DROPFILES 块并交给系统剪贴板。
+        ///
+        /// ★ SetClipboardData 成功后内存所有权归系统，**绝不能**再 GlobalFree —— 会二次释放。
+        ///   只有 SetClipboardData 失败时才由这里释放。
+        /// </summary>
+        private static int WriteDropFiles(List<string> paths)
+        {
+            byte[] block = BuildDropFilesBlock(paths);
+
+            bool opened = false;
+            for (int i = 0; i < CLIPBOARD_OPEN_TRIES && !opened; i++)
+            {
+                if (i > 0)
+                {
+                    Thread.Sleep(CLIPBOARD_OPEN_RETRY_MS);
+                }
+                opened = NativeMethods.OpenClipboard(IntPtr.Zero);
+            }
+            if (!opened)
+            {
+                Trace("fileset open-clipboard failed");
+                return 3;
+            }
+
+            try
+            {
+                if (!NativeMethods.EmptyClipboard())
+                {
+                    Trace("fileset empty-clipboard failed");
+                    return 3;
+                }
+
+                IntPtr hMem = NativeMethods.GlobalAlloc(
+                    GMEM_MOVEABLE | GMEM_ZEROINIT, new UIntPtr((uint)block.Length));
+                if (hMem == IntPtr.Zero)
+                {
+                    Trace("fileset global-alloc failed");
+                    return 4;
+                }
+
+                IntPtr locked = NativeMethods.GlobalLock(hMem);
+                if (locked == IntPtr.Zero)
+                {
+                    NativeMethods.GlobalFree(hMem);
+                    Trace("fileset global-lock failed");
+                    return 4;
+                }
+                try
+                {
+                    Marshal.Copy(block, 0, locked, block.Length);
+                }
+                finally
+                {
+                    NativeMethods.GlobalUnlock(hMem);
+                }
+
+                if (NativeMethods.SetClipboardData(CF_HDROP, hMem) == IntPtr.Zero)
+                {
+                    NativeMethods.GlobalFree(hMem);
+                    Trace("fileset set-clipboard-data failed");
+                    return 5;
+                }
+                return 0;
+            }
+            finally
+            {
+                NativeMethods.CloseClipboard();
+            }
+        }
+
+        /// <summary>
+        /// 打 DROPFILES 字节块。布局与 packages/desktop/electron/dropfiles.ts 的 buildDropFiles 一致：
+        ///   +0  pFiles  = 20（文件列表相对结构体开头的偏移）
+        ///   +4  pt.x    = 0
+        ///   +8  pt.y    = 0
+        ///   +12 fNC     = 0（不是"拖到资源管理器"）
+        ///   +16 fWide   = 1（宽字符）★ 实测 WinForms 写 0xFFFFFFFF 也认，1 同样正确
+        ///   之后每条路径 UTF-16LE + 一个宽字符 NUL，整块末尾再补一个宽字符 NUL。
+        /// </summary>
+        private static byte[] BuildDropFilesBlock(List<string> paths)
+        {
+            var body = new MemoryStream();
+            for (int i = 0; i < paths.Count; i++)
+            {
+                byte[] chars = Encoding.Unicode.GetBytes(paths[i]);
+                body.Write(chars, 0, chars.Length);
+                body.WriteByte(0);
+                body.WriteByte(0);
+            }
+            body.WriteByte(0);
+            body.WriteByte(0);
+
+            byte[] tail = body.ToArray();
+            byte[] block = new byte[DROPFILES_HEADER_BYTES + tail.Length];
+            WriteUInt32(block, 0, DROPFILES_HEADER_BYTES);
+            WriteUInt32(block, 4, 0);
+            WriteUInt32(block, 8, 0);
+            WriteUInt32(block, 12, 0);
+            WriteUInt32(block, 16, 1);
+            Buffer.BlockCopy(tail, 0, block, DROPFILES_HEADER_BYTES, tail.Length);
+            return block;
+        }
+
+        private static void WriteUInt32(byte[] buf, int offset, uint value)
+        {
+            buf[offset] = (byte)(value & 0xFF);
+            buf[offset + 1] = (byte)((value >> 8) & 0xFF);
+            buf[offset + 2] = (byte)((value >> 16) & 0xFF);
+            buf[offset + 3] = (byte)((value >> 24) & 0xFF);
+        }
+
+        /// <summary>
+        /// 解析单行 JSON 字符串数组（只认 `["a","b"]` 这一种形态）。
+        ///
+        /// ★ 自写而不引序列化器：本机只有 .NET Framework 4.x 的 csc，没有 System.Text.Json，
+        ///   为一次解析去引 System.Web.Extensions 不值得。遇到不认识的字符就抛，由调用方
+        ///   转成非 0 返回码 —— 不猜、不吞。
+        /// </summary>
+        private static List<string> ParseJsonArray(string text)
+        {
+            var result = new List<string>();
+            if (text == null)
+            {
+                throw new FormatException("empty payload");
+            }
+            int i = 0;
+            SkipJsonSpace(text, ref i);
+            ExpectChar(text, ref i, '[');
+            SkipJsonSpace(text, ref i);
+            if (i < text.Length && text[i] == ']')
+            {
+                return result;
+            }
+            while (true)
+            {
+                SkipJsonSpace(text, ref i);
+                result.Add(ReadJsonString(text, ref i));
+                SkipJsonSpace(text, ref i);
+                if (i >= text.Length)
+                {
+                    throw new FormatException("unterminated array");
+                }
+                char c = text[i];
+                i++;
+                if (c == ']')
+                {
+                    return result;
+                }
+                if (c != ',')
+                {
+                    throw new FormatException("unexpected char: " + c);
+                }
+            }
+        }
+
+        private static string ReadJsonString(string text, ref int i)
+        {
+            ExpectChar(text, ref i, '"');
+            var sb = new StringBuilder();
+            while (i < text.Length)
+            {
+                char c = text[i];
+                i++;
+                if (c == '"')
+                {
+                    return sb.ToString();
+                }
+                if (c != '\\')
+                {
+                    sb.Append(c);
+                    continue;
+                }
+                if (i >= text.Length)
+                {
+                    break;
+                }
+                char esc = text[i];
+                i++;
+                switch (esc)
+                {
+                    case '"': sb.Append('"'); break;
+                    case '\\': sb.Append('\\'); break;
+                    case '/': sb.Append('/'); break;
+                    case 'b': sb.Append('\b'); break;
+                    case 'f': sb.Append('\f'); break;
+                    case 'n': sb.Append('\n'); break;
+                    case 'r': sb.Append('\r'); break;
+                    case 't': sb.Append('\t'); break;
+                    case 'u':
+                        if (i + 4 > text.Length)
+                        {
+                            throw new FormatException("bad unicode escape");
+                        }
+                        sb.Append((char)Convert.ToInt32(text.Substring(i, 4), 16));
+                        i += 4;
+                        break;
+                    default:
+                        throw new FormatException("bad escape: " + esc);
+                }
+            }
+            throw new FormatException("unterminated string");
+        }
+
+        private static void SkipJsonSpace(string text, ref int i)
+        {
+            while (i < text.Length && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n'))
+            {
+                i++;
+            }
+        }
+
+        private static void ExpectChar(string text, ref int i, char want)
+        {
+            if (i >= text.Length || text[i] != want)
+            {
+                throw new FormatException("expected '" + want + "'");
+            }
+            i++;
         }
 
         // ---- FGEXE ----

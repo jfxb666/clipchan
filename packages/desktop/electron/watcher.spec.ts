@@ -15,6 +15,7 @@ import {
   FAILURE_TRACE_THRESHOLD,
   IMAGE_SIG_HEAD_BYTES,
   LastSeen,
+  RICH_HTML_MAX,
   SOURCE_APP_TIMEOUT_MS,
   imageSignature,
   isSelfExe,
@@ -23,6 +24,7 @@ import {
 } from './watcher';
 import type { ClipboardLike, RecordSink } from './watcher';
 import type { NativeImageLike } from './images';
+import { buildDropFiles } from './dropfiles';
 
 const tmpDirs: string[] = [];
 
@@ -70,6 +72,12 @@ interface FakeClip extends ClipboardLike {
     formats: string[];
     text: string;
     imageBuf: Buffer | null;
+    /** readBuffer('FileNameW') 的返回（DROPFILES 字节）。 */
+    fileBuf: Buffer | null;
+    /** readBuffer('text/html') 的返回。 */
+    htmlBuf: Buffer | null;
+    /** has('FileNameW') 的返回；可变，方便在同一个 watcher 上切换剪贴板类型。 */
+    hasFileName: boolean;
     image: NativeImageLike;
   };
 }
@@ -83,6 +91,10 @@ function makeClip(
     image?: NativeImageLike;
     hasFileName?: boolean;
     noReadBuffer?: boolean;
+    /** 复制文件：DROPFILES 字节（readBuffer('FileNameW') 的返回）。 */
+    fileBuf?: Buffer | null;
+    /** 富文本：readBuffer('text/html') 的返回。 */
+    htmlBuf?: Buffer | null;
   } = {},
 ): FakeClip {
   const calls: string[] = [];
@@ -90,6 +102,9 @@ function makeClip(
     formats: opts.formats ?? [],
     text: opts.text ?? '',
     imageBuf: opts.imageBuf ?? null,
+    fileBuf: opts.fileBuf ?? null,
+    htmlBuf: opts.htmlBuf ?? null,
+    hasFileName: opts.hasFileName === true,
     image: opts.image ?? fakeImage(),
   };
   const clip: FakeClip = {
@@ -101,7 +116,7 @@ function makeClip(
     },
     has: (format: string) => {
       calls.push('has:' + format);
-      return opts.hasFileName === true && /filename/i.test(format);
+      return state.hasFileName && /filename/i.test(format);
     },
     readText: () => {
       calls.push('readText');
@@ -115,6 +130,9 @@ function makeClip(
   if (opts.noReadBuffer !== true) {
     clip.readBuffer = (format: string) => {
       calls.push('readBuffer:' + format);
+      // 按格式分流：文件 / 富文本 / 图片各读各的，别互相串味。
+      if (/filename/i.test(format)) return state.fileBuf ?? Buffer.alloc(0);
+      if (/html/i.test(format)) return state.htmlBuf ?? Buffer.alloc(0);
       return state.imageBuf ?? Buffer.alloc(0);
     };
   }
@@ -126,27 +144,55 @@ function makeSink(): {
   sink: RecordSink;
   texts: string[];
   images: (string | null | undefined)[];
+  /** 每次 recordFiles 收到的路径列表。 */
+  files: string[][];
   /** 与 texts 一一对应的来源（undefined = 未知）。 */
   textSources: (string | undefined)[];
   /** 与 images 一一对应的来源。 */
   imageSources: (string | undefined)[];
+  /** 与 texts 一一对应的富文本 HTML（undefined = 没传）。 */
+  textRichHtml: (string | undefined)[];
+  /** 与 files 一一对应的签名。 */
+  fileSigs: (string | null | undefined)[];
+  /** 与 files 一一对应的来源。 */
+  fileSources: (string | undefined)[];
 } {
   const texts: string[] = [];
   const images: (string | null | undefined)[] = [];
+  const files: string[][] = [];
   const textSources: (string | undefined)[] = [];
   const imageSources: (string | undefined)[] = [];
+  const textRichHtml: (string | undefined)[] = [];
+  const fileSigs: (string | null | undefined)[] = [];
+  const fileSources: (string | undefined)[] = [];
   const sink: RecordSink = {
     lastSeen: new LastSeen(),
-    recordText: (t: string, sourceApp?: string) => {
+    recordText: (t: string, sourceApp?: string, richHtml?: string) => {
       texts.push(t);
       textSources.push(sourceApp);
+      textRichHtml.push(richHtml);
     },
     recordImage: (_img: NativeImageLike, sig?: string | null, sourceApp?: string) => {
       images.push(sig);
       imageSources.push(sourceApp);
     },
+    recordFiles: (paths: string[], sig?: string | null, sourceApp?: string) => {
+      files.push(paths);
+      fileSigs.push(sig);
+      fileSources.push(sourceApp);
+    },
   };
-  return { sink, texts, images, textSources, imageSources };
+  return {
+    sink,
+    texts,
+    images,
+    files,
+    textSources,
+    imageSources,
+    textRichHtml,
+    fileSigs,
+    fileSources,
+  };
 }
 
 describe('shouldSkipFormats（纯函数）', () => {
@@ -525,6 +571,432 @@ describe('ClipboardWatcher 来源应用追踪（sourceApp）', () => {
     w.stop();
 
     expect(texts).toEqual(['第一', '第二']);
+  });
+});
+
+describe('复制文件采集（P0-1）', () => {
+  it('has(FileNameW) 命中 → recordFiles 收到路径，且只记一次（同批文件不重复落库）', async () => {
+    const paths = ['C:\\Users\\me\\报告.docx', 'C:\\Users\\me\\数据.xlsx'];
+    const clip = makeClip({
+      // 实测：Electron 写完 FileNameW 后 availableFormats() 只报 text/uri-list
+      formats: ['text/uri-list'],
+      text: 'C:\\Users\\me\\报告.docx',
+      hasFileName: true,
+      fileBuf: buildDropFiles(paths),
+    });
+    const { sink, texts, files } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => files.length === 1);
+    await sleep(40); // 再躺好几跳：签名没变就不该再记
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(files).toEqual([paths]);
+    expect(sink.lastSeen.filesSig).not.toBeNull();
+    expect(texts).toEqual([]); // ★ 命中文件分支就不能再走 handleText
+  });
+
+  it('解不出路径时保持原样：只给一次 skip-files 轻提示，不入库', async () => {
+    const clip = makeClip({ formats: ['text/uri-list'], hasFileName: true });
+    const { sink, files } = makeSink();
+    const notices: string[] = [];
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      onNotice: (kind) => notices.push(kind),
+      onTrace: () => {},
+    });
+
+    w.start();
+    await sleep(40);
+    w.stop();
+
+    expect(files).toEqual([]);
+    expect(notices).toEqual(['skip-files']);
+  });
+
+  it('★ 文件采集不影响文本：同一句话在文件前后各记一次（lastSeen.text 被文件分支清空）', async () => {
+    const same = '同一句话';
+    const clip = makeClip({ formats: ['text/plain'], text: same });
+    const { sink, texts, files } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1); // 先记一次文本
+
+    // 中间复制一次文件：文件分支要把 lastSeen.text 清空
+    clip.state.formats = ['text/uri-list'];
+    clip.state.hasFileName = true;
+    clip.state.fileBuf = buildDropFiles(['C:\\a\\1.txt']);
+    await waitFor(() => files.length === 1);
+
+    // 再复制回同一句话：如果 text 残留，这一条会被判成重复而丢掉
+    clip.state.formats = ['text/plain'];
+    clip.state.hasFileName = false;
+    clip.state.text = same;
+    await waitFor(() => texts.length === 2);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual([same, same]);
+    expect(sink.lastSeen.filesSig).toBeNull(); // 文本分支也把 filesSig 清了
+  });
+
+  it('★ 助手给出路径时以它为准，即使 Electron 读不到字节（真实情况）', async () => {
+    // 实测：别的程序写的 CF_HDROP，Electron 的 has('FileNameW') 为 true 但 readBuffer 是空字节。
+    const clip = makeClip({ formats: ['text/uri-list'], hasFileName: true, fileBuf: Buffer.alloc(0) });
+    const { sink, files } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      readFiles: async () => ['C:\\Users\\me\\报告.docx', 'C:\\Users\\me\\数据.xlsx'],
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => files.length === 1);
+    await sleep(40);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(files).toEqual([['C:\\Users\\me\\报告.docx', 'C:\\Users\\me\\数据.xlsx']]);
+    // 助手给了路径就不该再去读那条不可靠的字节通道
+    expect(clip.calls.filter((c) => c === 'readBuffer:FileNameW')).toEqual([]);
+  });
+
+  it('助手返回 null（不可用/超时）→ 退回 Electron 的 readBuffer 通道', async () => {
+    const paths = ['C:\\a\\1.txt'];
+    const clip = makeClip({
+      formats: ['text/uri-list'],
+      hasFileName: true,
+      fileBuf: buildDropFiles(paths),
+    });
+    const { sink, files } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      readFiles: async () => null,
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => files.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(files).toEqual([paths]);
+  });
+
+  it('助手返回空数组（剪贴板被占用）→ 也退回 Electron 通道，不能当成没有文件', async () => {
+    const paths = ['C:\\a\\1.txt'];
+    const clip = makeClip({
+      formats: ['text/uri-list'],
+      hasFileName: true,
+      fileBuf: buildDropFiles(paths),
+    });
+    const { sink, files } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      readFiles: async () => [],
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => files.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(files).toEqual([paths]);
+  });
+
+  it('★ 等助手回包期间不重入：剪贴板躺着一批文件时只记一条', async () => {
+    const paths = ['C:\\a\\1.txt'];
+    const clip = makeClip({ formats: ['text/uri-list'], hasFileName: true });
+    const { sink, files } = makeSink();
+    let calls = 0;
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      // 故意比轮询间隔慢：没有闸门的话每一跳都会再起一条记录
+      readFiles: async () => {
+        calls += 1;
+        await sleep(30);
+        return paths;
+      },
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => files.length === 1);
+    await sleep(60);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(files).toEqual([paths]);
+    expect(calls).toBeLessThan(5);
+  });
+
+  it('文件也带来源应用', async () => {
+    const clip = makeClip({
+      formats: ['text/uri-list'],
+      hasFileName: true,
+      fileBuf: buildDropFiles(['C:\\a\\1.txt']),
+    });
+    const { sink, fileSources } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => 'explorer.exe',
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => fileSources.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(fileSources).toEqual(['explorer.exe']);
+  });
+});
+
+describe('按来源应用排除（P0-2，密码管理器不落库）', () => {
+  it('★ 来源在排除表里 → 一次都不落库，并给 excluded 轻提示', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: 'hunter2-明文密码' });
+    const { sink, texts, textSources } = makeSink();
+    const notices: string[] = [];
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => '1Password.exe',
+      excludeApps: () => ['1password.exe'],
+      onNotice: (kind, message) => notices.push(kind + '|' + message),
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => notices.length > 0);
+    await sleep(40); // 再多躺几跳也不能因为"上次没记"而反复触发
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual([]); // ★ 整条丢弃：不是记了但隐藏
+    expect(textSources).toEqual([]);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('excluded');
+    expect(notices[0]).toContain('1Password.exe');
+  });
+
+  it('排除表里没有这个来源 → 照常记录', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '正常内容' });
+    const { sink, texts } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => 'notepad.exe',
+      excludeApps: () => ['1password.exe', 'keepass.exe'],
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['正常内容']);
+  });
+
+  it('图片与文件同样受排除约束', async () => {
+    const imgClip = makeClip({ formats: ['image/png'], imageBuf: Buffer.alloc(128, 5) });
+    const a = makeSink();
+    const imgNotices: string[] = [];
+    const w1 = new ClipboardWatcher({
+      clip: imgClip,
+      recorder: a.sink,
+      intervalMs: 5,
+      foregroundExe: async () => 'keepass.exe',
+      excludeApps: () => ['keepass.exe'],
+      onNotice: (kind) => imgNotices.push(kind),
+      onTrace: () => {},
+    });
+    w1.start();
+    await waitFor(() => imgNotices.length === 1);
+    await w1.whenRecordsSettled();
+    w1.stop();
+    expect(a.images).toEqual([]);
+
+    const fileClip = makeClip({
+      formats: ['text/uri-list'],
+      hasFileName: true,
+      fileBuf: buildDropFiles(['C:\\secret\\vault.kdbx']),
+    });
+    const b = makeSink();
+    const fileNotices: string[] = [];
+    const w2 = new ClipboardWatcher({
+      clip: fileClip,
+      recorder: b.sink,
+      intervalMs: 5,
+      foregroundExe: async () => 'keepass.exe',
+      excludeApps: () => ['keepass.exe'],
+      onNotice: (kind) => fileNotices.push(kind),
+      onTrace: () => {},
+    });
+    w2.start();
+    await waitFor(() => fileNotices.length === 1);
+    await w2.whenRecordsSettled();
+    w2.stop();
+    expect(b.files).toEqual([]);
+  });
+
+  it('excludeApps 读设置抛异常时不影响采集（失败按"没有排除"处理）', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '照记' });
+    const { sink, texts } = makeSink();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => 'notepad.exe',
+      excludeApps: () => {
+        throw new Error('设置读不出来');
+      },
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['照记']);
+  });
+
+  it('设置随时可改：getter 每次现读，不用重建 watcher', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '第一条' });
+    const { sink, texts } = makeSink();
+    let excluded: string[] = [];
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      foregroundExe: async () => 'bitwarden.exe',
+      excludeApps: () => excluded,
+      onNotice: () => {},
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+
+    excluded = ['bitwarden.exe'];
+    clip.state.text = '第二条不该进库';
+    await sleep(60);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['第一条']);
+  });
+});
+
+describe('富文本采集（P2-7）', () => {
+  it('text/html + text/plain → recordText 第三参带上 HTML', async () => {
+    const html = '<b>加粗</b>';
+    const clip = makeClip({
+      formats: ['text/html', 'text/plain'],
+      text: '加粗',
+      htmlBuf: Buffer.from(html, 'utf8'),
+    });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['加粗']);
+    expect(textRichHtml).toEqual([html]);
+  });
+
+  it('★ 只有 text/html、没有纯文本 → 不再被当 skip-rich 丢掉', async () => {
+    const html = '<p>只有富文本</p>';
+    const clip = makeClip({ formats: ['text/html'], text: '', htmlBuf: Buffer.from(html, 'utf8') });
+    const { sink, texts, textRichHtml } = makeSink();
+    const notices: string[] = [];
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      intervalMs: 5,
+      onNotice: (kind) => notices.push(kind),
+      onTrace: () => {},
+    });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['']);
+    expect(textRichHtml).toEqual([html]);
+    expect(notices).toEqual([]);
+  });
+
+  it('纯文本剪贴板不带富文本（第三参为 undefined）', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '只有纯文本' });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(textRichHtml).toEqual([undefined]);
+    // 没声明 text/html 就不该去读它
+    expect(clip.calls).not.toContain('readBuffer:text/html');
+  });
+
+  it('HTML 超长截断到 RICH_HTML_MAX，保留头部', async () => {
+    const long = '<i>' + 'x'.repeat(RICH_HTML_MAX + 500) + '</i>';
+    const clip = makeClip({
+      formats: ['text/html', 'text/plain'],
+      text: '长文',
+      htmlBuf: Buffer.from(long, 'utf8'),
+    });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    const got = textRichHtml[0] ?? '';
+    expect(got).toHaveLength(RICH_HTML_MAX);
+    expect(got.startsWith('<i>xxx')).toBe(true);
+  });
+
+  it('读不到 HTML 字节时退回纯文本记录（不因为富文本失败而丢内容）', async () => {
+    const clip = makeClip({ formats: ['text/html', 'text/plain'], text: '退回纯文本', htmlBuf: null });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['退回纯文本']);
+    expect(textRichHtml).toEqual([undefined]);
   });
 });
 
