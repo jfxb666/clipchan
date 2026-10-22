@@ -18,6 +18,7 @@ import {
   RICH_HTML_MAX,
   SOURCE_APP_TIMEOUT_MS,
   imageSignature,
+  isRenderedPreview,
   isSelfExe,
   shouldSkipFormats,
   writeWatcherTrace,
@@ -76,6 +77,10 @@ interface FakeClip extends ClipboardLike {
     fileBuf: Buffer | null;
     /** readBuffer('text/html') 的返回。 */
     htmlBuf: Buffer | null;
+    /** readHTML() 的返回；null 表示不挂这个方法。 */
+    html: string | null;
+    /** readBuffer('HTML Format') 的返回（CF_HTML 整篇）。 */
+    cfBuf: Buffer | null;
     /** has('FileNameW') 的返回；可变，方便在同一个 watcher 上切换剪贴板类型。 */
     hasFileName: boolean;
     image: NativeImageLike;
@@ -95,6 +100,21 @@ function makeClip(
     fileBuf?: Buffer | null;
     /** 富文本：readBuffer('text/html') 的返回。 */
     htmlBuf?: Buffer | null;
+    /**
+     * 富文本：readHTML() 的返回。
+     *
+     * 传了才挂 readHTML —— 不传则维持老用例"只有 readBuffer"的形态，两边都覆盖到。
+     */
+    html?: string;
+    /** readHTML() 抛错（模拟读剪贴板失败）。 */
+    htmlThrows?: boolean;
+    /**
+     * 富文本：readBuffer('HTML Format') 的返回（Windows 原生 CF_HTML 整篇）。
+     *
+     * 与 htmlBuf 分开：'HTML Format' 拿到的是带偏移量头的整篇文档，
+     * 'text/html' 拿到的是裸片段，两者格式不同，不能共用一个假数据。
+     */
+    cfBuf?: Buffer | null;
   } = {},
 ): FakeClip {
   const calls: string[] = [];
@@ -104,6 +124,8 @@ function makeClip(
     imageBuf: opts.imageBuf ?? null,
     fileBuf: opts.fileBuf ?? null,
     htmlBuf: opts.htmlBuf ?? null,
+    html: opts.html ?? null,
+    cfBuf: opts.cfBuf ?? null,
     hasFileName: opts.hasFileName === true,
     image: opts.image ?? fakeImage(),
   };
@@ -127,11 +149,19 @@ function makeClip(
       return state.image;
     },
   };
+  if (opts.html !== undefined) {
+    clip.readHTML = () => {
+      calls.push('readHTML');
+      if (opts.htmlThrows === true) throw new Error('readHTML 炸了');
+      return state.html ?? '';
+    };
+  }
   if (opts.noReadBuffer !== true) {
     clip.readBuffer = (format: string) => {
       calls.push('readBuffer:' + format);
-      // 按格式分流：文件 / 富文本 / 图片各读各的，别互相串味。
+      // 按格式分流：文件 / CF_HTML / 富文本片段 / 图片各读各的，别互相串味。
       if (/filename/i.test(format)) return state.fileBuf ?? Buffer.alloc(0);
+      if (/^html format$/i.test(format)) return state.cfBuf ?? Buffer.alloc(0);
       if (/html/i.test(format)) return state.htmlBuf ?? Buffer.alloc(0);
       return state.imageBuf ?? Buffer.alloc(0);
     };
@@ -997,6 +1027,255 @@ describe('富文本采集（P2-7）', () => {
 
     expect(texts).toEqual(['退回纯文本']);
     expect(textRichHtml).toEqual([undefined]);
+  });
+});
+
+/** 造一份 CF_HTML 缓冲（头部偏移按真实字节算，正文 UTF-8）。 */
+function buildCfHtml(html: string): Buffer {
+  const pad = (n: number) => String(n).padStart(10, '0');
+  const stub = 'Version:1.0\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n\r\n';
+  const headerBytes = Buffer.byteLength(stub, 'latin1');
+  const htmlBytes = Buffer.byteLength(html, 'utf8');
+  const lines = [
+    'Version:1.0',
+    'StartHTML:' + pad(headerBytes),
+    'EndHTML:' + pad(headerBytes + htmlBytes),
+    'StartFragment:' + pad(headerBytes),
+    'EndFragment:' + pad(headerBytes + htmlBytes),
+  ];
+  const header = lines.join('\r\n') + '\r\n\r\n';
+  const padded = header + ' '.repeat(Math.max(0, headerBytes - Buffer.byteLength(header, 'latin1')));
+  return Buffer.concat([Buffer.from(padded, 'latin1'), Buffer.from(html, 'utf8')]);
+}
+
+/**
+ * Office 走的是 Windows 原生格式 `HTML Format`，Electron 的
+ * `readBuffer('text/html')` 对它恒回空字节。这组用例钉住三条通道的优先级：
+ * `readBuffer('HTML Format')` → `readHTML()` → `readBuffer('text/html')`。
+ */
+describe('富文本采集：Office 的原生 HTML Format 通道', () => {
+  it('★ CF_HTML 整篇优先于 readHTML 片段（片段丢了 <style>，粘回 Excel 会丢加粗）', async () => {
+    const full = '<html><head><style>.xl63{font-weight:700}</style></head><body><table><tr><td class=xl63>Name</td></tr></table></body></html>';
+    const clip = makeClip({
+      formats: ['text/plain', 'text/html', 'text/rtf', 'image/png'],
+      text: 'Name',
+      html: '<table><tr><td class=xl63>Name</td></tr></table>',
+      cfBuf: buildCfHtml(full),
+    });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['Name']);
+    expect(textRichHtml).toEqual([full]);
+  });
+
+  it('CF_HTML 是坏字节时退回 readHTML 片段', async () => {
+    const frag = '<p>片段兜底</p>';
+    const clip = makeClip({
+      formats: ['text/html', 'text/plain'],
+      text: '片段兜底',
+      html: frag,
+      cfBuf: Buffer.from('这不是 CF_HTML', 'utf8'),
+    });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(textRichHtml).toEqual([frag]);
+  });
+
+  it('readBuffer 恒空但 readHTML 有值 → 仍然采到富文本（Word 场景）', async () => {
+    const html = '<p class=MsoNormal><b>加粗标题</b></p>';
+    const clip = makeClip({
+      formats: ['text/plain', 'text/html', 'text/rtf'],
+      text: '加粗标题',
+      html,
+      htmlBuf: null,
+    });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['加粗标题']);
+    expect(textRichHtml).toEqual([html]);
+  });
+
+  it('readHTML 优先于 readBuffer（两条通道都有值时用 readHTML 的解码结果）', async () => {
+    const decoded = '<p>解码后的</p>';
+    const clip = makeClip({
+      formats: ['text/html', 'text/plain'],
+      text: '解码后的',
+      html: decoded,
+      htmlBuf: Buffer.from('<p>原始字节</p>', 'utf8'),
+    });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(textRichHtml).toEqual([decoded]);
+  });
+
+  it('readHTML 抛错时退回 readBuffer（不因为一条通道坏了就丢格式）', async () => {
+    const html = '<p>字节通道的</p>';
+    const clip = makeClip({
+      formats: ['text/html', 'text/plain'],
+      text: '字节通道的',
+      html: '不该用到的',
+      htmlThrows: true,
+      htmlBuf: Buffer.from(html, 'utf8'),
+    });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(textRichHtml).toEqual([html]);
+  });
+
+  it('readHTML 回空串时退回 readBuffer', async () => {
+    const html = '<p>回空串的</p>';
+    const clip = makeClip({
+      formats: ['text/html', 'text/plain'],
+      text: '回空串的',
+      html: '',
+      htmlBuf: Buffer.from(html, 'utf8'),
+    });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(textRichHtml).toEqual([html]);
+  });
+
+  it('readHTML 拿到超长 HTML 时按 RICH_HTML_MAX 截断', async () => {
+    const long = '<i>' + 'y'.repeat(RICH_HTML_MAX + 500) + '</i>';
+    const clip = makeClip({
+      formats: ['text/html', 'text/plain'],
+      text: '很长',
+      html: long,
+      htmlBuf: null,
+    });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    const got = textRichHtml[0] ?? '';
+    expect(got).toHaveLength(RICH_HTML_MAX);
+    expect(got.startsWith('<i>yyy')).toBe(true);
+  });
+
+  it('纯文本剪贴板（没有 html 通道）不会误读富文本', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '只是文本' });
+    const { sink, texts, textRichHtml } = makeSink();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(texts).toEqual(['只是文本']);
+    expect(textRichHtml).toEqual([undefined]);
+    expect(clip.calls).not.toContain('readHTML');
+  });
+});
+
+/**
+ * Office 复制单元格 / 段落时会顺带写一份渲染位图（CF_METAFILEPICT），
+ * Electron 的 readImage() 能解出小图但没有 PNG 字节。不排除它，
+ * Excel 复制 A1:B2 就会被存成一张 145x39 的截图，单元格内容全丢。
+ */
+describe('isRenderedPreview（Office 的渲染位图不是真图片）', () => {
+  it('Excel 形态：image/* + text/html + text/plain + 无图片字节 → 是预览', () => {
+    const clip = makeClip({ formats: ['text/plain', 'text/html', 'image/png'], text: 'Name\tQty' });
+    expect(isRenderedPreview(clip, ['text/plain', 'text/html', 'image/png'])).toBe(true);
+  });
+
+  it('★ PowerPoint 形态：有 PNG 字节但带真文本 → 仍是预览', () => {
+    // 实测 PPT 复制文本框：has('PNG')=true、readBuffer('PNG')=2510 字节、readImage()=423x105。
+    // 若按"拿不到图片字节"判预览，这条会被漏掉、存成一张截图把文字丢掉。
+    const buf = Buffer.alloc(2510, 7);
+    const clip = makeClip({
+      formats: ['text/plain', 'text/html', 'text/rtf', 'image/png'],
+      text: 'PPT BOLD TITLE\r\n',
+      imageBuf: buf,
+    });
+    expect(isRenderedPreview(clip, ['text/plain', 'text/html', 'text/rtf', 'image/png'])).toBe(true);
+  });
+
+  it('真截图（有 PNG 字节）→ 不是预览', () => {
+    const buf = Buffer.alloc(256, 9);
+    const clip = makeClip({ formats: ['image/png'], imageBuf: buf });
+    expect(isRenderedPreview(clip, ['image/png'])).toBe(false);
+  });
+
+  it('纯图片剪贴板（没有 text/html）→ 不是预览', () => {
+    const clip = makeClip({ formats: ['image/png'], imageBuf: null });
+    expect(isRenderedPreview(clip, ['image/png'])).toBe(false);
+  });
+
+  it('有 html 但没有纯文本 → 不是预览（没法从文本接管）', () => {
+    const clip = makeClip({ formats: ['text/html', 'image/png'], text: '' });
+    expect(isRenderedPreview(clip, ['text/html', 'image/png'])).toBe(false);
+  });
+
+  it('纯文本只有空白 → 不是预览', () => {
+    const clip = makeClip({ formats: ['text/plain', 'text/html', 'image/png'], text: '   \r\n' });
+    expect(isRenderedPreview(clip, ['text/plain', 'text/html', 'image/png'])).toBe(false);
+  });
+
+  it('★ Excel 复制单元格走文本分支，不会被存成小截图', async () => {
+    const clip = makeClip({
+      formats: ['text/plain', 'text/html', 'text/rtf', 'image/png'],
+      text: 'Name\tQty\r\nApple\t3\r\n',
+      cfBuf: buildCfHtml('<html><body><table><tr><td>Name</td></tr></table></body></html>'),
+    });
+    const { sink, texts } = makeSink();
+    const images: number[] = [];
+    const spy: RecordSink = {
+      ...sink,
+      recordImage: (img) => {
+        images.push(1);
+        return sink.recordImage(img);
+      },
+    };
+    const w = new ClipboardWatcher({ clip, recorder: spy, intervalMs: 5, onTrace: () => {} });
+
+    w.start();
+    await waitFor(() => texts.length === 1);
+    await w.whenRecordsSettled();
+    w.stop();
+
+    expect(images).toHaveLength(0);
+    expect(texts).toEqual(['Name\tQty\r\nApple\t3\r\n']);
   });
 });
 

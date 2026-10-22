@@ -119,12 +119,25 @@ Electron 37 的 `clipboard` 既读不出也写不出真正的 `CF_HDROP`：
 
 ## 富文本保真
 
-复制网页上带格式的内容（加粗、列表、表格），粘贴到 Word / 邮件 / 飞书里**格式还在**。
+复制网页或 Office 里带格式的内容（加粗、列表、表格），粘贴到 Word / Excel / 邮件 / 飞书里**格式还在**。
 
-- 采集时把 `text/html` 原样存进 `items.rich_html`（上限 20 万字符），粘贴时 `clipboard.write({ text, html })` 两种格式一起给。
+- 采集时把 HTML 原样存进 `items.rich_html`（上限 20 万字符），粘贴时 `clipboard.write({ text, html })` 两种格式一起给。
 - 目标程序只认纯文本（记事本、终端、代码编辑器）时，系统自动退回 `text`，不会变成一堆 HTML 源码。
 - 只有 HTML 没有纯文本的复制（某些网页按钮），会存成一条占位文本「（富文本内容，无纯文本）」，不会丢。
 - **HTML 原样保存，不做清洗与重排**。不执行其中的脚本（它只是一段字符串），但也不替你过滤样式。
+
+### Word / Excel / PowerPoint 为什么需要特殊处理
+
+Office 写剪贴板用的是 Windows 原生格式 `HTML Format`（CF_HTML），不是网页那套 `text/html`：
+
+- `clipboard.readBuffer('text/html')` 对 Office 内容**恒返回空字节**，只有 `clipboard.readHTML()` 能拿到东西 —— 而它只给 `StartFragment` 到 `EndFragment` 之间的**片段**，把外层 `<style>` 全丢了。Excel 的表格样式全在那段 style 里，实测只写片段粘回 Excel 加粗会丢。
+- 所以采集分三路，按优先级：① `readBuffer('HTML Format')` 按 CF_HTML 头里的字节偏移切出**完整文档**（`packages/desktop/electron/cfhtml.ts`）② `readHTML()` 拿片段 ③ `readBuffer('text/html')` 兜底。
+- ★ CF_HTML 头里的 `StartHTML` / `EndHTML` 是**字节偏移不是字符偏移**，必须先切 `Buffer` 再解码，否则含中文时整段错位。
+
+另一个坑：Office 复制时会**顺带写一份渲染位图**（`CF_METAFILEPICT` / `CF_ENHMETAFILE`），Electron 的 `readImage()` 能把它解成小图。不排除的话，Excel 复制 A1:B2 会被存成一张 145x39 的截图、PowerPoint 复制文字会被存成一张 423x105 的截图，文字全丢。
+
+- 判据是「**有 image/* + 有 HTML + 有非空纯文本**」（`isRenderedPreview()`），命中就走文本分支。
+- 刻意**不**用「拿不到图片字节」当判据：Excel 的 PNG 确实拿不到字节，但 PowerPoint 的能拿到 2510 字节，按字节判会漏掉 PowerPoint。
 
 ## 批量操作与粘贴为纯文本
 

@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { parseCfHtml } from './cfhtml';
 import { filePathsSignature, readFilePaths } from './files';
 import type { NativeImageLike } from './images';
 
@@ -66,6 +67,12 @@ export function excludedNotice(exe: string): string {
  *
  * `readBuffer` 是可选的（Electron 有 `clipboard.readBuffer`）：拿不到原始字节时退化为
  * "解码后取 PNG 字节当签名"，正确性不变、只是每跳多一次解码。
+ *
+ * `readHTML` 也是可选的，而且**必须**存在才能采到富文本：Windows 上 Office
+ * （Word / Excel）写的是原生格式 `HTML Format`，Electron 的
+ * `readBuffer('text/html')` 对它恒返回空字节（实测 Word 复制后 hasHtmlFormat 为 true、
+ * readBuffer 长度 0、readHTML 拿到 1157 字符）。只认 readBuffer 等于把 Office 的格式
+ * 全丢掉，v0.6.0 的富文本保真对 Office 一直是失效的。
  */
 export interface ClipboardLike {
   availableFormats(): string[];
@@ -73,6 +80,8 @@ export interface ClipboardLike {
   readText(): string;
   readImage(): NativeImageLike;
   readBuffer?(format: string): Buffer;
+  /** 解码后的 text/html（Electron 的 `clipboard.readHTML()`）。拿不到回空串。 */
+  readHTML?(): string;
 }
 
 /**
@@ -143,6 +152,38 @@ export function hasTextFormat(formats: string[]): boolean {
 /** 有没有 text/html（忽略 `; charset=...` 后缀）。 */
 export function hasHtmlFormat(formats: string[]): boolean {
   return lower(formats).some((f) => f.split(';')[0]!.trim() === 'text/html');
+}
+
+/**
+ * 这份"图片"只是内容的渲染预览吗？（Office 专属坑）
+ *
+ * Excel 复制单元格、Word 复制段落、PowerPoint 复制文本框时会顺带写一份渲染位图
+ * （`CF_METAFILEPICT` / `CF_ENHMETAFILE` / `PNG`）：Electron 的 `readImage()` 能解出位图
+ * （实测 Excel 复制 A1:B2 得到 145x39，PowerPoint 复制文字得到 423x105）。
+ *
+ * ★ 判据是"**有没有真文本**"，不是"有没有图片字节"：
+ *   Excel 的 PNG 拿不到字节（`readBuffer('PNG')` 回空），PowerPoint 的却能拿到 2510 字节，
+ *   拿字节判会漏掉 PowerPoint —— 实测漏掉的后果是那条 PPT 文字被存成一张 423x105 的截图
+ *   （库里 kind=image、content=null），文字全丢。
+ *
+ * 判定条件全部满足才算"预览"：
+ * - 有 image/* 格式；
+ * - 同时有 text/html（Office 一定写，纯截图工具不会）；
+ * - 同时有 text/plain 且非空（真内容在文本里）。
+ *
+ * 反向不会误判：真截图 / 网页里复制图片都没有非空 text/plain；
+ * PowerPoint 复制**形状**只写 image/png，也落不到这里。
+ * 命中时让文本分支接管。
+ */
+export function isRenderedPreview(clip: ClipboardLike, formats: string[]): boolean {
+  if (!hasImageFormat(formats)) return false;
+  if (!hasHtmlFormat(formats)) return false;
+  if (!hasTextFormat(formats)) return false;
+  try {
+    return (clip.readText() ?? '').trim().length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** 有没有 text/uri-list（读它之前必须先问一句：别的格式下 readText() 是无关内容）。 */
@@ -409,7 +450,9 @@ export class ClipboardWatcher {
         return;
       }
       // skip-rich 不再丢弃：有 text/html 就带着 HTML 一起记（见 handleText）。
-      if (hasImageFormat(fmts)) {
+      // ★ Office 复制时那份渲染位图不是真图片，见 isRenderedPreview —— 不排除它的话
+      //   Excel 复制单元格会存成一张小截图，单元格内容全丢。
+      if (hasImageFormat(fmts) && !isRenderedPreview(this.clip, fmts)) {
         this.handleImage(fmts, suppressed);
         this.failures = 0;
         return;
@@ -535,10 +578,16 @@ export class ClipboardWatcher {
   private handleText(fmts: string[], suppressed: boolean): void {
     const seen = this.recorder.lastSeen;
     const text = this.clip.readText() ?? '';
+    // ★ 判重必须排在读富文本**之前**：Office 的 'HTML Format' 有几十 KB
+    //   （实测 Word 复制两段文字 + 一张表 = 40KB），每 300ms 读一次纯属浪费。
+    //   纯文本非空且没变 = 这一跳就是重复内容，直接返回；
+    //   纯文本为空时不能提前返回 —— 可能是另一段"只有富文本"的内容。
+    const sameText = text === seen.text;
+    if (text.length > 0 && sameText) return;
     const richHtml = hasHtmlFormat(fmts) ? this.readRichHtml() : undefined;
     // 只有 HTML、没有纯文本时 text 为空，但 HTML 本身就是要记的东西。
     if (text.length === 0 && richHtml === undefined) return;
-    if (text === seen.text) return;
+    if (sameText) return;
     seen.text = text;
     seen.imageSig = null;
     seen.filesSig = null;
@@ -550,19 +599,50 @@ export class ClipboardWatcher {
     });
   }
 
-  /** 读 text/html 原始字节（拿不到 / 空串 → undefined，调用方按"没有富文本"处理）。 */
+  /**
+   * 读富文本（拿不到 / 空串 → undefined，调用方按"没有富文本"处理）。
+   *
+   * 三条通道按优先级试，**顺序不能反**：
+   * 1. `readBuffer('HTML Format')` + 自己解 CF_HTML —— 唯一能拿到**完整文档**的路子。
+   *    `readHTML()` 只回 StartFragment..EndFragment 的片段，丢掉外层
+   *    `<html><head><style>`；Office 的表格样式全在那段 style 里，粘回 Excel 时
+   *    表头加粗会丢（实测 Bold=True → False）。写回完整文档才保得住。
+   * 2. `readHTML()` —— 解码好的片段，覆盖"只注册了 text/html 不写 HTML Format"的程序。
+   * 3. `readBuffer('text/html')` —— 最后兜底。
+   *
+   * ★ 注意 `has('text/html')` 在 Windows 上对 Office 恒为 false，别拿它当开关。
+   */
   private readRichHtml(): string | undefined {
-    if (typeof this.clip.readBuffer !== 'function') return undefined;
-    try {
-      const buf = this.clip.readBuffer('text/html');
-      if (!buf || buf.length === 0) return undefined;
-      const html = buf.toString('utf8');
-      if (html.length === 0) return undefined;
-      return html.length > RICH_HTML_MAX ? html.slice(0, RICH_HTML_MAX) : html;
-    } catch {
-      // 读不到富文本不影响纯文本记录
-      return undefined;
+    let html = '';
+    if (typeof this.clip.readBuffer === 'function') {
+      try {
+        const buf = this.clip.readBuffer('HTML Format');
+        if (buf && buf.length > 0) {
+          const full = parseCfHtml(buf);
+          if (full !== null) html = full;
+        }
+      } catch {
+        // 换下一条通道
+      }
     }
+    if (html.length === 0 && typeof this.clip.readHTML === 'function') {
+      try {
+        const decoded = this.clip.readHTML();
+        if (typeof decoded === 'string') html = decoded;
+      } catch {
+        // 换下一条通道
+      }
+    }
+    if (html.length === 0 && typeof this.clip.readBuffer === 'function') {
+      try {
+        const buf = this.clip.readBuffer('text/html');
+        if (buf && buf.length > 0) html = buf.toString('utf8');
+      } catch {
+        // 读不到富文本不影响纯文本记录
+      }
+    }
+    if (html.length === 0) return undefined;
+    return html.length > RICH_HTML_MAX ? html.slice(0, RICH_HTML_MAX) : html;
   }
 
   /**
