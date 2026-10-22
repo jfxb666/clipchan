@@ -5,6 +5,10 @@
  *   所以 require 与 wasm 路径全部留在主进程，渲染层只通过 ClipchanApi.ocr 拿文本。
  * ★ 依赖注入（与 ai.ts 同风格）：顶层不 import electron、不 import tesseract.js，
  *   网络与文件 IO 全部从 OcrDeps 进来 —— ocr.spec.ts 才能在完全离线的情况下跑。
+ *
+ * ★ v0.5.0 收尾 §1：识别改成「放大 → PSM 6 → 文本清理」三段。
+ *   实测（641×99 中文截图，CER 越低越好）：原图 + 默认 PSM 3 = 0.962，
+ *   原图 + PSM 6 = 0.446，4× 放大 + PSM 6 = 0.223。灰度 / Otsu / 反色都实测有害，一律不做。
  */
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -37,6 +41,62 @@ export const OCR_NOT_READY = '尚未下载文字识别语言包';
 export const langFile = (lang: string): string => lang + '.traineddata.gz';
 
 /**
+ * 单块文本模式（PSM 6）。
+ * ★ 实测（641×99 中文截图）：默认 PSM 3 = 全自动分页，对「整块文字」的截图完全失效，
+ *   CER 0.962；换 PSM 6 后降到 0.446 —— 这是本次修质量的主因，不是分辨率。
+ */
+export const PSM_SINGLE_BLOCK = '6';
+
+/** 放大倍数。实测 4× 最优（CER 0.446 → 0.223），2× / 3× 都不如它。 */
+export const UPSCALE_FACTOR = 4;
+
+/**
+ * 放大后短边的上限（px）。
+ * ★ 4× 是固定倍数，本来就大的图再乘 4 会到 3200+，tesseract 耗时会明显上升而质量不涨，
+ *   所以到顶就只放大到这条线（也保证永远不会缩小原图）。
+ */
+export const MAX_UPSCALED_SHORT_EDGE = 2000;
+
+/** CJK 字符（含中文标点与全角符号）；只用来判断「空格夹在两个 CJK 之间」。 */
+const CJK = '[\\u4e00-\\u9fff\\u3000-\\u303f\\uff00-\\uffef]';
+
+/**
+ * 两个 CJK 字符之间的空白。
+ * ★ 为什么用 lookaround 而不是捕获组：中英混排（`v0.5.0 的端到端`）里那个空格必须留着，
+ *   只有「左邻右舍都是汉字」的空格才是 tesseract 硬插进来的。
+ */
+const CJK_GAP = new RegExp('(?<=' + CJK + ')[ \\t]+(?=' + CJK + ')', 'g');
+
+/**
+ * 按固定倍数算放大后的尺寸；短边到顶就按上限缩放，且绝不小于 1×（不缩小原图）。
+ * @param width 原图宽（px）
+ * @param height 原图高（px）
+ */
+export function upscaleSize(width: number, height: number): { width: number; height: number } {
+  const w = Number.isFinite(width) && width > 0 ? width : 0;
+  const h = Number.isFinite(height) && height > 0 ? height : 0;
+  if (w === 0 || h === 0) return { width: 0, height: 0 };
+  const shortEdge = Math.min(w, h);
+  // 两个上界取小：倍数上限 4×，以及短边不超过 MAX_UPSCALED_SHORT_EDGE。
+  const scale = Math.max(1, Math.min(UPSCALE_FACTOR, MAX_UPSCALED_SHORT_EDGE / shortEdge));
+  return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)) };
+}
+
+/**
+ * tesseract 输出的收尾清理。
+ * ★ 实测对 CER 无影响（0.223 → 0.223），但中文结果会被拆成「出 在 做 的 事」，
+ *   人眼几乎没法读，所以这一段是为了可读性，不是为了准确率。
+ */
+export function cleanText(raw: string): string {
+  return raw
+    .replace(/\r\n?/g, '\n')
+    .replace(CJK_GAP, '')
+    // 连续 3 个以上换行合并成 2 个：留一个空行分段，再多就是噪声。
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
  * HTTP 非 2xx 单独一个类型。
  * ★ 只有分得出「服务器回了 500」和「根本连不上」，才能给用户两句不同的中文原因。
  */
@@ -50,10 +110,16 @@ export class OcrHttpError extends Error {
   }
 }
 
-/** tesseract worker 的最小形状：只声明用到的两个方法，避免把它的 .d.ts 拉进主进程。 */
+/** tesseract worker 的最小形状：只声明用到的方法，避免把它的 .d.ts 拉进主进程。 */
 export interface OcrWorkerLike {
-  recognize(image: string): Promise<{ data: OcrPageLike }>;
+  /** 收路径（旧行为）或图片字节（v0.5.0 起走预处理后的字节）。 */
+  recognize(image: string | Uint8Array): Promise<{ data: OcrPageLike }>;
   terminate(): Promise<unknown>;
+  /**
+   * 可选：真 worker 有，既有 spec 的替身没有 —— 声明成可选，替身才不会全红。
+   * 只用来设 PSM，见 PSM_SINGLE_BLOCK。
+   */
+  setParameters?: (params: Record<string, string>) => Promise<unknown>;
 }
 
 /** tesseract 结果页里我们真正读的字段（其余字段一律不碰）。 */
@@ -77,6 +143,13 @@ export interface OcrDeps {
   exists?: (p: string) => boolean;
   sha256?: (b: Uint8Array) => string;
   mkdirp?: (p: string) => void;
+  /**
+   * 识别前的图片预处理（放大）。
+   * ★ 为什么走注入而不是直接在这里 import electron：本文件顶层不许 import electron
+   *   （ocr.spec.ts 要在没有 electron 运行时的环境里跑），nativeImage 只能由 main.ts 递进来。
+   * 返回 null 表示「这张图解不了」，调用方退回把原路径交给 tesseract。
+   */
+  prepare?: (imagePath: string) => { data: Uint8Array } | null;
 }
 
 export interface OcrApi {
@@ -133,6 +206,8 @@ export function createOcr(deps: OcrDeps): OcrApi {
     });
   const fetchBytes = deps.fetchBytes ?? defaultFetchBytes;
   const createWorker = deps.createWorker ?? defaultCreateWorker;
+  // 没注入预处理就原样把路径交给 tesseract（v0.5.0 之前的行为，spec 靠它跑）。
+  const prepare = deps.prepare;
 
   /** 上次失败的中文原因；成功后清空（界面据此决定还显不显示红字）。 */
   let lastError: string | undefined;
@@ -155,6 +230,19 @@ export function createOcr(deps: OcrDeps): OcrApi {
     return st;
   };
 
+  /**
+   * 把图片变成 tesseract 能吃的入参。
+   * ★ 预处理失败不能拖垮识别：放大只是提质手段，退回原路径至少还能出字。
+   */
+  const prepareImage = (imagePath: string): string | Uint8Array => {
+    if (!prepare) return imagePath;
+    try {
+      return prepare(imagePath)?.data ?? imagePath;
+    } catch {
+      return imagePath;
+    }
+  };
+
   const ensureWorker = (): Promise<OcrWorkerLike> => {
     if (workerPromise) return workerPromise;
     const p = createWorker([...OCR_LANGS], 1, {
@@ -170,11 +258,21 @@ export function createOcr(deps: OcrDeps): OcrApi {
           message: typeof m.status === 'string' ? m.status : '',
         });
       },
-    }).catch((e: unknown) => {
-      // 建 worker 失败不能缓存下来：下一次点「识别」要能重试。
-      workerPromise = null;
-      throw e;
-    });
+    })
+      .then(async (worker) => {
+        // ★ PSM 必须用 setParameters 落到 worker 全局态：recognize 的 options 是
+        //   SaveParameters/RestoreParameters 包起来的，传进去只对那一次生效。
+        //   放在建 worker 的 promise 链里，天然只设一次，且失败的 promise 不会被缓存。
+        if (worker.setParameters) {
+          await worker.setParameters({ tessedit_pageseg_mode: PSM_SINGLE_BLOCK });
+        }
+        return worker;
+      })
+      .catch((e: unknown) => {
+        // 建 worker 失败不能缓存下来：下一次点「识别」要能重试。
+        workerPromise = null;
+        throw e;
+      });
     workerPromise = p;
     return p;
   };
@@ -252,12 +350,13 @@ export function createOcr(deps: OcrDeps): OcrApi {
       if (!st.ready) throw new Error(OCR_NOT_READY);
       const worker = await ensureWorker();
       const started = Date.now();
-      const res = await worker.recognize(imagePath);
+      const res = await worker.recognize(prepareImage(imagePath));
       const data: OcrPageLike = res?.data ?? {};
       // 真实 Page 没有 ms（实测），所以默认自己量；worker 自带就用它的，省得两处耗时对不上。
       const ms = typeof data.ms === 'number' && Number.isFinite(data.ms) ? data.ms : Date.now() - started;
       return {
-        text: typeof data.text === 'string' ? data.text.trim() : '',
+        // ★ 不能只 trim：tesseract 的中文输出会在每个汉字之间插空格，见 cleanText。
+        text: typeof data.text === 'string' ? cleanText(data.text) : '',
         confidence: typeof data.confidence === 'number' ? data.confidence : 0,
         ms,
       };

@@ -10,11 +10,16 @@ import {
   LANG_BYTES,
   LANG_SHA256,
   LANG_URL,
+  MAX_UPSCALED_SHORT_EDGE,
   OCR_LANGS,
   OCR_NOT_READY,
   OcrHttpError,
+  PSM_SINGLE_BLOCK,
+  UPSCALE_FACTOR,
+  cleanText,
   createOcr,
   langFile,
+  upscaleSize,
 } from './ocr';
 import type { OcrDeps, OcrWorkerLike } from './ocr';
 
@@ -321,6 +326,156 @@ describe('recognize', () => {
     const ok = await ocr.recognize('C:\\fake\\a.png');
     expect(ok.text).toBe('hello 世界');
     expect(created).toBe(2);
+  });
+});
+
+/** 就绪的语言包目录（recognize 系列用例共用）。 */
+function readyFs() {
+  return fakeFs({
+    [LANG_DIR + '\\eng.traineddata.gz']: engBytes(),
+    [LANG_DIR + '\\chi_sim.traineddata.gz']: chiBytes(),
+  });
+}
+
+describe('预处理：放大尺寸（§1 实测 4× 最优）', () => {
+  it('短边够小 → 固定放大 4 倍（实测图 641×99 → 2564×396）', () => {
+    expect(UPSCALE_FACTOR).toBe(4);
+    expect(upscaleSize(641, 99)).toEqual({ width: 2564, height: 396 });
+  });
+
+  it('放大后短边超过上限 → 只放大到上限为止', () => {
+    // 1000×1000 乘 4 会到 4000，远超 2000，所以按 2000 封顶（正好 2×）。
+    expect(upscaleSize(1000, 1000)).toEqual({ width: 2000, height: 2000 });
+    // 长边跟着同一个倍数走（这里 1.667×），不单独裁剪。
+    expect(upscaleSize(1500, 1200)).toEqual({ width: 2500, height: 2000 });
+    expect(MAX_UPSCALED_SHORT_EDGE).toBe(2000);
+  });
+
+  it('原图短边已经到上限 → 保持 1×，绝不缩小原图', () => {
+    expect(upscaleSize(3000, 2500)).toEqual({ width: 3000, height: 2500 });
+    expect(upscaleSize(2400, 2000)).toEqual({ width: 2400, height: 2000 });
+  });
+
+  it('尺寸非法 → 回 0，调用方据此跳过放大', () => {
+    expect(upscaleSize(0, 99)).toEqual({ width: 0, height: 0 });
+    expect(upscaleSize(641, Number.NaN)).toEqual({ width: 0, height: 0 });
+    expect(upscaleSize(-5, -5)).toEqual({ width: 0, height: 0 });
+  });
+});
+
+describe('PSM：单块模式只设一次', () => {
+  it('建好 worker 后设 PSM 6，第二次识别不再设', async () => {
+    const seen: Record<string, string>[] = [];
+    let sets = 0;
+    const worker = {
+      ...fakeWorker(),
+      async setParameters(params: Record<string, string>): Promise<unknown> {
+        sets += 1;
+        seen.push(params);
+        return null;
+      },
+    };
+    const ocr = createOcr(deps({ fs: readyFs(), createWorker: async () => worker as OcrWorkerLike }));
+
+    await ocr.recognize('C:\\fake\\a.png');
+    await ocr.recognize('C:\\fake\\b.png');
+
+    expect(sets).toBe(1);
+    expect(seen[0]).toEqual({ tessedit_pageseg_mode: PSM_SINGLE_BLOCK });
+    // 实测 PSM 6：默认 PSM 3 会把整块中文截图切碎，CER 0.962。
+    expect(PSM_SINGLE_BLOCK).toBe('6');
+  });
+
+  it('worker 没有 setParameters（旧替身/旧版本）也不报错', async () => {
+    const worker = fakeWorker({ text: '出在做的事' });
+    const ocr = createOcr(deps({ fs: readyFs(), createWorker: async () => worker as OcrWorkerLike }));
+    const r = await ocr.recognize('C:\\fake\\a.png');
+    expect(r.text).toBe('出在做的事');
+  });
+
+  it('设 PSM 失败不缓存 worker：下一次还能重试', async () => {
+    let created = 0;
+    const worker = {
+      ...fakeWorker({ text: 'ok' }),
+      async setParameters(): Promise<unknown> {
+        created += 1;
+        if (created === 1) throw new Error('SetVariable 失败');
+        return null;
+      },
+    };
+    const ocr = createOcr(deps({ fs: readyFs(), createWorker: async () => worker as OcrWorkerLike }));
+    await expect(ocr.recognize('C:\\fake\\a.png')).rejects.toThrow('SetVariable 失败');
+    const ok = await ocr.recognize('C:\\fake\\a.png');
+    expect(ok.text).toBe('ok');
+    expect(created).toBe(2);
+  });
+});
+
+describe('文本清理：汉字间空格', () => {
+  it('删掉两个汉字之间的空格', () => {
+    expect(cleanText('出 在 做 的 事')).toBe('出在做的事');
+    // 多个空格、制表符同样是 tesseract 插进来的，一并删。
+    expect(cleanText('庙  到\t端')).toBe('庙到端');
+  });
+
+  it('中英混排的空格必须保留', () => {
+    expect(cleanText('v0.5.0 的端到端')).toBe('v0.5.0 的端到端');
+    expect(cleanText('hello 世界')).toBe('hello 世界');
+    expect(cleanText('第 2 版 release notes')).toBe('第 2 版 release notes');
+  });
+
+  it('连续 3 个以上换行合并成 2 个，且首尾无空白', () => {
+    expect(cleanText('\n\n 第一段\n\n\n\n第二段 \n\n')).toBe('第一段\n\n第二段');
+    // 恰好两个换行是段落分隔，不动。
+    expect(cleanText('甲\n\n乙')).toBe('甲\n\n乙');
+    // CRLF 先归一，免得 \r 卡在换行判断里。
+    expect(cleanText('甲\r\n\r\n\r\n乙')).toBe('甲\n\n乙');
+  });
+});
+
+describe('识别入参：prepare 注入', () => {
+  it('没注入 prepare → 仍把路径交给 tesseract（旧行为不变）', async () => {
+    const worker = fakeWorker();
+    const ocr = createOcr(deps({ fs: readyFs(), createWorker: async () => worker as OcrWorkerLike }));
+    await ocr.recognize('C:\\fake\\a.png');
+    expect(worker.lastImage).toBe('C:\\fake\\a.png');
+  });
+
+  it('注入了 prepare → 交给 tesseract 的是放大后的字节', async () => {
+    const worker = fakeWorker();
+    const prepared = new Uint8Array([1, 2, 3]);
+    const ocr = createOcr(
+      deps({
+        fs: readyFs(),
+        createWorker: async () => worker as OcrWorkerLike,
+        prepare: () => ({ data: prepared }),
+      }),
+    );
+    await ocr.recognize('C:\\fake\\a.png');
+    expect(worker.lastImage).toBe(prepared);
+  });
+
+  it('prepare 返回 null 或抛错 → 退回原路径，不让识别整条挂掉', async () => {
+    const worker = fakeWorker();
+    const ocr = createOcr(
+      deps({ fs: readyFs(), createWorker: async () => worker as OcrWorkerLike, prepare: () => null }),
+    );
+    await ocr.recognize('C:\\fake\\a.png');
+    expect(worker.lastImage).toBe('C:\\fake\\a.png');
+
+    const worker2 = fakeWorker();
+    const ocr2 = createOcr(
+      deps({
+        fs: readyFs(),
+        createWorker: async () => worker2 as OcrWorkerLike,
+        prepare: () => {
+          throw new Error('图片解不开');
+        },
+      }),
+    );
+    const r = await ocr2.recognize('C:\\fake\\b.png');
+    expect(worker2.lastImage).toBe('C:\\fake\\b.png');
+    expect(r.text).toBe('hello 世界');
   });
 });
 

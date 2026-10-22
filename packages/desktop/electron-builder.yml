@@ -12,6 +12,15 @@ copyright: Copyright © 2026 Clipchan
 npmRebuild: false
 buildDependenciesFromSource: false
 
+# ★ 瘦身（v0.5.0 启动速度）：Electron 自带 55 个语言包 .pak 共 42.5MB，我们只用中文。
+#   portable 版每次双击都要把整个目录解压到 %TEMP%，这 41MB 是白等的时间。
+#   实现见 app-builder-lib/out/electron/ElectronFramework.js:58-101：
+#   按 '<language>.pak' 的 basename 精确匹配，或 wantedLanguage 以 '<language>-' / '<language>_' 开头。
+#   所以必须写 'zh-CN'（写 'zh' 会连 zh-TW 一起留下），en-US 留作系统语言兜底。
+electronLanguages:
+  - zh-CN
+  - en-US
+
 # better-sqlite3 的 .node 不能进 asar（否则 dlopen 失败）。
 # tesseract.js-core 的 .wasm 同理：wasm 不能从 asar 里读，corePath 必须指 unpacked 目录。
 asarUnpack:
@@ -25,6 +34,28 @@ files:
   - '!node_modules/electron/**'
   - '!node_modules/.cache/**'
   - '!**/*.map'
+  # ★ 瘦身（v0.5.0 启动速度）：portable 版是 NSIS 自解压包，每次双击都把整个目录
+  #   解压到 %TEMP% 再启动，实测 26~41 秒；体积每减 1MB 都是用户每次双击少等的时间。
+  #
+  # tesseract.js-core 的 *.wasm.js 是「wasm 以 base64 内嵌」的浏览器专用变体，共 25.8MB。
+  # 我们的 worker 走 Node 路径（tesseract.js/src/worker-script/node/getCore.js:18-34），
+  # 它 require 的是同名 glue 模块（如 'tesseract.js-core/tesseract-core-relaxedsimd'），
+  # 解析到 tesseract-core-relaxedsimd.js（89KB，内含 locateFile，读同目录 .wasm）。
+  # 只有 browser/getCore.js 才会拼出 '.../tesseract-core-relaxedsimd.wasm.js' 的路径。
+  # 所以 *.wasm.js 在本项目永远不被加载 —— 但 *.wasm 与 glue *.js 必须全部保留：
+  # 具体挑哪个变体取决于运行机器的 wasm-feature-detect 结果（relaxed-simd / simd / 无）。
+  - '!**/tesseract.js-core/*.wasm.js'
+  # better-sqlite3 只用 win32-x64 那份 prebuild（lib/binding.js:41-50 按
+  # process.platform-process.arch 拼文件名）。另外 7 个平台的 .node、deps/（内含
+  # 9.5MB 的 sqlite3.c 源码）与 src/ 运行时都不需要；binding.gyp 本来就被
+  # electron-builder 默认排除（NodeModuleCopyHelper.js:20）。
+  - '!**/better-sqlite3/deps/**'
+  - '!**/better-sqlite3/src/**'
+  - '!**/better-sqlite3/prebuilds/*.node'
+  # ↑ 上一条把 8 个平台的 prebuild 全排除了，这里只把 win32-x64 加回来。
+  #   minimatchAll（app-builder-lib/out/util/filter.js:54-67）按顺序求值，
+  #   靠后的正向规则可以覆盖前面的排除，所以这一行必须排在排除行之后。
+  - '**/better-sqlite3/prebuilds/win32-x64.node'
   - 'package.json'
 
 directories:
