@@ -124,6 +124,11 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       },
       getText: async () => '',
       saveText: async () => ({ ok: true, id: 'saved-1' }),
+      pastePlain: async () => ({ ok: true }),
+      pasteMany: async () => ({ ok: true }),
+      removeMany: async () => 0,
+      pinMany: async () => {},
+      startDrag: async () => {},
       trashList: async (q: { limit?: number; offset?: number }) => {
         trashListCalls.push(q);
         const offset = q.offset ?? 0;
@@ -200,6 +205,8 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       getAutoStart: async () => false,
       setAutoStart: async () => true,
       openDataFolder: async () => {},
+      checkUpdate: async () => ({ state: 'idle' }),
+      applyUpdate: async () => {},
       onMode: () => () => {
         unsubscribed.push('mode');
       },
@@ -217,6 +224,7 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
           toastPushed = null;
         };
       },
+      onUpdate: () => () => {},
     },
     wordcloud: {
       today: async () => ({ words: [], totalItems: 0 }),
@@ -224,6 +232,13 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
     },
     clipboard: {
       writeText: async () => {},
+    },
+    snippets: {
+      list: async () => [],
+      save: async () => [],
+      remove: async () => [],
+      use: async () => [],
+      onChanged: () => () => {},
     },
     ai: {
       listProviders: async () => [],

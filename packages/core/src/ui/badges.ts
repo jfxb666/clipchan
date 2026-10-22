@@ -50,6 +50,11 @@ const BADGES: Record<Kind, Badge> = {
     className: 'bg-[var(--cc-badge-image-bg)] text-[var(--cc-pink)]',
     icon: null,
   },
+  files: {
+    label: 'File',
+    className: 'bg-[var(--cc-badge-path-bg)] text-[var(--cc-warm)]',
+    icon: 'folder',
+  },
 };
 
 /** 取某个内容类别的徽章描述。 */
@@ -71,6 +76,7 @@ const EMPTY_NO_QUERY: Record<string, string> = {
   all: '口袋还是空的，复制点什么试试',
   'text-group': '还没有文本记录，复制一段文字看看',
   image: '还没有图片记录，截个图试试',
+  files: '还没有文件记录，复制一个文件试试',
   link: '还没有链接记录，复制一个网址试试',
   code: '还没有代码记录，复制一段代码试试',
   favorite: '还没有收藏，点卡片右下角的星标就能收藏',
@@ -80,6 +86,7 @@ const EMPTY_WITH_QUERY: Record<string, (q: string) => string> = {
   all: (q) => '没有找到包含「' + q + '」的记录',
   'text-group': (q) => '没有找到包含「' + q + '」的文本',
   image: (q) => '没有找到匹配「' + q + '」的图片',
+  files: (q) => '没有找到匹配「' + q + '」的文件',
   link: (q) => '没有找到包含「' + q + '」的链接',
   code: (q) => '没有找到包含「' + q + '」的代码',
   favorite: (q) => '收藏里没有匹配「' + q + '」的记录',

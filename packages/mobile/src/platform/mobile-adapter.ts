@@ -50,7 +50,10 @@ import {
   type PurgeResult,
   type RestoreResult,
   type Settings,
+  type Snippet,
+  type SnippetInput,
   type TrashQuery,
+  type UpdateStatus,
   type WordCloudData,
 } from '@clipchan/core';
 
@@ -74,6 +77,9 @@ function nextId(): string {
 
 /** 记录表（模块级单例，适配器每次创建都共享同一份数据）。 */
 const records: MobileRecord[] = [];
+
+/** 片段库（同样是模块级单例；手机端本轮不落盘）。 */
+const snippets: Snippet[] = [];
 
 /** 换行常量：拼接分隔符与桌面端 MergeService 一致（CRLF）。 */
 const CRLF = String.fromCharCode(13, 10);
@@ -377,6 +383,63 @@ export function createMobileAdapter(): PlatformAdapter {
         throw new Error('手机端暂不支持回收站');
       },
 
+      async pastePlain(id: string): Promise<PasteResult> {
+        // 纯文本粘贴 = 只写文本。手机端写剪贴板本来就只有纯文本这条路。
+        const rec = records.find((r) => r.id === id);
+        if (!rec || rec.kind === 'image') return { ok: false, reason: 'no-target' };
+        const nav = globalThis.navigator as Navigator | undefined;
+        if (!nav?.clipboard?.writeText) return { ok: false, reason: 'send-failed' };
+        try {
+          await nav.clipboard.writeText(rec.content ?? '');
+          return { ok: true };
+        } catch {
+          return { ok: false, reason: 'send-failed' };
+        }
+      },
+
+      async pasteMany(ids: string[]): Promise<PasteResult> {
+        // 手机端没有"贴回原窗口"：批量粘贴退化为把拼好的文本写进剪贴板。
+        const parts: string[] = [];
+        for (const id of ids) {
+          const rec = records.find((r) => r.id === id);
+          if (rec && rec.kind !== 'image') parts.push(rec.content ?? '');
+        }
+        if (parts.length === 0) return { ok: false, reason: 'no-target' };
+        const nav = globalThis.navigator as Navigator | undefined;
+        if (!nav?.clipboard?.writeText) return { ok: false, reason: 'send-failed' };
+        try {
+          await nav.clipboard.writeText(parts.join('\n'));
+          return { ok: true };
+        } catch {
+          return { ok: false, reason: 'send-failed' };
+        }
+      },
+
+      async removeMany(ids: string[]): Promise<number> {
+        let removed = 0;
+        for (const id of ids) {
+          const i = records.findIndex((r) => r.id === id);
+          if (i >= 0) {
+            records.splice(i, 1);
+            removed += 1;
+          }
+        }
+        if (removed > 0) emit(itemsSubs);
+        return removed;
+      },
+
+      async pinMany(ids: string[], pinned: boolean): Promise<void> {
+        for (const id of ids) {
+          const rec = records.find((r) => r.id === id);
+          if (rec) rec.pinned = pinned;
+        }
+        emit(itemsSubs);
+      },
+
+      async startDrag(_id: string): Promise<void> {
+        // 拖出到外部应用是桌面窗口能力（Electron webContents.startDrag），手机端 no-op。
+      },
+
       onChanged(cb: () => void): Unsub {
         return subscribe(itemsSubs, cb);
       },
@@ -471,6 +534,19 @@ export function createMobileAdapter(): PlatformAdapter {
         throw new Error('手机端没有「数据文件夹」这个概念：Android/iOS 不给应用暴露用户可浏览的目录。');
       },
 
+      async checkUpdate(): Promise<UpdateStatus> {
+        // 自动更新是桌面端 electron-updater 的能力；手机端由应用商店负责。
+        return { state: 'none', message: '手机端由应用商店更新' };
+      },
+
+      async applyUpdate(): Promise<void> {
+        throw new Error('手机端没有可自行安装的更新包');
+      },
+
+      onUpdate(_cb: (s: UpdateStatus) => void): Unsub {
+        return () => {};
+      },
+
       onMode(cb: (mode: 'main' | 'widget') => void): Unsub {
         return subscribe(modeSubs, cb);
       },
@@ -505,6 +581,58 @@ export function createMobileAdapter(): PlatformAdapter {
         const nav = globalThis.navigator as Navigator | undefined;
         if (!nav?.clipboard?.writeText) throw new Error('当前环境不支持写剪贴板');
         await nav.clipboard.writeText(text);
+      },
+    },
+
+    snippets: {
+      // 片段库在手机端先用内存数组：与记录同样是「进程活着就在」的范围控制。
+      async list(): Promise<Snippet[]> {
+        return [...snippets];
+      },
+
+      async save(input: SnippetInput): Promise<Snippet[]> {
+        const content = typeof input.content === 'string' ? input.content : '';
+        if (content.trim().length === 0) throw new Error('片段内容不能为空');
+        const title = typeof input.title === 'string' ? input.title.trim() : '';
+        const now = Date.now();
+        const existing = input.id ? snippets.find((s) => s.id === input.id) : undefined;
+        if (existing) {
+          existing.title = title;
+          existing.content = content;
+          existing.updatedAt = now;
+        } else {
+          snippets.unshift({
+            id: nextId(),
+            title,
+            content,
+            createdAt: now,
+            updatedAt: now,
+            useCount: 0,
+          });
+        }
+        return [...snippets];
+      },
+
+      async remove(id: string): Promise<Snippet[]> {
+        const i = snippets.findIndex((s) => s.id === id);
+        if (i >= 0) snippets.splice(i, 1);
+        return [...snippets];
+      },
+
+      async use(id: string): Promise<Snippet[]> {
+        const s = snippets.find((x) => x.id === id);
+        if (!s) throw new Error('片段不存在');
+        s.useCount += 1;
+        s.updatedAt = Date.now();
+        const nav = globalThis.navigator as Navigator | undefined;
+        if (!nav?.clipboard?.writeText) throw new Error('当前环境不支持写剪贴板');
+        await nav.clipboard.writeText(s.content);
+        return [...snippets];
+      },
+
+      onChanged(_cb: () => void): Unsub {
+        // 手机端片段变更都在本进程内同步发生，界面自己刷新即可，没有跨进程推送。
+        return () => {};
       },
     },
 

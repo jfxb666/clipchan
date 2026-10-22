@@ -38,6 +38,12 @@ const EXPECTED = {
     'emptyTrash',
     // v0.5.0 T1：OCR 结果「存为一条新记录」
     'saveText',
+    // v0.6.0：纯文本粘贴 + 批量操作
+    'pastePlain',
+    'pasteMany',
+    'removeMany',
+    'pinMany',
+    'startDrag',
   ],
   settings: ['get', 'set'],
   ghost: ['get', 'set'],
@@ -52,6 +58,9 @@ const EXPECTED = {
     'setAutoStart',
     'openDataFolder',
     'capabilities',
+    // v0.6.0：自动更新（electron-updater）
+    'checkUpdate',
+    'applyUpdate',
   ],
   clipboard: ['writeText'],
   wordcloud: ['today', 'exportPng'],
@@ -73,6 +82,8 @@ const EXPECTED = {
   // v0.5.0 T1：截图与 OCR 两组新通道
   capture: ['begin', 'target', 'finish', 'cancel'],
   ocr: ['status', 'download', 'recognize'],
+  // v0.6.0：片段库
+  snippets: ['list', 'save', 'remove', 'use'],
 } as const;
 
 describe('channels 契约', () => {
@@ -215,5 +226,52 @@ describe('v0.5.0 T1：截图 / OCR / 优化历史通道', () => {
     expect(ALL_INVOKE_CHANNELS).not.toContain(EV.ocrProgress);
     expect(PRELOAD_SRC).toMatch(/onProgress:\s*\(cb:[^)]*\)[^\n]*on\(EV\.ocrProgress, cb\)/);
     expect(PRELOAD_SRC).not.toContain("'ocr:progress'");
+  });
+});
+
+describe('v0.6.0：批量 / 纯文本 / 片段 / 自动更新通道', () => {
+  /** 与前面几组同样的四重同步：通道键 → ALL_INVOKE_CHANNELS → preload 方法 → 不手写字符串。 */
+  const V6: [string, string, string][] = [
+    ['items', 'pastePlain', 'items:pastePlain'],
+    ['items', 'pasteMany', 'items:pasteMany'],
+    ['items', 'removeMany', 'items:removeMany'],
+    ['items', 'pinMany', 'items:pinMany'],
+    ['items', 'startDrag', 'items:startDrag'],
+    ['app', 'checkUpdate', 'app:checkUpdate'],
+    ['app', 'applyUpdate', 'app:applyUpdate'],
+    ['snippets', 'list', 'snippets:list'],
+    ['snippets', 'save', 'snippets:save'],
+    ['snippets', 'remove', 'snippets:remove'],
+    ['snippets', 'use', 'snippets:use'],
+  ];
+
+  it('① 通道名逐条对齐', () => {
+    for (const [group, key, channel] of V6) {
+      const table = (CH as Record<string, Record<string, string> | undefined>)[group];
+      expect(table, '缺少分组 ' + group).toBeTruthy();
+      expect(table?.[key], '通道名不对: ' + group + '.' + key).toBe(channel);
+    }
+  });
+
+  it('② 全部进了 ALL_INVOKE_CHANNELS（snippets 整组展平，不手改数组）', () => {
+    for (const [, , channel] of V6) {
+      expect(ALL_INVOKE_CHANNELS, channel + ' 没进 ALL_INVOKE_CHANNELS').toContain(channel);
+    }
+  });
+
+  it('③ preload 里每个新方法各自 invoke 到对应常量（不是手写字符串）', () => {
+    for (const [group, key, channel] of V6) {
+      const re = new RegExp(key + ':[^\\n]*ipcRenderer\\.invoke\\(CH\\.' + group + '\\.' + key);
+      expect(PRELOAD_SRC, 'preload 缺少 ' + key + ' 或没走 CH.' + group + '.' + key).toMatch(re);
+      expect(PRELOAD_SRC, '手写了通道字符串 ' + channel).not.toContain("'" + channel + "'");
+    }
+  });
+
+  it('④ 两个新订阅（更新进度 / 片段变更）走事件、不是 invoke 通道', () => {
+    for (const ev of [EV.updateStatus, EV.snippetsChanged]) {
+      expect(ALL_INVOKE_CHANNELS).not.toContain(ev);
+    }
+    expect(PRELOAD_SRC).toMatch(/onUpdate:\s*\(cb:[^)]*\)[^\n]*on\(EV\.updateStatus, cb\)/);
+    expect(PRELOAD_SRC).toMatch(/onChanged:\s*\(cb:[^)]*\)[^\n]*on\(EV\.snippetsChanged, cb\)/);
   });
 });

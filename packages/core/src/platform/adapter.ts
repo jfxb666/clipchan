@@ -32,6 +32,11 @@ const stub: PlatformAdapter = {
     importAll: () => Promise.reject(new Error('当前环境没有实现 items.importAll')),
     getText: () => Promise.reject(new Error('当前环境没有实现 items.getText')),
     saveText: () => Promise.reject(new Error('当前环境没有实现 items.saveText')),
+    pastePlain: () => Promise.reject(new Error('当前环境没有实现 items.pastePlain')),
+    pasteMany: () => Promise.reject(new Error('当前环境没有实现 items.pasteMany')),
+    removeMany: () => Promise.reject(new Error('当前环境没有实现 items.removeMany')),
+    pinMany: () => Promise.reject(new Error('当前环境没有实现 items.pinMany')),
+    startDrag: () => Promise.reject(new Error('当前环境没有实现 items.startDrag')),
     trashList: () => Promise.reject(new Error('当前环境没有实现 items.trashList')),
     trashCount: () => Promise.reject(new Error('当前环境没有实现 items.trashCount')),
     restore: () => Promise.reject(new Error('当前环境没有实现 items.restore')),
@@ -60,10 +65,13 @@ const stub: PlatformAdapter = {
     getAutoStart: () => Promise.reject(new Error('当前环境没有实现 app.getAutoStart')),
     setAutoStart: () => Promise.reject(new Error('当前环境没有实现 app.setAutoStart')),
     openDataFolder: () => Promise.reject(new Error('当前环境没有实现 app.openDataFolder')),
+    checkUpdate: () => Promise.reject(new Error('当前环境没有实现 app.checkUpdate')),
+    applyUpdate: () => Promise.reject(new Error('当前环境没有实现 app.applyUpdate')),
     onMode: () => unsubscribe(),
     onNavigate: () => unsubscribe(),
     // 订阅类一律 no-op 而不是 reject：调用方在挂载时就订阅，抛错会把整个界面拖崩。
     onToast: () => unsubscribe(),
+    onUpdate: () => unsubscribe(),
   },
   wordcloud: {
     today: () => Promise.reject(new Error('当前环境没有实现 wordcloud.today')),
@@ -71,6 +79,13 @@ const stub: PlatformAdapter = {
   },
   clipboard: {
     writeText: () => Promise.reject(new Error('当前环境没有实现 clipboard.writeText')),
+  },
+  snippets: {
+    list: () => Promise.reject(new Error('当前环境没有实现 snippets.list')),
+    save: () => Promise.reject(new Error('当前环境没有实现 snippets.save')),
+    remove: () => Promise.reject(new Error('当前环境没有实现 snippets.remove')),
+    use: () => Promise.reject(new Error('当前环境没有实现 snippets.use')),
+    onChanged: () => unsubscribe(),
   },
   ai: {
     listProviders: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),

@@ -3,8 +3,14 @@
  * 渲染进程与移动端里使用，因此**不得** import 任何 electron / node 模块。
  */
 
-/** 一条剪贴板记录的内容类别。 */
-export type Kind = 'text' | 'link' | 'code' | 'path' | 'number' | 'image';
+/**
+ * 一条剪贴板记录的内容类别。
+ *
+ * ★ v0.6.0 加 'files'：从资源管理器复制的文件列表（CF_HDROP）。
+ *   它和 'image' 一样是"有实体"的类别 —— 内容不是一段可直接展示的文本，
+ *   而是磁盘上若干文件的路径列表，所以 classify() 永远不产出它（由 watcher 判定）。
+ */
+export type Kind = 'text' | 'link' | 'code' | 'path' | 'number' | 'image' | 'files';
 
 /** 侧栏与筛选条能表达的查询类别（比 Kind 多出聚合与收藏）。 */
 export type KindFilter = Kind | 'all' | 'favorite' | 'text-group';
@@ -59,6 +65,45 @@ export interface ClipItemDTO {
   /** 图片原始宽高（v0.4.0 瀑布流算列高用）；非图片或无记录时 undefined。 */
   width?: number;
   height?: number;
+  /** 文件记录里的文件个数（v0.6.0）；非文件记录为 undefined。绝对路径不出主进程。 */
+  fileCount?: number;
+  /** 这条记录带富文本（text/html）原样（v0.6.0）：粘贴时能保留加粗/列表/表格。 */
+  hasRich?: boolean;
+}
+
+/**
+ * 一条片段（v0.6.0 片段库）。
+ *
+ * ★ 与 items 的区别：items 是"复制过什么"，snippets 是"用户刻意存下来要反复用的"。
+ *   所以它有自己的表、自己的排序（最近使用优先），不参与历史上限淘汰。
+ */
+export interface Snippet {
+  id: string;
+  /** 列表上显示的名字；空串表示用内容首行兜底（由 UI 的 snippetLabel 决定）。 */
+  title: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+  /** 被粘贴/复制的次数：排序时"常用的"靠前。 */
+  useCount: number;
+}
+
+/** 新增或修改一条片段的入参（id 缺省 = 新增）。 */
+export interface SnippetInput {
+  id?: string;
+  title: string;
+  content: string;
+}
+
+/** 自动更新的进度快照（主进程 → 设置页）。 */
+export interface UpdateStatus {
+  state: 'idle' | 'checking' | 'none' | 'available' | 'downloading' | 'downloaded' | 'error';
+  /** 可用/已下载的版本号；其余状态为 undefined。 */
+  version?: string;
+  /** 下载百分比 0-100；只有 downloading 时有意义。 */
+  percent?: number;
+  /** 出错时的中文原因（不弹英文原始报文）。 */
+  message?: string;
 }
 
 export type ThemeMode = 'auto' | 'light' | 'dark';
@@ -82,6 +127,11 @@ export interface Settings {
   trashLimit: number;
   /** 列表布局模式（v0.4.0）。只影响排列，不影响筛选。 */
   listLayout: ListLayout;
+  /**
+   * 不记录来源应用白名单的反面（v0.6.0）：exe 文件名列表，小写比较。
+   * 命中就整条丢弃 —— 密码管理器 / 银行网页这类不该留痕的来源靠它挡住。
+   */
+  excludeApps: string[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -97,6 +147,7 @@ export const DEFAULT_SETTINGS: Settings = {
   hotkeyCapture: 'Control+Alt+S',
   trashLimit: 200,
   listLayout: 'list',
+  excludeApps: [],
 };
 
 export interface HotkeyStatus {
@@ -354,6 +405,19 @@ export interface ClipchanApi {
     getText(id: string): Promise<string>;
     /** 把一段纯文本存成一条普通记录（kind='text'）。空串回 ok:false。 */
     saveText(text: string): Promise<{ ok: boolean; id?: string }>;
+    /**
+     * 一键粘贴为纯文本（v0.6.0，Ctrl+Shift+V）：丢弃 text/html 只写纯文本。
+     * 从网页复制的内容贴到记事本里会带上格式，这个入口给"我只要字"的场景。
+     */
+    pastePlain(id: string): Promise<PasteResult>;
+    /** 批量粘贴：把多条记录按列表顺序用换行拼成一段再贴出去。 */
+    pasteMany(ids: string[]): Promise<PasteResult>;
+    /** 批量删除（软删进回收站）；返回实际删掉的条数。 */
+    removeMany(ids: string[]): Promise<number>;
+    /** 批量收藏 / 取消收藏。 */
+    pinMany(ids: string[], pinned: boolean): Promise<void>;
+    /** 把一条记录拖到外部应用（Electron webContents.startDrag；只有主进程能做）。 */
+    startDrag(id: string): Promise<void>;
     /** 回收站列表（按删除时间倒序）；缩略图同样走协议 URL。 */
     trashList(q: TrashQuery): Promise<ClipItemDTO[]>;
     /** 回收站总条数（分页显示"共 N 条"）。 */
@@ -407,6 +471,12 @@ export interface ClipchanApi {
      *   不暴露这条订阅，那些 toast 就永远到不了界面，用户看到的是"点了没反应"。
      */
     onToast(cb: (t: AppToast) => void): () => void;
+    /** 手动检查更新（设置页「检查更新」）。开发态 / 便携版返回 state:'idle'。 */
+    checkUpdate(): Promise<UpdateStatus>;
+    /** 已下载完成时立即重启安装；否则什么都不做。 */
+    applyUpdate(): Promise<void>;
+    /** 更新进度推送（检查中 / 下载百分比 / 已就绪 / 出错）。 */
+    onUpdate(cb: (s: UpdateStatus) => void): () => void;
   };
   wordcloud: {
     today(): Promise<WordCloudData>;
@@ -415,6 +485,16 @@ export interface ClipchanApi {
   clipboard: {
     /** 只写系统剪贴板：不查库、不 touch、不模拟粘贴（优化面板「复制」用）。 */
     writeText(text: string): Promise<void>;
+  };
+  /** 片段库（v0.6.0）：用户刻意存下来反复用的内容，独立于剪贴板历史。 */
+  snippets: {
+    list(): Promise<Snippet[]>;
+    /** id 缺省 = 新增；带了就覆盖那条。返回全量列表（界面直接替换）。 */
+    save(input: SnippetInput): Promise<Snippet[]>;
+    remove(id: string): Promise<Snippet[]>;
+    /** 把片段写进剪贴板并累计使用次数（不贴回窗口，避免误伤当前焦点）。 */
+    use(id: string): Promise<Snippet[]>;
+    onChanged(cb: () => void): () => void;
   };
   ai: {
     /** Key 已掩码：只回 keyMask 与 hasKey。 */

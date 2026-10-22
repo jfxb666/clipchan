@@ -33,6 +33,13 @@ export const CH = {
     emptyTrash: 'items:emptyTrash',
     // v0.5.0：OCR 结果「存为一条新记录」。
     saveText: 'items:saveText',
+    // v0.6.0：批量操作与纯文本粘贴。
+    pastePlain: 'items:pastePlain',
+    pasteMany: 'items:pasteMany',
+    removeMany: 'items:removeMany',
+    pinMany: 'items:pinMany',
+    // v0.6.0：拖到外部应用。
+    startDrag: 'items:startDrag',
   },
   settings: { get: 'settings:get', set: 'settings:set' },
   ghost: { get: 'ghost:get', set: 'ghost:set' },
@@ -47,6 +54,9 @@ export const CH = {
     setAutoStart: 'app:setAutoStart',
     openDataFolder: 'app:openDataFolder',
     capabilities: 'app:capabilities',
+    // v0.6.0：自动更新（electron-updater；GitHub Releases 分发，不需要服务器）。
+    checkUpdate: 'app:checkUpdate',
+    applyUpdate: 'app:applyUpdate',
   },
   wordcloud: { today: 'wordcloud:today', exportPng: 'wordcloud:exportPng' },
   ai: {
@@ -77,6 +87,13 @@ export const CH = {
     download: 'ocr:download',
     recognize: 'ocr:recognize',
   },
+  // v0.6.0 片段库：与 items 分开，因为它是"用户刻意存的"，不参与历史上限淘汰。
+  snippets: {
+    list: 'snippets:list',
+    save: 'snippets:save',
+    remove: 'snippets:remove',
+    use: 'snippets:use',
+  },
 } as const;
 
 /** 主进程 -> 渲染进程的单向事件。 */
@@ -94,6 +111,10 @@ export const EV = {
   aiChanged: 'ai:changed',
   /** OCR 下载/识别进度（主进程 -> 界面；语言包下载可能几十秒，没有进度就是假死）。 */
   ocrProgress: 'ocr:progress',
+  /** 自动更新进度（主进程 -> 设置页）。 */
+  updateStatus: 'app:update:status',
+  /** 片段库变更（主进程 -> 界面）。 */
+  snippetsChanged: 'snippets:changed',
 } as const;
 
 /** 所有 invoke 通道的扁平清单（--smoke 用来断言"一个都没漏"）。 */
@@ -107,4 +128,5 @@ export const ALL_INVOKE_CHANNELS: string[] = [
   ...Object.values(CH.ai),
   ...Object.values(CH.capture),
   ...Object.values(CH.ocr),
+  ...Object.values(CH.snippets),
 ];

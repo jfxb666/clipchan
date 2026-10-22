@@ -392,15 +392,16 @@ function rowToImageRow(row: ItemRow): ImageRow {
 // ---------------- 查询拼装 ----------------
 
 const KIND_GROUPS: Record<KindFilter, Kind[]> = {
-  all: ['text', 'link', 'code', 'path', 'number', 'image'],
+  all: ['text', 'link', 'code', 'path', 'number', 'image', 'files'],
   'text-group': ['text', 'path', 'number'],
-  favorite: ['text', 'link', 'code', 'path', 'number', 'image'],
+  favorite: ['text', 'link', 'code', 'path', 'number', 'image', 'files'],
   text: ['text'],
   link: ['link'],
   code: ['code'],
   path: ['path'],
   number: ['number'],
   image: ['image'],
+  files: ['files'],
 };
 
 /**
@@ -464,6 +465,25 @@ function normalizeLayout(v: unknown): Settings['listLayout'] {
   return v === 'timeline' || v === 'masonry' || v === 'source' ? v : 'list';
 }
 
+/**
+ * 排除应用名单归一化：只留 exe 文件名（小写、去路径、去空白、去重）。
+ *
+ * 用户可能粘贴 `C:\Program Files\1Password\1Password.exe`，也可能只写 `1password.exe`；
+ * 统一取 basename 再比，才不会因为写法不同而漏排除（漏排除 = 密码明文永久落库）。
+ */
+export function normalizeExcludeApps(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const raw of v) {
+    if (typeof raw !== 'string') continue;
+    const base = raw.trim().split(/[\\/]/).pop() ?? '';
+    const name = base.trim().toLowerCase();
+    if (name.length === 0) continue;
+    if (!out.includes(name)) out.push(name);
+  }
+  return out.slice(0, 50);
+}
+
 /** 逐键清洗，非法值一律回落默认值——旧库被手改过也不至于把界面搞崩。 */
 function sanitizeSettings(input: Partial<Settings>): Settings {
   const d = DEFAULT_SETTINGS;
@@ -480,6 +500,7 @@ function sanitizeSettings(input: Partial<Settings>): Settings {
     hotkeyCapture: typeof input.hotkeyCapture === 'string' && input.hotkeyCapture.length > 0 ? input.hotkeyCapture : d.hotkeyCapture,
     trashLimit: input.trashLimit === undefined ? d.trashLimit : clampInt(input.trashLimit, 1, 9999, d.trashLimit),
     listLayout: input.listLayout === undefined ? d.listLayout : normalizeLayout(input.listLayout),
+    excludeApps: Array.isArray(input.excludeApps) ? normalizeExcludeApps(input.excludeApps) : d.excludeApps,
   };
 }
 

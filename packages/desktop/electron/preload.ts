@@ -35,7 +35,10 @@ import type {
   PurgeResult,
   RestoreResult,
   Settings,
+  Snippet,
+  SnippetInput,
   TrashQuery,
+  UpdateStatus,
   WordCloudData,
 } from '@clipchan/core';
 import { CH, EV } from './channels';
@@ -65,6 +68,11 @@ const api = {
     importAll: (): Promise<ImportResult> => ipcRenderer.invoke(CH.items.importAll),
     getText: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getText, id),
     saveText: (text: string): Promise<{ ok: boolean; id?: string }> => ipcRenderer.invoke(CH.items.saveText, text),
+    pastePlain: (id: string): Promise<PasteResult> => ipcRenderer.invoke(CH.items.pastePlain, id),
+    pasteMany: (ids: string[]): Promise<PasteResult> => ipcRenderer.invoke(CH.items.pasteMany, ids),
+    removeMany: (ids: string[]): Promise<number> => ipcRenderer.invoke(CH.items.removeMany, ids),
+    pinMany: (ids: string[], pinned: boolean): Promise<void> => ipcRenderer.invoke(CH.items.pinMany, ids, pinned),
+    startDrag: (id: string): Promise<void> => ipcRenderer.invoke(CH.items.startDrag, id),
     // ★ 回收站五方法：与 channels.ts 的五个键一一对应（preload.spec 断言不遗漏）。
     trashList: (q: TrashQuery): Promise<ClipItemDTO[]> => ipcRenderer.invoke(CH.items.trashList, q),
     trashCount: (): Promise<number> => ipcRenderer.invoke(CH.items.trashCount),
@@ -95,6 +103,9 @@ const api = {
     getAutoStart: (): Promise<boolean> => ipcRenderer.invoke(CH.app.getAutoStart),
     setAutoStart: (on: boolean): Promise<boolean> => ipcRenderer.invoke(CH.app.setAutoStart, on),
     openDataFolder: (): Promise<void> => ipcRenderer.invoke(CH.app.openDataFolder),
+    checkUpdate: (): Promise<UpdateStatus> => ipcRenderer.invoke(CH.app.checkUpdate),
+    applyUpdate: (): Promise<void> => ipcRenderer.invoke(CH.app.applyUpdate),
+    onUpdate: (cb: (s: UpdateStatus) => void): (() => void) => on(EV.updateStatus, cb),
     onMode: (cb: (mode: 'main' | 'widget') => void): (() => void) => on(EV.modeChanged, cb),
     onNavigate: (cb: (target: NavigateTarget) => void): (() => void) => on(EV.navigate, cb),
     // ★ 主进程主动推的提示（恢复遇重复 / 删盘失败 / 导入汇总）。
@@ -140,6 +151,13 @@ const api = {
     download: (): Promise<OcrStatus> => ipcRenderer.invoke(CH.ocr.download),
     recognize: (id: string): Promise<OcrResult> => ipcRenderer.invoke(CH.ocr.recognize, id),
     onProgress: (cb: (p: OcrProgress) => void): (() => void) => on(EV.ocrProgress, cb),
+  },
+  snippets: {
+    list: (): Promise<Snippet[]> => ipcRenderer.invoke(CH.snippets.list),
+    save: (input: SnippetInput): Promise<Snippet[]> => ipcRenderer.invoke(CH.snippets.save, input),
+    remove: (id: string): Promise<Snippet[]> => ipcRenderer.invoke(CH.snippets.remove, id),
+    use: (id: string): Promise<Snippet[]> => ipcRenderer.invoke(CH.snippets.use, id),
+    onChanged: (cb: () => void): (() => void) => on(EV.snippetsChanged, cb),
   },
   capabilities,
 };
