@@ -88,7 +88,7 @@ interface Runtime {
   mode: WinMode;
   settings: Settings | null;
   ghost: GhostState;
-  hotkeyStatus: { activate: boolean; widget: boolean; conflicts: string[] };
+  hotkeyStatus: { activate: boolean; widget: boolean; capture: boolean; conflicts: string[] };
   autoStart: boolean;
 }
 
@@ -100,7 +100,7 @@ const rt: Runtime = {
   mode: START_WIDGET ? 'widget' : 'main',
   settings: null,
   ghost: { active: false, remainingMs: 0, until: null },
-  hotkeyStatus: { activate: false, widget: false, conflicts: [] },
+  hotkeyStatus: { activate: false, widget: false, capture: false, conflicts: [] },
   autoStart: false,
 };
 
@@ -130,6 +130,12 @@ let pendingBurstIds: string[] = [];
  */
 let captureOverlays: BrowserWindow[] = [];
 let captureTargets: CaptureTarget[] = [];
+/**
+ * 抓屏进行中标记。
+ * ★ captureOverlays 要等 await getSources 之后才赋值，光靠它当守卫挡不住连按：
+ *   每次调用都在赋值之前就穿过去了，屏幕上会叠出好几层全屏窗。
+ */
+let captureStarting = false;
 
 /** 广播器在 buildHandlers() 里才创建；AI 桥用它的 aiChanged 通道。 */
 let aiBroadcast: {
@@ -622,7 +628,13 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       if (patch && typeof patch.trashLimit === 'number') {
         purgeTrashOverLimitWithFiles(needDb(), rt.dataDir, (m) => console.warn('[images] ' + m));
       }
-      if (patch && (typeof patch.hotkeyActivate === 'string' || typeof patch.hotkeyWidget === 'string')) {
+      // ★ 三个热键都要重注册：漏掉 capture 会让用户改完「截图标注」后旧键仍然生效、新键毫无反应。
+      if (
+        patch &&
+        (typeof patch.hotkeyActivate === 'string' ||
+          typeof patch.hotkeyWidget === 'string' ||
+          typeof patch.hotkeyCapture === 'string')
+      ) {
         registerHotkeysNow();
       }
       // ★ 小组件宽度：真正改窗口尺寸的是 app.setWidgetSize（它会 applyMode），
@@ -743,9 +755,14 @@ function requireDb(): Db {
  * ★ 成功 / 用户取消 / 出错三条路径都要走到这里，否则会留下一层吃掉全部鼠标事件的全屏窗。
  */
 function cancelCapture(): void {
-  closeOverlays(captureOverlays);
+  const wins = captureOverlays;
   captureOverlays = [];
   captureTargets = [];
+  // ★ 不能在这里同步 destroy：cancel / finish 都是从 overlay 页面自己发起的 IPC，
+  //   回复还没发出去就把发起调用的那个窗拆掉，主进程会踩到已释放的 WebContents
+  //   （实测表现：在遮罩上按 Esc，整个应用直接退出，退出码 -1）。
+  //   推迟到本轮 IPC 回复之后再收窗，屏幕上的效果没有区别。
+  setImmediate(() => closeOverlays(wins));
 }
 
 /**
@@ -754,7 +771,21 @@ function cancelCapture(): void {
  */
 async function beginCapture(): Promise<CaptureTarget[] | null> {
   const broadcast = makeBroadcaster(() => rt.win);
-  // ★ 连按两次热键：先收掉上一次的 overlay，否则屏幕上会叠两层全屏窗（上层关掉才露出下层）。
+  // ★ 连按热键：抓屏期间直接忽略（captureStarting），抓完之后先收掉上一次的 overlay，
+  //   否则屏幕上会叠两层全屏窗（上层关掉才露出下层）。
+  if (captureStarting) return null;
+  captureStarting = true;
+  try {
+    return await startCaptureSession(broadcast);
+  } finally {
+    captureStarting = false;
+  }
+}
+
+/** beginCapture 的实际工作（拆出来只为让上面那段守卫用 try/finally 包住全部出口）。 */
+async function startCaptureSession(
+  broadcast: ReturnType<typeof makeBroadcaster>
+): Promise<CaptureTarget[] | null> {
   if (captureOverlays.length > 0) cancelCapture();
 
   const displays = screen.getAllDisplays();
@@ -1306,7 +1337,9 @@ function main(): void {
     console.log(
       '[main] 数据目录 ' + rt.dataDir +
       '，自启目标 ' + autoStartPath(process.env, process.execPath) +
-      '，快捷键 activate=' + rt.hotkeyStatus.activate + ' widget=' + rt.hotkeyStatus.widget
+      '，快捷键 activate=' + rt.hotkeyStatus.activate +
+      ' widget=' + rt.hotkeyStatus.widget +
+      ' capture=' + rt.hotkeyStatus.capture
     );
   });
 }

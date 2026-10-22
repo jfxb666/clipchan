@@ -92,7 +92,11 @@ export function App() {
   const optimizeSource = useClipStore((s) => s.optimizeSource);
 
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const hotkeys = useHotkeyStatus();
+  // ★ 传整个 settings 当 refreshKey：设置页改完快捷键后要重新读一次注册结果，
+  //   否则「已生效 / 注册失败」永远停在启动那一刻的答案。
+  //   用对象而不是拼接字符串：updateSettings 先乐观 set 一次、落库后再 set 一次，
+  //   只有后者那次读到的才是主进程重注册之后的真实状态。
+  const hotkeys = useHotkeyStatus(settings);
   const autoStart = useAutoStart();
 
   /**
