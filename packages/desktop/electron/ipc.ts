@@ -82,6 +82,21 @@ export function registerIpc(deps: IpcDeps = {}): string[] {
   });
   registered.add(CH.app.capabilities);
 
+  // ★ 拖出到外部：同一个通道名同时挂"单向 send"与"invoke"两套。
+  //   界面必须走 send —— 拖拽得在 dragstart 的同步栈里发起，invoke 是一次异步往返，
+  //   等主进程收到消息时 Chromium 早把这次拖拽收尾了，DoDragDrop 拿不到按下的鼠标键，
+  //   表现就是"拖了没反应、也没有任何提示"。invoke 那套留给其它调用方 await 用。
+  const startDragImpl = handlers[CH.items.startDrag];
+  ipcMain.removeAllListeners(CH.items.startDrag);
+  ipcMain.on(CH.items.startDrag, (e, id: string) => {
+    try {
+      void startDragImpl?.(e as unknown as Electron.IpcMainInvokeEvent, id);
+    } catch (err) {
+      console.warn('[drag] 发起拖拽失败：' + String(err));
+    }
+  });
+  registered.add(CH.items.startDrag);
+
   // 打开数据目录：不在 spec §8.1 的 invoke 清单里（它是 void），单独一条通道。
   ipcMain.removeAllListeners('app:openPath');
   ipcMain.on('app:openPath', (_e, target: string) => {

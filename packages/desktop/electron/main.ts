@@ -686,8 +686,13 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       // ★ startDrag 的 icon 必须是真实存在的文件，否则它直接抛（主进程弹错误框）。
       //   文件记录在 dragout 里回的是空串，这里用应用图标兜底。
       const icon = spec.icon.length > 0 ? spec.icon : assetPath('build', 'icon.ico');
-      // files 优先于 file（Electron 的 Item 里写明了 files 会覆盖 file），多文件一次拖出去。
-      e.sender.startDrag({ file: spec.file, files: spec.files, icon });
+      // ★ files 只在真有多个文件时才带上。Electron 的 gin 绑定用 item.Get("files", &files)
+      //   先探这个键：键存在但值是 undefined 时转换失败，会连带把 file 分支一起跳过，
+      //   表现就是"拖了没反应、也没提示"。少一个键比多一个 undefined 安全。
+      const payload = spec.files && spec.files.length > 0
+        ? { file: spec.file, files: spec.files, icon }
+        : { file: spec.file, icon };
+      e.sender.startDrag(payload);
     },
     // ★ 片段库（v0.6.0）：四个通道都回整表，界面拿返回值直接 setSnippets，不用再查一次。
     //   广播用 broadcast.send(EV.snippetsChanged) —— Broadcaster 没有 snippetsChanged 方法

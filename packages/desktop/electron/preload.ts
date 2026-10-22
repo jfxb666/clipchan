@@ -72,7 +72,7 @@ const api = {
     pasteMany: (ids: string[]): Promise<PasteResult> => ipcRenderer.invoke(CH.items.pasteMany, ids),
     removeMany: (ids: string[]): Promise<number> => ipcRenderer.invoke(CH.items.removeMany, ids),
     pinMany: (ids: string[], pinned: boolean): Promise<void> => ipcRenderer.invoke(CH.items.pinMany, ids, pinned),
-    startDrag: (id: string): Promise<void> => ipcRenderer.invoke(CH.items.startDrag, id),
+    startDrag: (id: string): Promise<void> => { ipcRenderer.send(CH.items.startDrag, id); return Promise.resolve(); },
     // ★ 回收站五方法：与 channels.ts 的五个键一一对应（preload.spec 断言不遗漏）。
     trashList: (q: TrashQuery): Promise<ClipItemDTO[]> => ipcRenderer.invoke(CH.items.trashList, q),
     trashCount: (): Promise<number> => ipcRenderer.invoke(CH.items.trashCount),

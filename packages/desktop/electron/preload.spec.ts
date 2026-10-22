@@ -261,7 +261,10 @@ describe('v0.6.0：批量 / 纯文本 / 片段 / 自动更新通道', () => {
 
   it('③ preload 里每个新方法各自 invoke 到对应常量（不是手写字符串）', () => {
     for (const [group, key, channel] of V6) {
-      const re = new RegExp(key + ':[^\\n]*ipcRenderer\\.invoke\\(CH\\.' + group + '\\.' + key);
+      // ★ startDrag 走单向 send：拖拽必须在 dragstart 的同步栈里发起，invoke 的异步往返
+      //   会让 Chromium 先把这次拖拽收尾，主进程再调 DoDragDrop 就拖不出文件。
+      const call = key === 'startDrag' ? 'send' : 'invoke';
+      const re = new RegExp(key + ':[^\\n]*ipcRenderer\\.' + call + '\\(CH\\.' + group + '\\.' + key);
       expect(PRELOAD_SRC, 'preload 缺少 ' + key + ' 或没走 CH.' + group + '.' + key).toMatch(re);
       expect(PRELOAD_SRC, '手写了通道字符串 ' + channel).not.toContain("'" + channel + "'");
     }

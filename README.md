@@ -3,9 +3,9 @@
 Windows 剪贴板历史工具。Ctrl+` 唤起面板，选中即粘贴回刚才那个窗口。
 Electron + React + SQLite，界面代码与手机端壳共用一份。
 
-- **下载**：[Releases · v0.6.0](https://github.com/jfxb666/clipchan/releases/tag/v0.6.0)
+- **下载**：[Releases · v0.6.1](https://github.com/jfxb666/clipchan/releases/tag/v0.6.1)
   - 免安装版 `Clipchan.exe`（单文件，双击即用，不要求装任何运行时）
-  - 安装版 `Clipchan-Setup-0.6.0.exe`
+  - 安装版 `Clipchan-Setup-0.6.1.exe`
 - **源码**：本仓库（私有）。构建产物不进版本库，由 `pnpm build` 生成到 `release\`。
 
 ## 安装与首次运行
@@ -116,6 +116,8 @@ Electron 37 的 `clipboard` 既读不出也写不出真正的 `CF_HDROP`：
 
 - 只有 `image` 与 `files` 两类卡片带拖拽手柄（`draggable`）。文本记录不给拖，因为 Electron 的 `startDrag` 只认文件路径，拖文本得走 OLE `IDataObject`，本应用没有原生助手做这件事 —— 与其让人拖半天等一句"拖不出去"，不如一开始就不能拖。
 - 浏览器默认的 HTML5 拖拽出不了窗口，所以卡片上的 `onDragStart` 只负责 `preventDefault()`，真正把文件交给系统的是主进程的 `webContents.startDrag`。
+- ★ 这条通道走**单向 `send`，不是 `invoke`**。`DoDragDrop` 必须在 `dragstart` 的同步栈里发起，`invoke` 的异步往返会让 Chromium 先把这次拖拽收尾，主进程再拖就拖不出东西（表现：拖了没反应、也没有提示）。`ipc.ts` 里同一个通道名同时挂了 `on` 和 `handle` 两套，`preload` 用的是 `send`。
+- ★ `startDrag` 的 payload 只在真有多文件时才带 `files` 键。Electron 的绑定先 `item.Get("files", &files)` 探键，键存在但值是 `undefined` 时转换失败会连带跳过 `file` 分支，同样表现为静默无反应。
 - **多文件记录可以一次全拖**：Electron 的 `Item` 有 `files: string[]` 字段（它会覆盖 `file`），所以一次拖出整个文件列表。旧版本按"系统一次只能拖一个文件项"回绝多文件，那是错的。
 - 拖之前会先用 `fs.existsSync` 过滤：原图被清理策略删掉、或文件记录指向的文件已经被用户在资源管理器里删掉时，不把不存在的路径交给 `startDrag`（它会抛在主进程里，异常既到不了界面也留不下提示），而是提示「这条记录没有可拖出的文件」。
 - `startDrag` 会阻塞到拖放结束（内部是 Windows 的 `DoDragDrop` 模态循环），所以那一次 IPC 要等用户松开鼠标才返回 —— 拖拽期间主进程是停住的，这是 Electron 的既有行为，不是本应用卡了。
@@ -286,7 +288,7 @@ Key 只在主进程读取，界面上只回显掩码（`sk-…abcd`）；编辑�
 pnpm install      # pnpm 11 的构建脚本许可写在 pnpm-workspace.yaml 的 allowBuilds 里；老版本 pnpm 才需要 --allow-build=electron --allow-build=esbuild --allow-build=better-sqlite3
 pnpm dev          # 开发模式（Vite + Electron 热重载）
 pnpm typecheck    # tsc -b
-pnpm test         # vitest run，66 个文件 / 1012 个用例（缺真实助手 exe 时另有若干条跳过）
+pnpm test         # vitest run，67 个文件 / 1040 个用例（缺真实助手 exe 时另有若干条跳过）
 pnpm build:helper # 编译 C# 原生助手 → packages/desktop/helper/dist/clipchan-helper.exe
 pnpm smoke:main   # 主进程冒烟（13 项断言）
 pnpm build        # 打包 → release/Clipchan.exe 与 release/Clipchan-Setup-<版本>.exe
