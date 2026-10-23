@@ -56,6 +56,53 @@ files:
   #   minimatchAll（app-builder-lib/out/util/filter.js:54-67）按顺序求值，
   #   靠后的正向规则可以覆盖前面的排除，所以这一行必须排在排除行之后。
   - '**/better-sqlite3/prebuilds/win32-x64.node'
+  # ★ 瘦身（v0.6.2 启动速度）：上面那条 'node_modules/**/*' 会把整棵依赖树搬进
+  #   asar，实测 50.3MB / 53 个包，其中 21MB 是运行时根本不会被加载的。
+  #
+  #   判据是「打包产物里到底谁在 require」——scripts/build-main.mjs:47-48 只把
+  #   electron 与 better-sqlite3 设为 external，其余全部内联进 dist-electron/main.js。
+  #   实测 main.js 的 bare require 全集只有：
+  #     assert better-sqlite3 child_process constants crypto electron events fs
+  #     http os path stream tty url util zlib
+  #   再加上两处刻意绕开静态分析的：
+  #     main.js 的 require(id)（id='tesseract.js'）与 require.resolve('tesseract.js-core/package.json')
+  #   渲染层 dist/assets/main-*.js 由 vite 打成一个自包含文件，唯一 bare require 是
+  #   @emotion/is-prop-valid，且包在 try{}catch{} 里（framer-motion 的可选检测），
+  #   该包没装，所以永远走 catch。
+  #
+  #   因此下面这些包可以整包剔除（体积为 app.asar 内未压缩实测值）：
+  #   highlight.js 5.22 / react-dom 4.30 / lucide-react 3.92 / zlibjs 3.55 /
+  #   framer-motion 2.05 / motion-dom 1.42 / pinyin-pro 0.86 / tailwind-merge 0.60 /
+  #   react 0.30 / zustand 0.22 / adm-zip 0.13 / scheduler 0.09 / @clipchan 0.58 /
+  #   motion-utils 0.04 / use-sync-external-store 0.03 / clsx / js-tokens /
+  #   loose-envify / opencollective-postinstall / idb-keyval / lodash.isequal ≈ 21MB。
+  #   前九个由 vite（渲染层）或 esbuild（主进程）内联，zlibjs 与 idb-keyval 只有
+  #   tesseract.js 的 browser/* 分支会加载（我们的 worker 走 src/worker-script/node/*）。
+  - '!node_modules/highlight.js/**'
+  - '!node_modules/react/**'
+  - '!node_modules/react-dom/**'
+  - '!node_modules/lucide-react/**'
+  - '!node_modules/framer-motion/**'
+  - '!node_modules/motion-dom/**'
+  - '!node_modules/motion-utils/**'
+  - '!node_modules/zustand/**'
+  - '!node_modules/use-sync-external-store/**'
+  - '!node_modules/scheduler/**'
+  - '!node_modules/tailwind-merge/**'
+  - '!node_modules/clsx/**'
+  - '!node_modules/pinyin-pro/**'
+  - '!node_modules/adm-zip/**'
+  - '!node_modules/zlibjs/**'
+  - '!node_modules/idb-keyval/**'
+  - '!node_modules/lodash.isequal/**'
+  - '!node_modules/@clipchan/**'
+  # ★ 反过来，这几包必须留：tesseract.js 及其 Node 路径的真实依赖
+  #   （src/worker-script/node/getCore.js → wasm-feature-detect + tesseract.js-core；
+  #    src/worker/node/loadImage.js 与 worker-script/node/index.js → node-fetch 兜底；
+  #    worker-script/utils/setImage.js → bmp-js；src/index.js → regenerator-runtime）。
+  #   tesseract.js-core 与 better-sqlite3 的 .node 已由 asarUnpack 拎到磁盘上。
+  #   node-fetch 的传递依赖（whatwg-url / tr46 / webidl-conversions）一共 0.44MB，
+  #   留着换「不因为一个 require 就整条 OCR 挂掉」，不值得为这点体积冒险。
   - 'package.json'
 
 directories:

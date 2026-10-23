@@ -187,6 +187,8 @@ export function buildIco(frames) {
 }
 
 const ICO_SIZES = [256, 128, 64, 48, 32, 24, 16];
+/** assets/icon.png 的边长。界面里最大只显示 96px，256 足够 2x 屏。 */
+const ASSET_ICON_SIZE = 256;
 
 export function main() {
   if (!fs.existsSync(SOURCE)) throw new Error('找不到源图：' + SOURCE);
@@ -200,14 +202,19 @@ export function main() {
   fs.mkdirSync(buildDir, { recursive: true });
 
   const sourceCopy = fs.readFileSync(SOURCE);
-  fs.writeFileSync(path.join(assetsDir, 'icon.png'), sourceCopy);
+  // ★ 两份 icon.png 尺寸不同，别图省事写成一个：
+  //   assets/icon.png 只给界面里的空状态用（EmptyState.tsx 显示 96x96，带滤镜），
+  //   1024x1024 会白白多背 1.8MB 进 asar —— portable 版每次双击都要多解压这么久。
+  //   build/icon.png 是 Windows 图标的缩放源，必须保持 1024 让 ICO 各帧清晰。
+  const assetIcon = encodePng(resizeRgba(src, ASSET_ICON_SIZE, ASSET_ICON_SIZE));
+  fs.writeFileSync(path.join(assetsDir, 'icon.png'), assetIcon);
   fs.writeFileSync(path.join(buildDir, 'icon.png'), sourceCopy);
 
   const frames = ICO_SIZES.map((size) => ({ size, img: resizeRgba(src, size, size) }));
   const ico = buildIco(frames);
   fs.writeFileSync(path.join(buildDir, 'icon.ico'), ico);
 
-  console.log('[icons] 源图 ' + src.width + 'x' + src.height + ' → assets/icon.png (' + sourceCopy.length + ' B)');
+  console.log('[icons] 源图 ' + src.width + 'x' + src.height + ' → assets/icon.png ' + ASSET_ICON_SIZE + 'x' + ASSET_ICON_SIZE + ' (' + assetIcon.length + ' B)');
   console.log('[icons] build/icon.ico ' + ico.length + ' B，' + ICO_SIZES.length + ' 帧：' + ICO_SIZES.join('/'));
   return { frames: ICO_SIZES.length, bytes: ico.length };
 }
