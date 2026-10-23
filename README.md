@@ -34,6 +34,21 @@ Electron + React + SQLite，界面代码与手机端壳共用一份。
 
 从旧版升级：首次启动若发现 `history.json` 且库是空的，会自动导入全部记录并把文件改名为 `history.json.migrated`。旧文件的短键（`id/text/at/seq/pin/trunc`）与 C# 属性名两种写法都能认，认不出的单条跳过、不阻塞启动。
 
+### 缓存残留与清理
+
+免安装版每次启动都会把整套程序解压到 `%TEMP%\<25 位随机串>\`，正常退出时会自己删掉。但强杀进程、崩溃、断电、重启时程序还开着，目录就会留下来 —— 一个约 360 MB，攒十个就是 3.6 GB。自动更新下载的安装包也会留在 `%LOCALAPPDATA%\@clipchandesktop-updater\installer.exe`（约 92 MB）。
+
+清理用仓库里的脚本，默认只报告不删：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\clean-cache.ps1          # 预演
+powershell -ExecutionPolicy Bypass -File scripts\clean-cache.ps1 -Apply   # 真删
+```
+
+它只认「临时目录里同时有 `Clipchan.exe` 与 `resources\app.asar`」这一个判据，不会误删别的程序。**`%APPDATA%\Clipchan\` 不要手删** —— 那是历史记录与设置。完整说明见 [docs/cleanup-cache.md](docs/cleanup-cache.md)。
+
+根治办法是装安装版：文件一次放到位，启动 0.3 秒级，也不产生这些临时目录。
+
 ## 快捷键
 
 | 按键 | 作用 |
@@ -295,6 +310,7 @@ pnpm test         # vitest run，67 个文件 / 1040 个用例（缺真实助手
 pnpm build:helper # 编译 C# 原生助手 → packages/desktop/helper/dist/clipchan-helper.exe
 pnpm smoke:main   # 主进程冒烟（13 项断言）
 pnpm build        # 打包 → release/Clipchan.exe 与 release/Clipchan-Setup-<版本>.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/clean-cache.ps1   # 清 %TEMP% 里的免安装版解压残留（加 -Apply 才真删）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-all.ps1    # 上面五条串行跑一遍，输出归档到 docs/superpowers/evidence/task12-commands.txt
 
 跑 `smoke:main` 前先退出已在运行的 Clipchan（单实例锁会让 smoke 的第二个实例直接退出，表现为「没拿到 SMOKE 行」）。

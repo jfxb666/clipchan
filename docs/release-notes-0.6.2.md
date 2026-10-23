@@ -23,9 +23,27 @@ Windows 剪贴板历史工具。Ctrl+` 唤起面板，选中即粘贴回刚才�
 
 ### 清理 `%TEMP%` 里的历史残留
 
-免安装版退出时会删自己的临时目录，但如果当时有文件被占用（杀软扫描、资源管理器预览、上次异常退出），删除就会失败，目录留在 `%TEMP%\ns*.tmp`。攒久了很占地方 —— 这台机器上攒了 **51 个目录、20.91GB**。
+免安装版退出时会删自己的临时目录，但如果当时有文件被占用（杀软扫描、资源管理器预览、上次异常退出、强杀进程、断电），删除就会失败，目录留在 `%TEMP%\<25 位随机串>\`。攒久了很占地方 —— 这台机器上攒了 **18 个目录、6.4GB**。
 
-这一版没有改自解压脚本（NSIS 的清理逻辑由 electron-builder 生成，改不了），所以是手工清掉的。如果你也长期用免安装版，可以定期看一眼 `%TEMP%` 下有没有 `ns*.tmp`。
+清理用仓库里的 `scripts/clean-cache.ps1`，默认只报告不删：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\clean-cache.ps1          # 预演，只列出会删什么
+powershell -ExecutionPolicy Bypass -File scripts\clean-cache.ps1 -Apply   # 真删
+```
+
+不想跑脚本也可以，两条命令：
+
+```powershell
+Get-ChildItem $env:TEMP -Directory |
+  Where-Object { Test-Path (Join-Path $_.FullName 'Clipchan.exe') } |
+  Remove-Item -Recurse -Force
+Remove-Item "$env:LOCALAPPDATA\@clipchandesktop-updater\installer.exe" -Force
+```
+
+判据是「临时目录里同时有 `Clipchan.exe` 与 `resources\app.asar`」，不会误删别的程序。**`%APPDATA%\Clipchan\` 不要手删** —— 那是历史记录、设置和 OCR 语言包。完整说明见 [docs/cleanup-cache.md](docs/cleanup-cache.md)。
+
+这一版没有改自解压脚本（NSIS 的清理逻辑由 electron-builder 生成），程序也不会在启动时自动清 —— 它分不清「上次崩溃留下的」和「另一个正在运行的实例的」。所以清理这一步目前需要手动跑一次。
 
 ### 数据兼容
 
