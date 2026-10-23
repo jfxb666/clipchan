@@ -3,8 +3,8 @@
 Windows 剪贴板历史工具。Ctrl+` 唤起面板，选中即粘贴回刚才那个窗口。
 Electron + React + SQLite，界面代码与手机端壳共用一份。
 
-- **下载**：[Releases · v0.6.2](https://github.com/jfxb666/clipchan/releases/tag/v0.6.2)
-  - **推荐**：安装版 `Clipchan-Setup-0.6.2.exe`（装完秒开，约 316MB 磁盘）
+- **下载**：[Releases · v0.6.3](https://github.com/jfxb666/clipchan/releases/tag/v0.6.3)
+  - **推荐**：安装版 `Clipchan-Setup-0.6.3.exe`（装完秒开，约 316MB 磁盘）
   - 免安装版 `Clipchan.exe`（单文件，双击即用，但**每次启动要等 20 秒以上**，原因见下）
   - ★ 免安装版慢不是程序的问题：它是个自解压包，每次双击都要先把 316MB 整个解到
     `%TEMP%\<随机串>\` 再启动，退出后还要删。机器越慢、杀软越勤，这一步越久。
@@ -13,7 +13,7 @@ Electron + React + SQLite，界面代码与手机端壳共用一份。
 
 ## 安装与首次运行
 
-1. 从 Releases 下载 `Clipchan-Setup-0.6.2.exe` 安装并启动（免安装版 `Clipchan.exe` 每次双击都要先解压到临时目录，实测 20 秒以上，只建议在不能安装的场合使用）。
+1. 从 Releases 下载 `Clipchan-Setup-0.6.3.exe` 安装并启动（免安装版 `Clipchan.exe` 每次双击都要先解压到临时目录，实测 20 秒以上，只建议在不能安装的场合使用）。
 2. 托盘出现图标，按 **Ctrl+`** 唤出面板。
 3. 面板出现在**鼠标所在显示器的中间偏上**，宽度 900、高度 620。
 
@@ -28,6 +28,7 @@ Electron + React + SQLite，界面代码与手机端壳共用一份。
 | `clipchan.db` | SQLite 库（历史记录 + 设置）。WAL 模式，强杀进程也不会整份丢历史 |
 | `images\` | 原图（JPEG q80 或 PNG，长边 ≤ 2560） |
 | `thumbs\` | 缩略图（PNG，长边 128） |
+| `logs\` | 运行日志 `main.log`（2 MB 轮转，最多留 5 份）。出问题时先看这里 |
 | `clipchan-export-<日期>-<时间>.zip` | 设置 → 数据 →「导出为 zip」写出并选位置的备份包（`manifest.json` + `images/` + `thumbs/`） |
 | `history.json.migrated` | 旧版数据导入后的留档（改名即表示已迁移） |
 | `settings.json` | 旧版设置文件。**新版只读不改**，设置存在 `clipchan.db` 里 |
@@ -299,6 +300,35 @@ Key 只在主进程读取，界面上只回显掩码（`sk-…abcd`）；编辑�
 - **语法高亮的语言是猜的**，不是让用户选：猜不出来就不高亮（显示成普通文本），混合语言的片段可能只认主语言。搜索时只有搜索词高亮，语法高亮让位。
 - **回收站不参与搜索、分类、词云**，它只是一个按删除时间倒序的分页列表。清空回收站不可撤销（硬删）。
 - **AI 优化用你自备的 Key，Key 以明文存放在本地 `clipchan.db`，本轮不做加密。** 只在桌面端可用，手机端不接 AI；详见上文「AI 提示词优化」。
+- **数据库损坏时是「挪开 + 新建空库」，不是修复。** 原库改名成 `clipchan.corrupt-<时间戳>.db` 留在原目录，记录不会自动救回来，需要人工用 SQLite 工具导出。
+- **日志只写本机，不会自动上传。** 没有一键上报（那需要服务器），出问题要手动把 `logs\main.log` 贴出来。
+
+## 出问题时怎么查
+
+主进程日志在 `%APPDATA%\Clipchan\logs\main.log`，2 MB 轮转、最多留 5 份（`main.log` / `main.1.log` … `main.4.log`）。设置 → 关于 →「打开数据目录」可直达。
+
+记的东西：启动版本与数据目录、所有 warn/error、未捕获异常与未处理的 Promise 拒绝（带堆栈）、渲染进程与子进程崩溃的 `reason` 与 `exitCode`。
+
+- **崩溃只记录、不退出。** 托盘常驻程序直接 quit 会抹掉用户手上的上下文，所以未捕获异常记完继续跑 —— 看到 `[crash]` 行不代表进程当时死了。
+- **启动失败会弹错误框**，写清数据目录与日志位置，不再静默退出。
+- **数据库坏了**：启动时先跑 `PRAGMA quick_check`（9 MB 库约 18 毫秒），判定损坏就把原库改名为 `clipchan.corrupt-<时间戳>.db`（`-wal` / `-shm` 一并处理），新建空库继续启动，窗口加载完后弹一条提示。用 `quick_check` 不用 `integrity_check` 是因为后者要逐页校验，几十万条记录要几秒，放在启动路径上不能接受。
+- **界面炸了不会白屏**：主窗口与截图遮罩都套了 ErrorBoundary，兜底页有「重新加载」与「复制错误详情」两个按钮。
+
+## 隐私与许可
+
+**所有剪贴板数据只存在你自己的电脑上，我们没有服务器，也收不到任何东西。** 没有账号、没有遥测、没有使用统计、没有崩溃上报、没有广告 SDK —— 什么都不收集。全部数据落在 `%APPDATA%\Clipchan\`（`clipchan.db` / `images\` / `thumbs\` / `ocr\` / `logs\`），退出应用后删掉整个目录就是彻底清除。
+
+整个程序只有三处会联网，没有第四处：
+
+| 场景 | 什么时候发 | 发什么 | 发给谁 |
+| --- | --- | --- | --- |
+| OCR 语言包 | 你在设置里点「下载语言包」（首次识别前） | 一个普通 GET，不带任何内容 | jsdelivr 公共 CDN；之后走本地缓存 |
+| AI 提示词优化 | 你点了「优化」 | 你选中的那段文字 + 提示词 | **你自己填的 Base URL** |
+| 自动更新 | 你在设置里点「检查更新」（启动时不自动检查） | 一个版本号请求，不带你任何数据 | GitHub Releases |
+
+已知边界如实写在 [docs/privacy.md](docs/privacy.md)：本地数据**不加密**（能读 `%APPDATA%` 的程序就能读到你的历史与 AI Key）、排除列表按 exe 文件名匹配可能误伤同名程序、OCR 语言包依赖公共 CDN。建议一上手就把密码管理器、网银客户端加进「设置 → 排除的应用」—— 那是**复制那一刻就不入库**，不是事后隐藏。
+
+本项目以 **MIT 许可** 开源，全文见仓库根目录 [LICENSE](LICENSE)。MIT 允许商用、修改、再分发，只需保留版权声明与许可声明。
 
 ## 开发
 
@@ -306,7 +336,7 @@ Key 只在主进程读取，界面上只回显掩码（`sk-…abcd`）；编辑�
 pnpm install      # pnpm 11 的构建脚本许可写在 pnpm-workspace.yaml 的 allowBuilds 里；老版本 pnpm 才需要 --allow-build=electron --allow-build=esbuild --allow-build=better-sqlite3
 pnpm dev          # 开发模式（Vite + Electron 热重载）
 pnpm typecheck    # tsc -b
-pnpm test         # vitest run，67 个文件 / 1040 个用例（缺真实助手 exe 时另有若干条跳过）
+pnpm test         # vitest run，70 个文件 / 1069 个用例（缺真实助手 exe 时另有若干条跳过）
 pnpm build:helper # 编译 C# 原生助手 → packages/desktop/helper/dist/clipchan-helper.exe
 pnpm smoke:main   # 主进程冒烟（13 项断言）
 pnpm build        # 打包 → release/Clipchan.exe 与 release/Clipchan-Setup-<版本>.exe
@@ -333,3 +363,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-all.ps1    # 
 
 35 条验收标准逐条判定见 `docs/superpowers/plans/2026-10-15-clipchan-rebuild.md` 的 Task 12 与进度记录区；
 自动化证据在 `docs/superpowers/evidence/task12-commands.txt`，截图证据同目录 `task8-*` / `task10-*` / `task12-*`。
+
+## License
+
+MIT © 2026 jfxb666

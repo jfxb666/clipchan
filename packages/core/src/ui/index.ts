@@ -102,6 +102,9 @@ export {
 } from './ResizeHandles';
 export { TypeBadge } from './TypeBadge';
 export { EmptyState } from './EmptyState';
+export { ErrorBoundary, type ErrorBoundaryProps } from './ErrorBoundary';
+export { crashReportText, describeError, type CrashReportContext } from './errorBoundaryLogic';
+export { firstRunTips, shouldShowFirstRun, type FirstRunTip } from './firstRun';
 export { Toast, ToastStack, type ToastItem } from './Toast';
 export { UNDO_LABEL, removeToast, undoToast } from './toastText';
 export { WordCloudView } from './WordCloudView';

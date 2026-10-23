@@ -10,13 +10,20 @@
  *   desktop 的 tsconfig 设了 rootDir: "."，相对路径把 core 源码拉进同一个 program
  *   会报 TS6059（文件不在 rootDir 下）。子路径走 package.json exports，core 源码
  *   作为独立 project 解析，两边都干净。vite 侧有 '@clipchan/core' 别名兜底。
+ * ★ 为什么 overlay 也要 ErrorBoundary：它是独立页面，炸了同样是全透明/白屏，
+ *   而用户此刻正拿着鼠标框选屏幕，白屏比主窗口白屏更莫名其妙。这里同样不套 StrictMode。
  */
 import { createRoot } from 'react-dom/client';
 import { getPlatform } from '@clipchan/core/platform/adapter';
 import { CaptureOverlay } from '@clipchan/core/ui/CaptureOverlay';
+import { APP_VERSION, ErrorBoundary } from '@clipchan/core/ui';
 import './index.css';
 
 const container = document.getElementById('root');
 if (!container) throw new Error('找不到 #root 挂载点');
 
-createRoot(container).render(<CaptureOverlay platform={getPlatform()} />);
+createRoot(container).render(
+  <ErrorBoundary appVersion={APP_VERSION}>
+    <CaptureOverlay platform={getPlatform()} />
+  </ErrorBoundary>,
+);

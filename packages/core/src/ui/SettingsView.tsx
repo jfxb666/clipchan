@@ -57,7 +57,7 @@ export const WIDGET_SIZE_MAX = 400;
 export const GHOST_MAX_MINUTES = 720;
 export const GHOST_PRESETS = [5, 10, 30, 60] as const;
 /** 底部展示的版本号。 */
-export const APP_VERSION = '0.6.2';
+export const APP_VERSION = '0.6.3';
 
 const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: 'auto', label: '跟随系统' },
@@ -799,7 +799,28 @@ export function SettingsView({
         </p>
       </Section>
 
-      <p className="pt-base text-center text-[11px] text-ink-3">剪贴板酱 v{APP_VERSION}</p>
+      <Section title="关于">
+        <Row label="版本">
+          <span className="shrink-0 text-[11px] text-ink-2">剪贴板酱 v{APP_VERSION}</span>
+        </Row>
+        <Row label="开源许可" hint="MIT 许可，全文见仓库根目录 LICENSE">
+          <span className="shrink-0 text-[11px] text-ink-3">MIT</span>
+        </Row>
+        <Row
+          label="隐私说明"
+          hint="数据只在本机 %APPDATA%\Clipchan，没有账号也没有遥测；全部联网行为见仓库 docs/privacy.md。"
+        >
+          <button
+            type="button"
+            onClick={onOpenDataFolder}
+            className="flex shrink-0 items-center gap-[4px] rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
+          >
+            <FolderOpen size={12} aria-hidden />
+            打开数据目录
+          </button>
+        </Row>
+        <Row label="问题反馈" hint="遇到问题请在 GitHub 仓库提 issue，附上数据目录里 logs 文件夹下的日志。" />
+      </Section>
     </div>
   );
 }

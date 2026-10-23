@@ -33,13 +33,15 @@ import { CH, EV } from './channels';
 import { PROVIDERS_KEY, createAi } from './ai';
 import { createDeltaThrottle } from './deltaThrottle';
 import type { AiApi } from './ai';
+import Database from 'better-sqlite3';
 import { openDb } from './db';
 import type { Db, InsertResult } from './db';
 import { runLegacyMigration } from './migrate-runner';
+import { createLogSink, installCrashHooks } from './logs';
 import { deleteImageFiles, enforceImageBudget, hashImageBuffer, purgeItemsWithFiles, purgeTrashOverLimitWithFiles, saveImage } from './images';
 import type { NativeImageLike, SavedImage } from './images';
 import { sweepOrphans } from './images-policy';
-import { imageAbs, imagesDir, thumbsDir, dbFile, resolveDataDir, toRelativePath } from './paths';
+import { DB_FILE_NAME, imageAbs, imagesDir, logsDir, thumbsDir, dbFile, resolveDataDir, toRelativePath } from './paths';
 import { THUMB_SCHEME, imageUrlFor, mapThumbUrl, resolveImageRequest, resolveThumbRequest } from './thumb-url';
 import { registerHotkeys, unregisterHotkeys } from './hotkeys';
 import { exportAllToZip, importAllFromZip, importSummaryText } from './export-import';
@@ -129,6 +131,35 @@ let burstDetector: BurstDetector | null = null;
 let pendingBurstIds: string[] = [];
 /** 自动更新（P0-3）。开发环境整体禁用，见构造处注释。 */
 let updater: Updater | null = null;
+
+/**
+ * 文件日志槽。
+ * ★ 放模块级而不是塞进 Runtime：崩溃钩子在 app ready 之前就要能写，而 Runtime 那时还是空壳。
+ * ★ 打包后用户看不到控制台，26 处 warn/error 等于全丢；落盘才能让「导出日志」有意义。
+ */
+let logSink: ReturnType<typeof createLogSink> | null = null;
+/**
+ * 本次启动是否从损坏的库里恢复过（值是备份文件名）。
+ * ★ 存模块级是因为 setupStorage 跑在窗口创建之前，那时没有 win 可以弹 toast；
+ *   等 did-finish-load 之后再补发一条，用户才知道自己的历史去哪了。
+ */
+let recoveredFromDb: string | null = null;
+
+/** 控制台 + 文件双写。★ 控制台留着是因为开发期 console 更好用，落盘是给用户看的。 */
+function logLine(msg: string): void {
+  console.log(msg);
+  logSink?.write(msg);
+}
+
+function logWarn(msg: string): void {
+  console.warn(msg);
+  logSink?.write('[warn] ' + msg);
+}
+
+function logError(msg: string): void {
+  console.error(msg);
+  logSink?.write('[error] ' + msg);
+}
 
 /**
  * 一次截图会话的两个句柄：overlay 窗与它们各自的底图。
@@ -278,13 +309,78 @@ function registerThumbProtocol(dataDir: string): void {
   });
 }
 
+/**
+ * 判断库文件是否已损坏（只读预检）。
+ *
+ * ★ 为什么"先探一遍"而不是"openDb 抛错后再改名"：Windows 上 better-sqlite3 打开失败时
+ *   句柄仍然被持有（openDb 内部没有 close），此时 rename 直接 EBUSY，备份根本做不成。
+ *   自己开一次、查完立刻 close，句柄不泄漏，后面改名才稳（实测 5/5 成功）。
+ * ★ 只跑 quick_check：integrity_check 在几十万条的库上要几秒，启动路径花不起。
+ */
+function dbLooksCorrupt(file: string): boolean {
+  // new Database 遇到不存在的文件会顺手建一个空库，所以先短路。
+  if (!fs.existsSync(file)) return false;
+  let probe: Database.Database | null = null;
+  try {
+    probe = new Database(file);
+    const rows: unknown = probe.pragma('quick_check');
+    const first = Array.isArray(rows) && rows.length > 0 ? Object.values(rows[0] as object)[0] : null;
+    // 健康库返回 [{quick_check:'ok'}]；损坏时返回第一条具体错误文本。
+    return typeof first === 'string' && first.toLowerCase() !== 'ok';
+  } catch (e) {
+    // 连打开都失败（无 SQLite 魔数 / 页头损坏）也是坏库。
+    logWarn('[db] 预检未通过，判定为损坏：' + (e instanceof Error ? e.message : String(e)));
+    return true;
+  } finally {
+    try {
+      probe?.close();
+    } catch {
+      /* 关不掉不影响后续改名：句柄随函数作用域释放 */
+    }
+  }
+}
+
+/**
+ * 把坏库改名留档，返回备份文件名（不含目录）。调用方保证此时没有句柄持有它。
+ *
+ * ★ sidecar 必须跟着一起挪：只备份主库的话，新库启动会去回放旧的 -wal，立刻又坏一次。
+ */
+function backupCorruptDb(dbPath: string, dataDir: string): string {
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const name = DB_FILE_NAME.replace(/\.db$/, '') + '.corrupt-' + stamp + '.db';
+  const target = path.join(dataDir, name);
+  fs.renameSync(dbPath, target);
+  for (const ext of ['-wal', '-shm']) {
+    const side = dbPath + ext;
+    if (!fs.existsSync(side)) continue;
+    try {
+      fs.renameSync(side, target + ext);
+    } catch {
+      // 挪不走就删：留着它会让新库读到旧 WAL，比丢一份无用 sidecar 危险得多。
+      try {
+        fs.rmSync(side, { force: true });
+      } catch {
+        /* 真删不掉也继续，openDb 会给出明确的错误 */
+      }
+    }
+  }
+  return name;
+}
+
 /** 建目录、开库、按需迁移、清孤儿。 */
-function setupStorage(dataDir: string): { db: Db; migrated: number } {
+function setupStorage(dataDir: string): { db: Db; migrated: number; recoveredFrom?: string } {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(imagesDir(dataDir), { recursive: true });
   fs.mkdirSync(thumbsDir(dataDir), { recursive: true });
 
   const dbPath = dbFile(dataDir);
+  let recoveredFrom: string | undefined;
+  if (dbLooksCorrupt(dbPath)) {
+    recoveredFrom = backupCorruptDb(dbPath, dataDir);
+    logError('[db] 历史库损坏，已备份为 ' + recoveredFrom + '，将新建空库');
+  }
+  // ★ 恢复之后必须当成"全新库"：否则 runLegacyMigration 会因为"文件已存在"跳过，
+  //   用户的 history.json 就再没机会导进新库了。
   const isFresh = !fs.existsSync(dbPath);
   const db = openDb(dbPath);
 
@@ -293,13 +389,13 @@ function setupStorage(dataDir: string): { db: Db; migrated: number } {
 
   try {
     const orphans = sweepOrphans(dataDir, db.allImageRows(), {
-      onLog: (m: string) => console.warn('[images] ' + m),
+      onLog: (m: string) => logWarn('[images] ' + m),
     });
-    if (orphans.length > 0) console.log('[images] 清理孤儿文件 ' + orphans.length + ' 个');
+    if (orphans.length > 0) logLine('[images] 清理孤儿文件 ' + orphans.length + ' 个');
   } catch (e) {
-    console.error('[images] 孤儿扫描失败（不阻断启动）：' + String(e));
+    logError('[images] 孤儿扫描失败（不阻断启动）：' + String(e));
   }
-  return { db, migrated };
+  return { db, migrated, recoveredFrom };
 }
 
 /**
@@ -331,7 +427,7 @@ function setupServices(dataDir: string): void {
     clip: clipboard,
     dataDir,
     settings: () => rt.settings ?? DEFAULT_SETTINGS,
-    onLog: (m: string) => console.warn('[recorder] ' + m),
+    onLog: (m: string) => logWarn('[recorder] ' + m),
   });
 
   mergeSvc = new MergeService({ db });
@@ -564,7 +660,7 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       if (list.length === 0) return { removed: 0 };
       // ★ 唯一删盘入口：purgeItemsWithFiles 先取相对路径 → 删行 → 删文件。
       const { removed, log } = purgeItemsWithFiles(needDb(), rt.dataDir, list, (m) =>
-        console.warn('[images] ' + m)
+        logWarn('[images] ' + m)
       );
       // 这里是**真的删了盘**，文件删不掉值得如实告诉用户（残留会在下次启动被孤儿扫描清掉）。
       if (log.failures.length > 0) broadcast.toast('已永久删除，但有 ' + log.failures.length + ' 个图片文件未能删除', 'warn');
@@ -584,7 +680,7 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
         if (page.length < PAGE) break;
       }
       if (ids.length === 0) return { removed: 0 };
-      const { removed, log } = purgeItemsWithFiles(db, rt.dataDir, ids, (m) => console.warn('[images] ' + m));
+      const { removed, log } = purgeItemsWithFiles(db, rt.dataDir, ids, (m) => logWarn('[images] ' + m));
       if (log.failures.length > 0) broadcast.toast('回收站已清空，但有 ' + log.failures.length + ' 个图片文件未能删除', 'warn');
       broadcast.itemsChanged();
       return { removed };
@@ -759,13 +855,13 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       // 图片预算变了要立刻淘汰（spec §7.3）。
       if (patch && typeof patch.imageBudgetMB === 'number') {
         enforceImageBudget(needDb(), rt.dataDir, Math.max(0, patch.imageBudgetMB) * 1024 * 1024, (m) =>
-          console.warn('[images] ' + m)
+          logWarn('[images] ' + m)
         );
       }
       // ★ 回收站上限调小要立刻收敛。db 内部顺手触发的超限淘汰拿不到被删 id（也就删不了盘），
       //   所以这里走带删盘的版本：先按 id 记路径 → 让 db 删行 → 删文件。
       if (patch && typeof patch.trashLimit === 'number') {
-        purgeTrashOverLimitWithFiles(needDb(), rt.dataDir, (m) => console.warn('[images] ' + m));
+        purgeTrashOverLimitWithFiles(needDb(), rt.dataDir, (m) => logWarn('[images] ' + m));
       }
       // ★ 三个热键都要重注册：漏掉 capture 会让用户改完「截图标注」后旧键仍然生效、新键毫无反应。
       if (
@@ -946,7 +1042,7 @@ async function startCaptureSession(
     });
   } catch (e) {
     broadcast.toast('没能抓取屏幕内容，请重试', 'error');
-    console.warn('[capture] 抓屏失败：' + (e instanceof Error ? e.message : String(e)));
+    logWarn('[capture] 抓屏失败：' + (e instanceof Error ? e.message : String(e)));
     return null;
   }
 
@@ -1030,7 +1126,7 @@ function persistCaptureImage(img: NativeImageLike): string {
 
   if (result.touched) {
     // 库里已有同一张图：它的文件在它自己的 id 下，刚落的这份是多余的。
-    deleteImageFiles(dataDir, tmpRels, (m) => console.warn('[images] ' + m));
+    deleteImageFiles(dataDir, tmpRels, (m) => logWarn('[images] ' + m));
     return result.id;
   }
 
@@ -1039,16 +1135,16 @@ function persistCaptureImage(img: NativeImageLike): string {
       adoptCaptureImageId(tmpId, result.id, saved);
     } catch (e) {
       // 改名失败不回滚数据库：行已经建好，最坏是路径与文件名对不上（日志里留证据）。
-      console.warn('[capture] 图片文件改名失败（库行 ' + result.id + '）：' + (e instanceof Error ? e.message : String(e)));
+      logWarn('[capture] 图片文件改名失败（库行 ' + result.id + '）：' + (e instanceof Error ? e.message : String(e)));
     }
   }
 
   // 与 recorder.afterWrite 对齐：截图也是图片写入，不按预算淘汰就等于绕开用户设的磁盘上限。
   try {
     const mb = rt.settings?.imageBudgetMB ?? DEFAULT_SETTINGS.imageBudgetMB;
-    enforceImageBudget(db, dataDir, mb * 1024 * 1024, (m) => console.warn('[images] ' + m));
+    enforceImageBudget(db, dataDir, mb * 1024 * 1024, (m) => logWarn('[images] ' + m));
   } catch (e) {
-    console.warn('[capture] 图片预算淘汰失败（已忽略）：' + (e instanceof Error ? e.message : String(e)));
+    logWarn('[capture] 图片预算淘汰失败（已忽略）：' + (e instanceof Error ? e.message : String(e)));
   }
   return result.id;
 }
@@ -1108,7 +1204,7 @@ async function finishCapture(payload: CaptureFinishPayload): Promise<CaptureResu
     return { ok: true, id: recordId };
   } catch (e) {
     const reason = e instanceof Error && e.message !== '' ? e.message : String(e);
-    console.warn('[capture] 处理截图失败：' + reason);
+    logWarn('[capture] 处理截图失败：' + reason);
     return { ok: false, reason: '处理截图失败：' + reason };
   } finally {
     cancelCapture();
@@ -1160,7 +1256,7 @@ function needOcr(): OcrApi {
         const resized = img.resize({ width: target.width, height: target.height, quality: 'best' });
         return { data: new Uint8Array(resized.toPNG()) };
       } catch (e) {
-        console.warn('[ocr] 预处理失败，退回原图：' + (e instanceof Error ? e.message : String(e)));
+        logWarn('[ocr] 预处理失败，退回原图：' + (e instanceof Error ? e.message : String(e)));
         return null;
       }
     },
@@ -1191,7 +1287,7 @@ function recordOptimizeHistory(req: OptimizeRequest, res: OptimizeResult): void 
       createdAt: Date.now(),
     });
   } catch (e) {
-    console.warn('[ai] 写历史失败：' + (e instanceof Error ? e.message : String(e)));
+    logWarn('[ai] 写历史失败：' + (e instanceof Error ? e.message : String(e)));
   }
 }
 
@@ -1403,9 +1499,16 @@ function main(): void {
 
   void app.whenReady().then(() => {
     rt.dataDir = setupDataDir();
+    // ★ 日志尽早开：setupDataDir() 之前拿不到 dataDir（SMOKE 还要改写 userData），
+    //   所以这是能落盘的第一个位置。之后所有 warn/error 才有人接住。
+    logSink = createLogSink({ dir: logsDir(rt.dataDir) });
+    installCrashHooks(logSink, process, app);
+    logSink.write('[main] 启动 v' + app.getVersion() + ' dataDir=' + rt.dataDir);
+
     // ★ 协议处理器必须在 ready 之后注册（registerSchemesAsPrivileged 已在上面的模块作用域执行）。
     registerThumbProtocol(rt.dataDir);
-    const { db } = setupStorage(rt.dataDir);
+    const { db, recoveredFrom } = setupStorage(rt.dataDir);
+    recoveredFromDb = recoveredFrom ?? null;
     rt.db = db;
     rt.settings = db.getSettings();
 
@@ -1418,7 +1521,7 @@ function main(): void {
       currentVersion: app.getVersion(),
       enabled: app.isPackaged,
       onStatus: (s) => makeBroadcaster(() => rt.win).send(EV.updateStatus, s),
-      onLog: (m) => console.warn('[updater] ' + m),
+      onLog: (m) => logWarn('[updater] ' + m),
     });
 
     // ★ 必须早于 buildHandlers()：处理器表里要展开 needAi().handlers()。
@@ -1440,6 +1543,15 @@ function main(): void {
     rt.win.on('closed', () => {
       rt.win = null;
     });
+
+    // ★ 库损坏这条必须等页面加载完再发：setupStorage 跑的时候窗口还不存在，
+    //   直接 toast 会被 makeBroadcaster 的 isDestroyed 守卫静默丢掉，用户永远不知道历史去哪了。
+    if (recoveredFromDb && !SMOKE) {
+      const backup = recoveredFromDb;
+      rt.win.webContents.once('did-finish-load', () => {
+        makeBroadcaster(() => rt.win).toast('历史库损坏，已备份为 ' + backup + '，已新建空库', 'warn');
+      });
+    }
 
     // ★ 显示时开真毛玻璃、隐藏时关掉（spec §6.6）。
     // 首次显示已经在上面的 defer 流程里应用过毛玻璃，这里只做"丢了再补"的兜底。
@@ -1486,7 +1598,7 @@ function main(): void {
       void runSmoke();
       return;
     }
-    console.log(
+    logLine(
       '[main] 数据目录 ' + rt.dataDir +
       '，自启目标 ' + autoStartPath(process.env, process.execPath) +
       '，快捷键 activate=' + rt.hotkeyStatus.activate +
@@ -1494,6 +1606,26 @@ function main(): void {
       ' capture=' + rt.hotkeyStatus.capture +
       ' updater=' + (app.isPackaged ? 'on' : 'off')
     );
+  }).catch((e: unknown) => {
+    /**
+     * 启动期任何一步失败都在这里收口。
+     * ★ 以前是裸 `void whenReady().then(...)`：库打不开 / 端口被占 / 渲染文件缺失时，
+     *   用户只看到窗口一闪而过，进程静默死掉，没有任何可排查的线索。
+     * ★ SMOKE 下不能弹模态框，否则冒烟脚本会一直挂着等一个没人点的确定按钮。
+     */
+    const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    logError('[main] 启动失败：' + detail);
+    if (!SMOKE) {
+      dialog.showErrorBox(
+        '剪贴板酱启动失败',
+        (e instanceof Error ? e.message : String(e)) +
+          '\n\n数据目录：' + rt.dataDir +
+          '\n日志在 data/logs（设置 → 打开数据目录 可直达）',
+      );
+    }
+    logSink?.close();
+    logSink = null;
+    app.exit(1);
   });
 }
 
@@ -1508,6 +1640,9 @@ app.on('will-quit', () => {
   // 摘掉 electron-updater 的事件监听：不留悬挂引用，也让下一次 quit 不重复处理。
   updater?.dispose();
   void helperClient?.dispose();
+  // ★ 日志最后关：上面几行的 dispose 自己也可能写日志，先关就把退出期的线索丢了。
+  logSink?.close();
+  logSink = null;
 });
 
 main();

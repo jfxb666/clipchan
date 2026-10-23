@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { ClipItemDTO, KindFilter, ListLayout } from '../types';
 import { ClipCard } from './ClipCard';
 import { EmptyState } from './EmptyState';
+import { shouldShowFirstRun } from './firstRun';
 import type { ListBodyProps } from './listBody';
 import { MasonryList } from './MasonryList';
 import { SourceGroupList } from './SourceGroupList';
@@ -58,6 +59,7 @@ export function ListPanel({
   onLoadMore,
   onContextMenu,
   onDragStart,
+  hasAnyItems = true,
 }: {
   items: ClipItemDTO[];
   kind: KindFilter;
@@ -77,6 +79,11 @@ export function ListPanel({
   onContextMenu?: (id: string, x: number, y: number) => void;
   /** 拖出到外部应用（v0.6.0）；未传则卡片不可拖。 */
   onDragStart?: (id: string) => void;
+  /**
+   * 库里到底有没有记录（不是当前筛选后的条数）。
+   * ★ 默认 true：没接线时宁可不显示首次引导，也不要对着一个有记录的库喊「去复制点什么」。
+   */
+  hasAnyItems?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -113,7 +120,7 @@ export function ListPanel({
       {showSkeleton ? (
         <ListSkeleton />
       ) : items.length === 0 ? (
-        <EmptyState kind={kind} q={q} />
+        <EmptyState kind={kind} q={q} showFirstRun={shouldShowFirstRun(kind, q, hasAnyItems)} />
       ) : (
         <>
           {layout === 'timeline' ? (

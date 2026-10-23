@@ -936,6 +936,7 @@ export function App() {
                 onLoadMore={() => void useClipStore.getState().loadMore()}
                 onContextMenu={(id, x, y) => setMenu({ id, x, y })}
                 onDragStart={(id) => void startDrag(id)}
+                hasAnyItems={total > 0}
                 layout={settings.listLayout}
               />
 
