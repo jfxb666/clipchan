@@ -33,6 +33,25 @@ export {
   type SourceGroup,
 } from './sourceGroups';
 export { TrashView, type TrashViewProps } from './TrashView';
+export { OrganizeView, type OrganizeViewProps } from './OrganizeViewCard';
+export {
+  OrganizeItemDialog,
+  type OrganizeItemDialogProps,
+} from './OrganizeItemDialog';
+export {
+  countLabel,
+  filterChips,
+  folderMoveTargets,
+  folderPathLabel,
+  folderRows,
+  isOrganizeEmpty,
+  itemTagsOf,
+  tagCandidates,
+  toggleTag,
+  type FilterChip,
+  type FolderRow,
+  type FolderTarget,
+} from './organizeView';
 export {
   TRASH_PAGE_SIZE,
   TRASH_MAX_LIMIT,
@@ -154,6 +173,7 @@ export {
 } from './contextMenu';
 export { ContextMenu, type ContextMenuProps } from './ContextMenuView';
 export { OcrResultView, type OcrResultViewProps } from './OcrResultView';
+export { QrResultView, type QrResultViewProps } from './QrResultView';
 export {
   OCR_EMPTY_TOAST,
   OCR_SAVED_TOAST,
@@ -164,6 +184,12 @@ export {
   ocrSavedToast,
   ocrStatusText,
 } from './ocrView';
+export {
+  qrLooksLikeUrl,
+  qrMessageOf,
+  qrStatusOf,
+  type QrStatus,
+} from './qrView';
 export { viewerKindOf, viewerTitleOf, type ViewerKind, type ViewerSource } from './viewer';
 export { TextViewer } from './TextViewer';
 export {
@@ -205,3 +231,18 @@ export {
   type MergeHint,
   type View,
 } from '../state/store';
+export { AssistView, type AssistViewProps } from './AssistViewCard';
+export {
+  ASSIST_ACTION_OPTIONS,
+  ASSIST_LANG_OPTIONS,
+  assistNeedsLang,
+  assistStatusOf,
+  defaultTargetLang,
+  truncateSource,
+  type AssistActionOption,
+  type AssistLangOption,
+  type AssistStatus,
+} from './assistView';
+// ★ degradedHint 在两个纯模块里同名（optimizeView 返回 string | null，assistView 返回 string）。
+// 直接再导一次会让本文件出现重复导出名（TS2308），所以这里换个名字暴露。
+export { degradedHint as assistDegradedHint } from './assistView';

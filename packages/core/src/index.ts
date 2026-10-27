@@ -5,3 +5,7 @@ export * from './logic/merge';
 export * from './logic/layout';
 export * from './logic/paste';
 export * from './logic/wordcloud';
+export * from './logic/searchQuery';
+export * from './logic/organize';
+export * from './logic/phash';
+export * from './logic/urlPreview';

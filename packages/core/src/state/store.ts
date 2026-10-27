@@ -1,15 +1,20 @@
 import { create } from 'zustand';
 import type {
+  AiProvider,
   Capabilities,
   ClipItemDTO,
+  FolderDTO,
+  FolderInput,
   GhostState,
   HotkeyStatus,
   KindFilter,
   ListQuery,
   Settings,
+  TagCountDTO,
   WordCloudData,
 } from '../types';
 import { DEFAULT_SETTINGS } from '../types';
+import { parseSearch, type SearchNode, type SearchTimeRange } from '../logic/searchQuery';
 import { getPlatform } from '../platform/adapter';
 import {
   GHOST_RESUME_TOAST,
@@ -24,6 +29,7 @@ import {
   type ToastTone,
 } from '../ui/toastText';
 import { TRASH_PAGE_SIZE, nextTrashOffset } from '../ui/trashViewLogic';
+import { parseTagSuggestions } from '@clipchan/ai';
 
 /**
  * 界面状态中心（spec §5：core 不认宿主，系统能力一律走 getPlatform()）。
@@ -50,7 +56,7 @@ export const CLEAR_CONFIRM_TTL_MS = 3000;
  *
  * ★ 回收站也在这里，但**不持久化**：view 只是内存状态，重启回 'list'（既有行为，别顺手改）。
  */
-export type View = 'list' | 'settings' | 'wordcloud' | 'optimize' | 'trash' | 'snippets';
+export type View = 'list' | 'settings' | 'wordcloud' | 'optimize' | 'assist' | 'trash' | 'snippets' | 'organize';
 /** 窗口形态：主面板 900×620 / 小组件 280×420（spec §6.6）。 */
 export type AppMode = 'main' | 'widget';
 
@@ -103,6 +109,34 @@ export interface ClipStoreState {
   wordcloud: WordCloudData | null;
   /** 优化面板的原文初值：由卡片「优化」按钮带出（计划 Task 7 Step 3）。 */
   optimizeSource: string;
+  /** AI 助手面板的原文初值：由右键菜单「AI 助手…」带出（v1.0.0 第 ⑤ 项）。 */
+  assistSource: string;
+  /**
+   * 最近一次输入被解析器丢掉/降级的片段（非法正则、写错的日期）。
+   * ★ 与 q 分开存：q 是用户输入原文（输入框受控），这里是给界面做提示用的派生结果。
+   */
+  searchErrors: string[];
+  /** 标签筛选（AND 语义）；空数组 = 不筛。 */
+  tagFilter: string[];
+  /**
+   * 文件夹筛选，三态：string=该文件夹；null=只看未归类；undefined=不限。
+   * ★ 三态必须一路保真传到 ListQuery.folderId —— 省略这个键在 SQL 里等于「不限」。
+   */
+  folderFilter: string | null | undefined;
+  /** 文件夹平表；树由 buildFolderTree 现场构建（主进程只给平表，见 FolderDTO 注释）。 */
+  folders: FolderDTO[];
+  /**
+   * 全库标签统计（标签筛选面板与整理弹窗的候选来源）。
+   * ★ 与 folders 一样是**可选能力**：老版本主进程没有 items.listTags，拉不到就当没有，
+   *   面板退化成「只能手输标签」，绝不能因此挡住列表。
+   */
+  knownTags: TagCountDTO[];
+  /**
+   * 已配置的 AI 模型（给界面判断「有没有能用的模型」）。
+   * ★ 与 folders / knownTags 同一考虑：AI 是可选能力，拉不到就当没有，
+   *   标签弹窗退化成「只能手输」，绝不能因为没配模型就报错或挡住整理。
+   */
+  aiProviders: AiProvider[];
 }
 
 export interface ClipStoreActions {
@@ -112,10 +146,25 @@ export interface ClipStoreActions {
   /** 关闭优化面板并清空原文。 */
   closeOptimize(): void;
   /**
+   * 打开 AI 助手面板并带出原文（右键菜单「AI 助手…」）。
+   * ★ 与 openOptimize 同一范式：带初值 + 关闭时清空 —— 面板里的原文是这一条记录的全文，
+   *   留到下次会让人以为新记录也带着上次的内容。
+   */
+  openAssist(text: string): void;
+  /** 关闭 AI 助手面板并清空原文。 */
+  closeAssist(): void;
+  /**
    * 打开片段库（侧栏入口）。
    * ★ 与 openOptimize 分开：片段库不需要带初值，也没有"关闭时清空"的配套状态。
    */
   openSnippets(): void;
+  /**
+   * 打开整理视图（侧栏入口）。
+   * ★ 与 openSnippets 同一范式：不带初值、没有"关闭时清空"的配套状态。
+   */
+  openOrganize(): void;
+  /** 关闭整理视图回到列表。 */
+  closeOrganize(): void;
   setMode(mode: AppMode): void;
   /** 切侧栏分类：清空选中并立刻重新请求（不走防抖）。 */
   setKind(kind: KindFilter): void;
@@ -183,6 +232,30 @@ export interface ClipStoreActions {
   setMergeHint(hint: MergeHint | null): void;
   /** 主进程发来连续复制提示：预选这几条 + 浮出提示条（**不合并**，spec §7.5）。 */
   applyBurstHint(ids: string[], count: number): void;
+  /** 标签筛选：条件变了旧选中行可能已不在列表里，所以清选中并立刻重载（不走防抖）。 */
+  setTagFilter(tags: string[]): void;
+  /** 文件夹筛选（三态语义同 ListQuery.folderId）：同上，立刻重载。 */
+  setFolderFilter(folderId: string | null | undefined): void;
+  /** 拉文件夹平表。文件夹是可选能力：拉不到就静默保持空表，不打扰首屏。 */
+  loadFolders(): Promise<void>;
+  /** 拉标签统计。同样是可选能力，理由见 loadFolders。 */
+  loadKnownTags(): Promise<void>;
+  /** 拉已配置的 AI 模型列表。同样是可选能力，理由见 loadFolders。 */
+  loadAiProviders(): Promise<void>;
+  createFolder(input: FolderInput): Promise<void>;
+  renameFolder(id: string, name: string): Promise<void>;
+  moveFolder(id: string, parentId: string | null): Promise<void>;
+  /** 删文件夹：里面的记录回未归类，所以删完必须重载列表。 */
+  removeFolder(id: string): Promise<void>;
+  setItemTags(id: string, tags: string[]): Promise<void>;
+  setItemFolder(id: string, folderId: string | null): Promise<void>;
+  /**
+   * 让 AI 给这条记录起标签建议（v1.0.0 ⑥ 可选项）。返回空数组表示没有可用建议。
+   *
+   * ★ 只返回建议、绝不落库：调用方把结果并进标签草稿，用户点「保存」才写库。
+   *   让 AI 直接改数据会绕过用户在弹窗里做的取舍，也无法撤销。
+   */
+  suggestTagsByAi(itemId: string): Promise<string[]>;
 }
 
 export type ClipStore = ClipStoreState & ClipStoreActions;
@@ -211,11 +284,53 @@ function errorText(err: unknown): string {
   return String(err);
 }
 
-/** 拼 ListQuery：空搜索词不带 q，交给主进程按"无过滤"处理。 */
-function listQuery(kind: KindFilter, q: string, offset: number): ListQuery {
-  const query: ListQuery = { kind, limit: PAGE_SIZE, offset };
-  const keyword = q.trim();
-  if (keyword) query.q = keyword;
+/**
+ * 判断这次输入该走老的三路 LIKE 还是走结构化表达式。
+ *
+ * ★ 为什么要分两条路：纯文本搜索（绝大多数情况）在 SQL 里是一条 LIKE 快路径，
+ *   升级成表达式求值会把它变成应用层逐条匹配 —— 普通搜索变慢是不能接受的回归。
+ *   所以判据不靠猜字符串，而是看解析结果：解析器把自由文本收进 text 叶子，
+ *   于是「单个 text 叶子 + 无 time」本身就等价于纯文本，可以原样折回 q。
+ */
+function buildSearch(q: string): {
+  expr?: SearchNode;
+  time?: SearchTimeRange;
+  errors: string[];
+  keyword?: string;
+} {
+  const spec = parseSearch(q);
+  const errors = spec.errors;
+  const expr = spec.expr;
+  const plain = expr !== undefined && expr.op === 'leaf' && expr.kind === 'text' && !spec.time;
+  if (plain && expr.op === 'leaf') {
+    // trim 后为空说明用户只写了空白（或只写了运算符被忽略），当成无关键词。
+    const keyword = expr.value.trim();
+    return keyword ? { errors, keyword } : { errors };
+  }
+  const out: { expr?: SearchNode; time?: SearchTimeRange; errors: string[]; keyword?: string } = { errors };
+  if (spec.expr) out.expr = spec.expr;
+  if (spec.time) out.time = spec.time;
+  return out;
+}
+
+/**
+ * 拼 ListQuery。load() 与 loadMore() 必须走同一个函数：
+ * 两处分头拼条件迟早会漂移，出现「第一页 3 条、第二页换了筛选」的怪状。
+ *
+ * ★ folderFilter 的三态在这里保真：null 要**显式写出 folderId: null**（省略等于"不限"，
+ *   语义完全不同）；undefined 则整个键都不出现。
+ */
+function listQuery(
+  s: Pick<ClipStoreState, 'kind' | 'q' | 'tagFilter' | 'folderFilter'>,
+  offset: number,
+): ListQuery {
+  const query: ListQuery = { kind: s.kind, limit: PAGE_SIZE, offset };
+  const search = buildSearch(s.q);
+  if (search.keyword !== undefined) query.q = search.keyword;
+  if (search.expr) query.expr = search.expr;
+  if (search.time) query.time = search.time;
+  if (s.tagFilter.length > 0) query.tags = [...s.tagFilter];
+  if (s.folderFilter !== undefined) query.folderId = s.folderFilter;
   return query;
 }
 
@@ -279,6 +394,13 @@ function initialState(): ClipStoreState {
     lastDeletedIds: [],
     wordcloud: null,
     optimizeSource: '',
+    assistSource: '',
+    searchErrors: [],
+    tagFilter: [],
+    folderFilter: undefined,
+    folders: [],
+    knownTags: [],
+    aiProviders: [],
   };
 }
 
@@ -310,7 +432,15 @@ export const useClipStore = create<ClipStore>((set, get) => ({
 
   closeOptimize: () => set({ view: 'list', optimizeSource: '' }),
 
+  openAssist: (text) => set({ view: 'assist', assistSource: text }),
+
+  closeAssist: () => set({ view: 'list', assistSource: '' }),
+
   openSnippets: () => set({ view: 'snippets' }),
+
+  openOrganize: () => set({ view: 'organize' }),
+
+  closeOrganize: () => set({ view: 'list' }),
 
   setMode: (mode) => set({ mode }),
 
@@ -321,7 +451,9 @@ export const useClipStore = create<ClipStore>((set, get) => ({
   },
 
   setQuery: (q) => {
-    set({ q });
+    // ★ 语法错误提示必须立刻可见：它跟着输入框走，等 300ms 防抖才更新会让人以为没反应。
+    //   请求本身仍然防抖（连打多次只发一次）。
+    set({ q, searchErrors: buildSearch(q).errors });
     if (queryTimer) clearTimeout(queryTimer);
     queryTimer = setTimeout(() => {
       queryTimer = null;
@@ -329,13 +461,25 @@ export const useClipStore = create<ClipStore>((set, get) => ({
     }, QUERY_DEBOUNCE_MS);
   },
 
+  setTagFilter: (tags) => {
+    // 与 setKind 同一套理由：条件变了，旧的选中行可能已经不在列表里了。
+    set({ tagFilter: [...tags], selectedIds: [], mergeHint: null });
+    void get().load();
+  },
+
+  setFolderFilter: (folderId) => {
+    // ★ 三个分支分开写（不写成 folderFilter: folderId 的简写）：null 是「只看未归类」这个
+    //   真实条件，不是"没给值"。set 里原样存下，由 listQuery 负责保真到 ListQuery。
+    set({ folderFilter: folderId, selectedIds: [], mergeHint: null });
+    void get().load();
+  },
+
   load: async () => {
-    const { kind, q } = get();
     const seq = ++loadSeq;
     set({ loading: true });
     try {
       const platform = getPlatform();
-      const query = listQuery(kind, q, 0);
+      const query = listQuery(get(), 0);
       // 列表与总数必须同一套条件：分开算会出现「共 3 条」但列表有 5 张卡片。
       const [items, counted] = await Promise.all([
         platform.items.list(query),
@@ -362,12 +506,13 @@ export const useClipStore = create<ClipStore>((set, get) => ({
   },
 
   loadMore: async () => {
-    const { hasMore, loading, items, kind, q } = get();
+    const { hasMore, loading, items } = get();
     if (!hasMore || loading) return;
     const seq = loadSeq;
     set({ loading: true });
     try {
-      const next = await getPlatform().items.list(listQuery(kind, q, items.length));
+      // ★ 与 load() 用同一个 listQuery(get(), ...)：两处分头拼条件迟早会漂移。
+      const next = await getPlatform().items.list(listQuery(get(), items.length));
       if (seq !== loadSeq) return;
       set({
         items: [...get().items, ...next],
@@ -424,6 +569,126 @@ export const useClipStore = create<ClipStore>((set, get) => ({
   },
 
   setHovered: (id) => set({ hoveredId: id }),
+
+  loadFolders: async () => {
+    try {
+      set({ folders: await getPlatform().folders.list() });
+    } catch {
+      // ★ 文件夹是可选能力（老版本主进程没有这个命名空间）：拉不到就当没有，
+      //   绝不能因此弹错或者挡住首屏 —— 列表本身不依赖它。
+    }
+  },
+
+  loadKnownTags: async () => {
+    try {
+      set({ knownTags: await getPlatform().items.listTags() });
+    } catch {
+      // 同上：标签统计是可选能力，拉不到就当没有（整理面板退化成手输标签）。
+    }
+  },
+
+  loadAiProviders: async () => {
+    try {
+      set({ aiProviders: await getPlatform().ai.listProviders() });
+    } catch {
+      // 同上：AI 是可选能力（老版本主进程没有 ai 命名空间），
+      // 拉不到就当没配模型，标签弹窗显示「先配模型」的提示即可。
+    }
+  },
+
+  createFolder: async (input) => {
+    try {
+      set({ folders: await getPlatform().folders.create(input) });
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  renameFolder: async (id, name) => {
+    try {
+      set({ folders: await getPlatform().folders.rename(id, name) });
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  moveFolder: async (id, parentId) => {
+    try {
+      set({ folders: await getPlatform().folders.move(id, parentId) });
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  removeFolder: async (id) => {
+    try {
+      set({ folders: await getPlatform().folders.remove(id) });
+      // ★ 里面的记录回未归类：列表内容真的变了，必须重载。
+      //   若当前正停在这个文件夹上，不重置筛选就只剩一张空列表，用户会以为数据丢了。
+      if (get().folderFilter === id) set({ folderFilter: undefined });
+      void get().load();
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  setItemTags: async (id, tags) => {
+    const before = get().items;
+    const next = before.map((it) => (it.id === id ? { ...it, tags: [...tags] } : it));
+    // 乐观更新：标签面板点一下就关，等 IPC 回来再变会顿一下；失败回滚。
+    set({ items: next });
+    try {
+      await getPlatform().items.setTags(id, tags);
+    } catch (err) {
+      set({ items: before });
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  setItemFolder: async (id, folderId) => {
+    const before = get().items;
+    /**
+     * ★ 这里只改本地那一条的 folderId，**不**按当前筛选把它摘掉。
+     * 原因：按文件夹筛选时，「改完可能已不属于当前筛选」要靠主进程广播的 itemsChanged
+     * 触发重载来收敛；本地抢先摘行会在写失败回滚时出现「行已经不见了又冒回来」的闪烁，
+     * 而且筛选条件（尤其是 null=未归类）与 folderId 的对应关系不该在渲染层再复制一份。
+     */
+    set({
+      items: before.map((it) =>
+        it.id === id ? { ...it, folderId: folderId === null ? undefined : folderId } : it,
+      ),
+    });
+    try {
+      await getPlatform().items.setFolder(id, folderId);
+    } catch (err) {
+      set({ items: before });
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  suggestTagsByAi: async (itemId) => {
+    try {
+      // ★ 现场补拉一次：store 的 aiProviders 只在 bindClipStore 里拉过一次，
+      //   用户刚在设置里存完 Key 就回到弹窗时，本地还是旧列表（全是 hasKey=false）。
+      //   多一次 listProviders 比「配好了却说没配」便宜得多。
+      if (get().aiProviders.every((p) => !p.hasKey)) await get().loadAiProviders();
+
+      const provider = get().aiProviders.find((p) => p.hasKey);
+      // 没有可用模型不是异常：界面自己决定怎么提示（这里静默返回空数组）。
+      if (provider === undefined) return [];
+
+      const text = await getPlatform().items.getText(itemId);
+      if (text.trim() === '') return [];
+
+      const result = await getPlatform().ai.assist({ providerId: provider.id, action: 'tags', text });
+      return parseTagSuggestions(result.text);
+    } catch (err) {
+      // ★ 不 toast：标签建议只是锦上添花，弹个错会打断用户正在做的整理；
+      //   控制台留一行，出问题时还能顺着查。
+      console.warn('[ai] 标签建议失败：' + errorText(err));
+      return [];
+    }
+  },
 
   togglePin: async (id) => {
     const before = get().items;
@@ -823,6 +1088,9 @@ export function bindClipStore(): () => void {
   unsubscribers = [
     platform.items.onChanged(() => {
       void get().load();
+      // 标签统计是 items.tags 的派生量：条目一变就可能多/少一个标签，
+      // 不跟着刷新的话筛选面板会一直显示过期计数。
+      void get().loadKnownTags();
     }),
     platform.settings.onChanged((settings) => {
       set({ settings });
@@ -852,6 +1120,10 @@ export function bindClipStore(): () => void {
       get().pushToast(t?.message ?? '', appToastTone(t?.kind ?? 'info'));
     }),
   ];
+  // 文件夹平表、标签统计与 AI 模型列表在首屏顺带拉一次（不 await：它们不该挡住列表渲染）。
+  void get().loadFolders();
+  void get().loadKnownTags();
+  void get().loadAiProviders();
   return unbindClipStore;
 }
 

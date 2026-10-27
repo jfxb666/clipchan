@@ -136,6 +136,14 @@ export function ClipCard({
           <span>{formatTime(item.createdAt)}</span>
           {item.sizeLabel ? <span>· {item.sizeLabel}</span> : null}
           {item.source === 'merge' ? <span>· 拼接</span> : null}
+          {/* 链接预览：只露域名。★ 分隔符用仓库既有的「· 」（与 sizeLabel / 拼接一致），
+              不额外加图标依赖；truncate 防长域名把卡片撑破——域名比标题短得多，
+              标题留给 title 属性，悬停才看得见。 */}
+          {item.urlPreview ? (
+            <span className="truncate" title={item.urlPreview.title || item.urlPreview.url}>
+              · {item.urlPreview.domain}
+            </span>
+          ) : null}
         </div>
       </div>
 

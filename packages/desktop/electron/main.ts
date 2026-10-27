@@ -7,17 +7,18 @@
  * ★ --smoke：创建窗口、切两次形态、回读尺寸、打印一行 SMOKE {...} 后退出 0
  *   （给 scripts/smoke-main.mjs 断言用，不需要人眼看）。
  */
-import { Menu, app, BrowserWindow, clipboard, desktopCapturer, dialog, nativeImage, net, protocol, screen } from 'electron';
+import { Menu, app, BrowserWindow, clipboard, desktopCapturer, dialog, nativeImage, net, protocol, safeStorage, screen } from 'electron';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DEFAULT_SETTINGS, pasteHintOf } from '@clipchan/core';
+import { DEFAULT_SETTINGS, normalizeUrl, pasteHintOf } from '@clipchan/core';
 import type {
   Capabilities,
   CaptureFinishPayload,
   CaptureResult,
   CaptureTarget,
+  FolderInput,
   GhostState,
   ListQuery,
   NavigateTarget,
@@ -28,9 +29,12 @@ import type {
   UpdateStatus,
 } from '@clipchan/core';
 import { adapterFor } from '@clipchan/ai';
-import { optimize as runOptimize } from '@clipchan/ai';
+import { assist as runAssist, optimize as runOptimize } from '@clipchan/ai';
 import { CH, EV } from './channels';
 import { PROVIDERS_KEY, createAi } from './ai';
+import { createElectronSecretCrypto, createSecretBox } from './keyvault';
+import { DEFAULT_BACKUP_INTERVAL_MS, DEFAULT_BACKUP_KEEP } from './backup';
+import { maybeBackup, recoverCorruptDb } from './storage-guard';
 import { createDeltaThrottle } from './deltaThrottle';
 import type { AiApi } from './ai';
 import Database from 'better-sqlite3';
@@ -38,10 +42,10 @@ import { openDb } from './db';
 import type { Db, InsertResult } from './db';
 import { runLegacyMigration } from './migrate-runner';
 import { createLogSink, installCrashHooks } from './logs';
-import { deleteImageFiles, enforceImageBudget, hashImageBuffer, purgeItemsWithFiles, purgeTrashOverLimitWithFiles, saveImage } from './images';
+import { deleteImageFiles, enforceImageBudget, hashImageBuffer, imagePhash, purgeItemsWithFiles, purgeTrashOverLimitWithFiles, saveImage } from './images';
 import type { NativeImageLike, SavedImage } from './images';
 import { sweepOrphans } from './images-policy';
-import { DB_FILE_NAME, imageAbs, imagesDir, logsDir, thumbsDir, dbFile, resolveDataDir, toRelativePath } from './paths';
+import { DB_FILE_NAME, backupsDir, imageAbs, imagesDir, logsDir, thumbsDir, dbFile, resolveDataDir, toRelativePath } from './paths';
 import { THUMB_SCHEME, imageUrlFor, mapThumbUrl, resolveImageRequest, resolveThumbRequest } from './thumb-url';
 import { registerHotkeys, unregisterHotkeys } from './hotkeys';
 import { exportAllToZip, importAllFromZip, importSummaryText } from './export-import';
@@ -66,12 +70,18 @@ import { describeFinish, matchSource, thumbnailSizeFor } from './capture';
 import { closeOverlays, createOverlayWindows } from './overlay';
 import { createOcr, upscaleSize } from './ocr';
 import type { OcrApi } from './ocr';
+import { createQr } from './qrcode';
+import type { QrApi } from './qrcode';
+import { createUrlMeta } from './url-meta';
+import type { UrlMetaApi } from './url-meta';
 import type { RecordSink } from './watcher';
 import { DRAG_HINT_NO_FILE, dragHintFor, dragPayloadFor } from './dragout';
 import { buildDropFiles } from './dropfiles';
 import { Updater } from './updater';
 
 const SMOKE = process.argv.includes('--smoke');
+/** 定期备份的轮询间隔：1 小时轮询、24 小时才真备份一次（原因见 whenReady 里的注释）。 */
+const BACKUP_POLL_MS = 60 * 60 * 1000;
 /** 启动即为小组件形态（--widget，旧版 --ghost 的位置）。 */
 const START_WIDGET = process.argv.includes('--widget');
 
@@ -144,6 +154,12 @@ let logSink: ReturnType<typeof createLogSink> | null = null;
  *   等 did-finish-load 之后再补发一条，用户才知道自己的历史去哪了。
  */
 let recoveredFromDb: string | null = null;
+/**
+ * 本次启动是否成功从备份恢复过（值是备份文件名）。
+ * ★ 和 recoveredFromDb 分开存：一个是"数据救回来了"，一个是"数据没救回来、只留了档"，
+ *   提示语和严重级别完全不同，混成一个变量必然把好消息说成坏消息。
+ */
+let restoredFromDb: string | null = null;
 
 /** 控制台 + 文件双写。★ 控制台留着是因为开发期 console 更好用，落盘是给用户看的。 */
 function logLine(msg: string): void {
@@ -187,13 +203,35 @@ const deltaThrottle = createDeltaThrottle({
 });
 
 /**
+ * 把 Electron 的 safeStorage 适配成 keyvault 的 SafeStorageLike。
+ *
+ * ★ 为什么不直接传 safeStorage：Electron 37 的 decryptString 返回 **string**，
+ *   而 SafeStorageLike 约定返回字节（Uint8Array）—— 直接传过不了类型检查。
+ *   这里按 utf8 编回去，语义与 keyvault 内部 Buffer.from(...).toString('utf8') 完全一致。
+ * ★ 每次调用都现取 safeStorage 的方法，不在模块加载期缓存：缓存住的是未就绪状态。
+ */
+function electronSecretCrypto(): ReturnType<typeof createElectronSecretCrypto> {
+  return createElectronSecretCrypto({
+    isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+    encryptString: (plain: string) => safeStorage.encryptString(plain),
+    decryptString: (encrypted: Uint8Array) => Buffer.from(safeStorage.decryptString(Buffer.from(encrypted)), 'utf8'),
+  });
+}
+
+/**
  * AI 桥（Task 5 Step 4）。
  * ★ 这里只做"依赖装配"：kv 从库来、adapterFor/optimize 从 @clipchan/ai 来，
  *   业务逻辑全在 ai.ts 里（那才测得了）。
  */
 let aiApi: AiApi | null = null;
+
 function buildAiApi(getBroadcast: () => { aiChanged(): void; aiOptimizeDelta(requestId: string, text: string): void }): AiApi {
+  // ★ SecretBox 是惰性的：构造它不会碰 safeStorage，所以本函数在 app ready 之前调也安全。
+  // ★ 加密不可用时（Linux 无 keyring / 系统凭据异常）keyvault 自动降级为 plain:v1: 前缀，
+  //   是**诚实降级**而不是静默丢 Key —— 用户至少能看到 Key 还在、并在设置页被提示。
+  const secretBox = createSecretBox(electronSecretCrypto());
   return createAi({
+    secretBox,
     kv: {
       getSettingValue: <T,>(key: string): T | undefined => {
         if (!rt.db) throw new Error('数据库尚未就绪');
@@ -206,6 +244,7 @@ function buildAiApi(getBroadcast: () => { aiChanged(): void; aiOptimizeDelta(req
     },
     adapterFor,
     optimize: runOptimize,
+    assist: runAssist,
     // ★ Key 变了只发"变了"这一件事，数据让界面自己重取（事件里不带任何 provider 字段）。
     onChanged: () => getBroadcast().aiChanged(),
     // ★ 流式增量：走节流器，过期 requestId 由渲染层自己按 id 丢弃。
@@ -252,7 +291,13 @@ function flushPendingBurst(): void {
 /** 记录成功后的统一后处理：刷新面板列表 + 连续复制检测。 */
 function afterRecord(result: InsertResult | null): InsertResult | null {
   if (!result || result.touched) return result;
-  makeBroadcaster(() => rt.win).itemsChanged();
+  const broadcast = makeBroadcaster(() => rt.win);
+  broadcast.itemsChanged();
+  // ★ 只提示、不拦截：图库里有相似图时照常入库（用户复制过两次同一张图是常事，
+  //   悄悄丢掉才是数据丢失）。所以这里发的是一条 info toast，而不是"已跳过"。
+  // ★ 能走到这里就意味着 touched === false（上面第一行已经挡掉了去重命中）：
+  //   那种情况下界面上没有新增行，再弹"已有一张很相似的"只会让用户莫名其妙。
+  if (result.similarTo) broadcast.toast('这张图库里已有一张很相似的，已照样保存', 'info');
   const detector = burstDetector;
   if (!detector) return result;
   const note = detector.note(result.id);
@@ -367,20 +412,46 @@ function backupCorruptDb(dbPath: string, dataDir: string): string {
   return name;
 }
 
-/** 建目录、开库、按需迁移、清孤儿。 */
-function setupStorage(dataDir: string): { db: Db; migrated: number; recoveredFrom?: string } {
+/** 建目录、开库、按需迁移、清孤儿、启动自检备份。 */
+function setupStorage(dataDir: string): {
+  db: Db;
+  migrated: number;
+  /** 坏库留档文件名（数据没救回来时的产物）。 */
+  recoveredFrom?: string;
+  /** 成功恢复所用的备份文件名（数据救回来了）。 */
+  restoredFrom?: string;
+  /** 本次启动自检备份的绝对路径（做了才 set）。 */
+  backupPath?: string;
+} {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(imagesDir(dataDir), { recursive: true });
   fs.mkdirSync(thumbsDir(dataDir), { recursive: true });
 
   const dbPath = dbFile(dataDir);
-  let recoveredFrom: string | undefined;
-  if (dbLooksCorrupt(dbPath)) {
-    recoveredFrom = backupCorruptDb(dbPath, dataDir);
-    logError('[db] 历史库损坏，已备份为 ' + recoveredFrom + '，将新建空库');
+  // ★ 判定与改名仍是本文件的两个函数（口径要和 openDb 一致，且 sidecar 必须一起挪），
+  //   决策顺序在 storage-guard.ts 里，那里能单测。
+  const recovery = recoverCorruptDb({
+    dataDir,
+    dbPath,
+    looksCorrupt: dbLooksCorrupt,
+    quarantine: backupCorruptDb,
+  });
+  const recoveredFrom = recovery.quarantinedFrom;
+  const restoredFrom = recovery.restoredFrom;
+  if (restoredFrom !== undefined) {
+    logLine('[db] 历史库损坏，已从备份恢复 ' + restoredFrom);
+  } else if (recoveredFrom !== undefined) {
+    if (recovery.restoreFailure !== undefined && recovery.restoreFailure !== 'no-backup') {
+      logError('[db] 历史库损坏，恢复失败(' + recovery.restoreFailure + ')，已备份为 ' + recoveredFrom + '，将新建空库');
+    } else {
+      logError('[db] 历史库损坏，已备份为 ' + recoveredFrom + '，将新建空库');
+    }
   }
   // ★ 恢复之后必须当成"全新库"：否则 runLegacyMigration 会因为"文件已存在"跳过，
   //   用户的 history.json 就再没机会导进新库了。
+  // ★ 这个判定依赖恢复路径的副作用，别改成「用 recoveredFrom/restoredFrom 推」：
+  //   恢复成功 → dbPath 存在 → isFresh=false（库里有用户数据）；
+  //   走兜底 → dbPath 已被挪走 → isFresh=true。
   const isFresh = !fs.existsSync(dbPath);
   const db = openDb(dbPath);
 
@@ -395,15 +466,39 @@ function setupStorage(dataDir: string): { db: Db; migrated: number; recoveredFro
   } catch (e) {
     logError('[images] 孤儿扫描失败（不阻断启动）：' + String(e));
   }
-  return { db, migrated, recoveredFrom };
+
+  // ★ 启动自检备份：库已经打开（checkpoint 必须跑在持有写句柄的这条连接上），
+  //   且距上次备份超过 24 小时才真做。备份失败只 warn —— 备份是增值功能，
+  //   绝不能因为它让用户打不开应用。SMOKE 下也允许跑：它只读+复制，无害。
+  const backup = maybeBackup({
+    dataDir,
+    dbPath,
+    // ★ checkpoint 必须跑在持有写句柄的这条连接上，所以走 db.raw（同一个 Database 实例）。
+    checkpoint: () => {
+      db.raw.pragma('wal_checkpoint(TRUNCATE)');
+    },
+    intervalMs: DEFAULT_BACKUP_INTERVAL_MS,
+    keep: DEFAULT_BACKUP_KEEP,
+  });
+  let backupPath: string | undefined;
+  if (backup.ran) {
+    if (backup.result?.ok && backup.result.path) {
+      backupPath = backup.result.path;
+      logLine('[db] 自动备份 ' + backupPath);
+    } else {
+      logWarn('[db] 自动备份失败（不阻断启动）：' + (backup.result?.reason ?? '未知原因'));
+    }
+  }
+  return { db, migrated, recoveredFrom, restoredFrom, backupPath };
 }
 
 /**
  * 建立 Task 5/6/8 的运行时服务（助手 / 目标跟踪 / 毛玻璃 / 轮询 / 记录 / 幽灵 / 粘贴）。
  *
  * ★ 顺序有讲究：
- *   1. 助手客户端先建（毛玻璃与目标跟踪都依赖它），但**不预启动**——懒启动由第一次
- *      `blur()` / `paste()` / `foreground()` 触发，启动后助手自己会空闲 5 秒预热；
+ *   1. 助手客户端先建（毛玻璃与目标跟踪都依赖它），并**立刻 prewarm 一次**：
+ *      冷启动 spawn→READY 实测 427ms，而唤起面板时的目标捕获只有 1s 预算，
+ *      不预热就会首次唤起超时（历史上"粘错窗口"的间歇性根因）。prewarm 绝不 await、绝不抛；
  *   2. 轮询器必须**先 baseline() 再 start()**：否则启动前就躺在剪贴板里的内容会被
  *      记成一条历史（验收 27，spec §7.1）。
  *
@@ -419,6 +514,13 @@ function setupServices(dataDir: string): void {
   helperClient = new HelperClient({
     exePath: app.isPackaged ? packagedHelperExePath(process.resourcesPath) : defaultHelperExePath(),
   });
+  // ★ 预热：让首次唤起面板时 FG 查询已是热态（约 16ms 而不是 427ms）。
+  //   prewarm 是同步方法且内部已 try/catch，这里再兜一层，绝不让它影响启动流程。
+  try {
+    helperClient.prewarm();
+  } catch (error) {
+    logWarn('[helper] 预热失败：' + String(error));
+  }
   tracker = new TargetTracker({ foreground: helperClient });
   frosted = new FrostedGlass({ helper: helperClient });
 
@@ -442,8 +544,13 @@ function setupServices(dataDir: string): void {
     get lastSeen() {
       return recorder.lastSeen;
     },
-    recordText: (text: string, sourceApp?: string, richHtml?: string) =>
-      afterRecord(recorder.recordText(text, sourceApp, richHtml)),
+    recordText: (text: string, sourceApp?: string, richHtml?: string) => {
+      const result = afterRecord(recorder.recordText(text, sourceApp, richHtml));
+      // ★ 只在文本路径挂链接预览：files/image 的 content 永远不是 URL，
+      //   在那里调用只会白跑一次 normalizeUrl。同理 touched 命中的行不需要再抓。
+      if (result && !result.touched) prefetchUrlPreview(result.id);
+      return result;
+    },
     recordImage: (img, sig?: string | null, sourceApp?: string) =>
       afterRecord(recorder.recordImage(img, sig, sourceApp)),
     recordFiles: (paths: string[], sig?: string | null, sourceApp?: string) =>
@@ -532,6 +639,19 @@ function setupServices(dataDir: string): void {
  *   助手仍然保留 BLUR 能力（将来系统支持圆角模糊时把这里改回 true 即可）。
  */
 const ENABLE_SYSTEM_BLUR = false;
+
+/**
+ * 唤起面板时等待"前台窗口捕获"的兜底上限。
+ *
+ * ★ 取 300ms 的理由：这一行在 `show()` **之前**，所以它就是"按下热键 → 面板可见"这段
+ *   延迟的硬上限，不能超过 spec §7.7 验收 25 的 300ms 可见预算。热态 FG 往返实测 9-18ms，
+ *   有 ~16 倍余量，正常路径根本不会触及；只有助手卡死/正在退避重启时才会走到超时分支。
+ *   （原先写 1000ms 是为了等冷态 spawn→READY 的 427ms，但 setupServices 里的 prewarm
+ *   已经把这条冷路径消掉了 —— 助手崩了的情况下 1s 也救不回来，重启退避是 200→2000ms。）
+ * ★ 超时只是"这次没拿到目标"：不动任何槽位（宁可粘错也别丢目标），autoPaste 会诚实
+ *   降级成「已复制，按 Ctrl+V 粘贴」。
+ */
+const PANEL_TARGET_TIMEOUT_MS = 300;
 
 /** 显示/隐藏面板时同步系统模糊（spec §6.6；当前关闭，见 ENABLE_SYSTEM_BLUR）。 */
 async function applyFrosted(enabled: boolean): Promise<void> {
@@ -790,6 +910,18 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
         : { file: spec.file, icon };
       e.sender.startDrag(payload);
     },
+    // ★ v1.0.0 ⑥：标签 / 文件夹归类。两条都是"改了列表里某行的属性"，不是新增行，
+    //   所以不返回数据 —— 广播 itemsChanged 让界面重拉即可（与 remove/togglePin 同一范式）。
+    [CH.items.setTags]: (_e, id: string, tags: string[]) => {
+      needDb().setTags(String(id), Array.isArray(tags) ? tags : []);
+      broadcast.itemsChanged();
+    },
+    [CH.items.setFolder]: (_e, id: string, folderId: string | null) => {
+      needDb().setFolder(String(id), folderId === undefined ? null : folderId);
+      broadcast.itemsChanged();
+    },
+    // 只读统计：和上面两条写通道相反，回数据、不广播（否则界面拉完统计又触发一次重拉）。
+    [CH.items.listTags]: () => needDb().listTags(),
     // ★ 片段库（v0.6.0）：四个通道都回整表，界面拿返回值直接 setSnippets，不用再查一次。
     //   广播用 broadcast.send(EV.snippetsChanged) —— Broadcaster 没有 snippetsChanged 方法
     //   （ipc.ts 不在本任务边界内），send 是它已有的通用出口。
@@ -824,6 +956,14 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       }
       return next;
     },
+    // ★ v1.0.0 ⑥ 整理文件夹：五个通道与 snippets 同一范式 —— 写操作回**变更后的整表**，
+    //   界面拿返回值直接重建树，不用再补一次 list。list 只读，不进广播。
+    [CH.folders.list]: () => needDb().listFolders(),
+    [CH.folders.create]: (_e, input: FolderInput) => needDb().createFolder(input ?? { name: '' }),
+    [CH.folders.rename]: (_e, id: string, name: string) => needDb().renameFolder(String(id), String(name)),
+    // parentId=null 是"提升为顶层"，不是省略 —— 必须原样透传，不能被 ?? 兜成别的值。
+    [CH.folders.move]: (_e, id: string, parentId: string | null) => needDb().moveFolder(String(id), parentId),
+    [CH.folders.remove]: (_e, id: string) => needDb().removeFolder(String(id)),
     // ★ 优化结果「复制并粘贴」：同一段文本可能贴多次，不走 items:paste（那是库里的记录，
     //   会刷新排序）。不查库、不 touch，编排与 pasteItem 一致。
     [CH.ai.copyAndPaste]: (_e, text: string) => {
@@ -966,6 +1106,13 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       const row = needDb().getImageRow(String(id));
       if (!row || !row.image_path) throw new Error('这条记录不是图片');
       return needOcr().recognize(imageAbs(rt.dataDir, row.image_path));
+    },
+    // 二维码一条：与 OCR 同款懒创建。recognize 自己保证永不抛异常（识别不出回空串），
+    // 所以这里只有"这条记录不是图片"会真的抛给渲染层。
+    [CH.qr.recognize]: (_e, id: string) => {
+      const row = needDb().getImageRow(String(id));
+      if (!row || !row.image_path) throw new Error('这条记录不是图片');
+      return needQr().recognize(imageAbs(rt.dataDir, row.image_path));
     },
   };
   return handlers;
@@ -1112,6 +1259,10 @@ function persistCaptureImage(img: NativeImageLike): string {
   // 去重键取**磁盘上那份原图字节**的 sha256：与 recorder 完全一致，否则同一张图
   // 从剪贴板进来和从截图进来会算出两个哈希，去重直接失效。
   const hash = hashImageBuffer(fs.readFileSync(imageAbs(dataDir, saved.image_path)));
+  // ★ 感知哈希必须和 recorder 用**同一个函数**（imagePhash）算：
+  //   截图与剪贴板是同一张图的两条入口，算法/通道序/缩放只要差一点，
+  //   两边的 phash 就不是同一把尺子，"库里已有相似图"的判定会整体失效。
+  const phash = imagePhash(img);
   const result = db.insertImage(
     {
       hash,
@@ -1120,6 +1271,8 @@ function persistCaptureImage(img: NativeImageLike): string {
       bytes: saved.bytes,
       imagePath: saved.image_path,
       thumbPath: saved.thumb_path,
+      // 算不出来就不带这个键（ImageMeta.phash 可选），别写 undefined 制造第二种"没值"。
+      ...(phash === undefined ? {} : { phash }),
     },
     { now: Date.now(), source: 'capture' },
   );
@@ -1264,6 +1417,75 @@ function needOcr(): OcrApi {
   return ocrApi;
 }
 
+/** 二维码识别：同样懒创建（首次识别才加载 jsQR 与位图）。 */
+let qrApi: QrApi | null = null;
+function needQr(): QrApi {
+  if (qrApi) return qrApi;
+  qrApi = createQr({
+    // ★ 位图接口只能在主进程注入：qrcode.ts 顶层不许 import electron（与 ocr.ts 同一条铁律）。
+    //   返回 null 表示"这张图读不出来"，recognize 会把它归一成空串而不是抛异常。
+    loadImage: (imagePath) => {
+      const img = nativeImage.createFromPath(imagePath);
+      return img.isEmpty() ? null : img;
+    },
+  });
+  return qrApi;
+}
+
+// ---------------- 链接预览（v1.1.0） ----------------
+
+/**
+ * 链接预览抓取器：懒创建。
+ * ★ 沿用 ocr.ts 里的全局 fetch，而不是 electron 的 net 模块：
+ *   net 只在 app ready 之后可用，且会走 Chromium 的会话/代理配置，
+ *   把"抓个 title"和用户的浏览器代理绑在一起反而更难解释。全局 fetch 走 Node 的 undici，
+ *   超时与 abort 语义也更直白（url-meta.ts 里就靠 AbortSignal 兜底）。
+ */
+let urlMeta: UrlMetaApi | null = null;
+function needUrlMeta(): UrlMetaApi {
+  if (urlMeta) return urlMeta;
+  urlMeta = createUrlMeta({ fetchImpl: (u, init) => fetch(u, init) });
+  return urlMeta;
+}
+
+/** 链接预览缓存有效期：7 天。过期就当没缓存，重新抓一次。 */
+const URL_PREVIEW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * 后台抓一次链接预览（不阻塞录制管线）。
+ * ★ 整段是"发射后不管"：调用方**不 await**，任何失败只留日志。
+ *   链接预览是锦上添花，绝不能让一次网络超时卡住用户刚复制的一段文字。
+ * ★ 只对 !touched 的新行调用：去重命中的那条本来就有预览（或者已经有主），
+ *   再抓一次纯属浪费一次对外请求。
+ */
+function prefetchUrlPreview(id: string): void {
+  try {
+    const db = requireDb();
+    const url = normalizeUrl(db.getText(id));
+    // 不是链接就到此为止：绝大多数记录都是纯文本，别让它进入任何网络分支。
+    if (!url) return;
+
+    // ★ 缓存表就是干这个的：同一个链接被反复复制时不该每次都打一次对方服务器。
+    const cached = db.getUrlPreviews([url])[0];
+    if (cached && Date.now() - cached.fetchedAt < URL_PREVIEW_TTL_MS) return;
+
+    void (async () => {
+      try {
+        const preview = await needUrlMeta().fetchPreview(url);
+        if (!preview) return;
+        // 二次确认行还在：抓取期间用户可能已经把这条删了/清空回收站。
+        if (!requireDb().getRow(id)) return;
+        requireDb().upsertUrlPreview(preview);
+        makeBroadcaster(() => rt.win).itemsChanged();
+      } catch (e) {
+        logWarn('[url-preview] 抓取失败：' + (e instanceof Error ? e.message : String(e)));
+      }
+    })();
+  } catch (e) {
+    logWarn('[url-preview] 入队失败：' + (e instanceof Error ? e.message : String(e)));
+  }
+}
+
 /**
  * 优化成功后写一条历史。
  * ★ 整段 try/catch：写历史是**附加**动作，它失败绝不能把已经拿到的优化结果变成一次报错。
@@ -1304,9 +1526,13 @@ async function switchMode(mode: WinMode): Promise<void> {
     // ★ 必须**先查到前台窗口、再 show()**，而且要等查询结果回来。
     //   实测 bug：之前是 `void tracker.notePanelShown(self)` 后立刻 show/focus，
     //   助手处理 FG 时面板已经在前台 → 查到的是自己 → 被丢弃 → 自动粘贴的目标是旧句柄。
-    //   这里用 120ms 上限兜住"助手卡死"的情形：超时只是没拿到目标（诚实回退成
-    //   "已复制，按 Ctrl+V 粘贴"），绝不拖慢面板唤起（验收 25 要求 <300ms）。
-    if (tracker) await Promise.race([tracker.notePanelShown(self), delay(120)]);
+    //   兜底超时见 PANEL_TARGET_TIMEOUT_MS（300ms）：热态往返 9-18ms，正常路径不会触及；
+    //   原来的 120ms 在冷态（spawn→READY 427ms）必超时，这才是"粘到 Chrome"的间歇性根因。
+    //   超时只是这次没拿到目标，不动已有句柄。
+    if (tracker) {
+      const outcome = await withTimeout(tracker.captureTarget(self), PANEL_TARGET_TIMEOUT_MS);
+      if (outcome === null) logWarn('[tracker] 捕获前台窗口超时，沿用上一次的目标');
+    }
     applyMode(rt.win, mode, rt.settings?.widgetSize);
     rt.win.show();
     rt.win.focus();
@@ -1314,9 +1540,25 @@ async function switchMode(mode: WinMode): Promise<void> {
   }
 }
 
-/** 简单的毫秒延时（用于给前台查询设上限）。 */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * 给 Promise 加一个兜底超时：超时返回 null，**不取消**原任务（它自己会跑完并写回状态）。
+ *
+ * ★ 用途是"助手彻底失联时别把热键唤起挂住"，所以只用于可以安全丢弃结果的查询。
+ */
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms);
+    void work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(null);
+      },
+    );
+  });
 }
 
 function registerHotkeysNow(): void {
@@ -1507,13 +1749,39 @@ function main(): void {
 
     // ★ 协议处理器必须在 ready 之后注册（registerSchemesAsPrivileged 已在上面的模块作用域执行）。
     registerThumbProtocol(rt.dataDir);
-    const { db, recoveredFrom } = setupStorage(rt.dataDir);
+    const { db, recoveredFrom, restoredFrom } = setupStorage(rt.dataDir);
     recoveredFromDb = recoveredFrom ?? null;
+    restoredFromDb = restoredFrom ?? null;
     rt.db = db;
     rt.settings = db.getSettings();
 
     // ★ smoke 只验骨架，不碰真实剪贴板，也不启动助手（保持冒烟又快又干净）。
     if (!SMOKE) setupServices(rt.dataDir);
+
+    // ★ 定期备份：**轮询 1 小时、真备份 24 小时一次**。
+    //   为什么不是直接 setInterval(24h)：应用很少连续开满一天，24 小时的定时器
+    //   几乎永远等不到触发；1 小时的轮询 + shouldBackup 按"备份文件名时间戳"判间隔，
+    //   关机重启后也能立刻补上欠的那一份（内存计时归零不影响判定）。
+    // ★ 整段 try/catch 只 logWarn：备份永远不该影响启动或使用。smoke 跳过。
+    if (!SMOKE) {
+      setInterval(() => {
+        try {
+          if (!rt.db) return;
+          const db = rt.db;
+          const res = maybeBackup({
+            dataDir: rt.dataDir,
+            dbPath: dbFile(rt.dataDir),
+            checkpoint: () => db.raw.pragma('wal_checkpoint(TRUNCATE)'),
+            intervalMs: DEFAULT_BACKUP_INTERVAL_MS,
+            keep: DEFAULT_BACKUP_KEEP,
+          });
+          if (res.ran && res.result?.ok && res.result.path) logLine('[db] 自动备份 ' + res.result.path);
+          else if (res.ran) logWarn('[db] 自动备份失败（不阻断运行）：' + (res.result?.reason ?? '未知原因'));
+        } catch (e) {
+          logWarn('[db] 定期备份异常（不阻断运行）：' + String(e));
+        }
+      }, BACKUP_POLL_MS);
+    }
 
     // ★ 自动更新（P0-3）：开发环境整体禁用（app.isPackaged === false），否则每次启动都会
     //   去 GitHub 打一次请求并在控制台刷错误。构造完不自动 check —— 见 CH.app.checkUpdate 的注释。
@@ -1546,10 +1814,14 @@ function main(): void {
 
     // ★ 库损坏这条必须等页面加载完再发：setupStorage 跑的时候窗口还不存在，
     //   直接 toast 会被 makeBroadcaster 的 isDestroyed 守卫静默丢掉，用户永远不知道历史去哪了。
-    if (recoveredFromDb && !SMOKE) {
-      const backup = recoveredFromDb;
+    // ★ 三分支：恢复成功是好消息（'info'），只留了档才用 'warn'，都没发生就不发。
+    if ((restoredFromDb || recoveredFromDb) && !SMOKE) {
+      const restored = restoredFromDb;
+      const quarantined = recoveredFromDb;
       rt.win.webContents.once('did-finish-load', () => {
-        makeBroadcaster(() => rt.win).toast('历史库损坏，已备份为 ' + backup + '，已新建空库', 'warn');
+        const broadcast = makeBroadcaster(() => rt.win);
+        if (restored) broadcast.toast('历史库损坏，已从备份 ' + restored + ' 自动恢复', 'info');
+        else if (quarantined) broadcast.toast('历史库损坏，已备份为 ' + quarantined + '，已新建空库', 'warn');
       });
     }
 

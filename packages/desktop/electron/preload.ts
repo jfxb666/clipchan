@@ -12,6 +12,8 @@ import type {
   AiProvider,
   AiProviderInput,
   AppToast,
+  AssistRequest,
+  AssistResult,
   BurstHint,
   Capabilities,
   CaptureFinishPayload,
@@ -19,6 +21,8 @@ import type {
   CaptureTarget,
   ClipItemDTO,
   ExportResult,
+  FolderDTO,
+  FolderInput,
   GhostState,
   HotkeyStatus,
   ImportResult,
@@ -37,6 +41,7 @@ import type {
   Settings,
   Snippet,
   SnippetInput,
+  TagCountDTO,
   TrashQuery,
   UpdateStatus,
   WordCloudData,
@@ -73,6 +78,12 @@ const api = {
     removeMany: (ids: string[]): Promise<number> => ipcRenderer.invoke(CH.items.removeMany, ids),
     pinMany: (ids: string[], pinned: boolean): Promise<void> => ipcRenderer.invoke(CH.items.pinMany, ids, pinned),
     startDrag: (id: string): Promise<void> => { ipcRenderer.send(CH.items.startDrag, id); return Promise.resolve(); },
+    // v1.0.0 ⑥：标签 / 文件夹归类。两个都只回 void —— 列表刷新靠主进程广播的
+    // EV.itemsChanged，界面不需要拿返回值自己改本地状态。
+    setTags: (id: string, tags: string[]): Promise<void> => ipcRenderer.invoke(CH.items.setTags, id, tags),
+    setFolder: (id: string, folderId: string | null): Promise<void> =>
+      ipcRenderer.invoke(CH.items.setFolder, id, folderId),
+    listTags: (): Promise<TagCountDTO[]> => ipcRenderer.invoke(CH.items.listTags),
     // ★ 回收站五方法：与 channels.ts 的五个键一一对应（preload.spec 断言不遗漏）。
     trashList: (q: TrashQuery): Promise<ClipItemDTO[]> => ipcRenderer.invoke(CH.items.trashList, q),
     trashCount: (): Promise<number> => ipcRenderer.invoke(CH.items.trashCount),
@@ -128,6 +139,7 @@ const api = {
     test: (id: string): Promise<{ ok: boolean; error?: AiError; model?: string }> =>
       ipcRenderer.invoke(CH.ai.test, id),
     optimize: (req: OptimizeRequest): Promise<OptimizeResult> => ipcRenderer.invoke(CH.ai.optimize, req),
+    assist: (req: AssistRequest): Promise<AssistResult> => ipcRenderer.invoke(CH.ai.assist, req),
     cancel: (requestId: string): Promise<void> => ipcRenderer.invoke(CH.ai.cancel, requestId),
     scenes: (): Promise<{ id: string; name: string; description: string }[]> => ipcRenderer.invoke(CH.ai.scenes),
     copyAndPaste: (text: string): Promise<PasteResult> => ipcRenderer.invoke(CH.ai.copyAndPaste, text),
@@ -152,12 +164,25 @@ const api = {
     recognize: (id: string): Promise<OcrResult> => ipcRenderer.invoke(CH.ocr.recognize, id),
     onProgress: (cb: (p: OcrProgress) => void): (() => void) => on(EV.ocrProgress, cb),
   },
+  qr: {
+    // ★ 解码器同样只在主进程跑（与 ocr 同理），渲染层只拿到识别出的字符串。
+    recognize: (id: string): Promise<string> => ipcRenderer.invoke(CH.qr.recognize, id),
+  },
   snippets: {
     list: (): Promise<Snippet[]> => ipcRenderer.invoke(CH.snippets.list),
     save: (input: SnippetInput): Promise<Snippet[]> => ipcRenderer.invoke(CH.snippets.save, input),
     remove: (id: string): Promise<Snippet[]> => ipcRenderer.invoke(CH.snippets.remove, id),
     use: (id: string): Promise<Snippet[]> => ipcRenderer.invoke(CH.snippets.use, id),
     onChanged: (cb: () => void): (() => void) => on(EV.snippetsChanged, cb),
+  },
+  // v1.0.0 ⑥ 整理文件夹：五个方法全走 invoke，写操作回变更后的整张平表。
+  folders: {
+    list: (): Promise<FolderDTO[]> => ipcRenderer.invoke(CH.folders.list),
+    create: (input: FolderInput): Promise<FolderDTO[]> => ipcRenderer.invoke(CH.folders.create, input),
+    rename: (id: string, name: string): Promise<FolderDTO[]> => ipcRenderer.invoke(CH.folders.rename, id, name),
+    move: (id: string, parentId: string | null): Promise<FolderDTO[]> =>
+      ipcRenderer.invoke(CH.folders.move, id, parentId),
+    remove: (id: string): Promise<FolderDTO[]> => ipcRenderer.invoke(CH.folders.remove, id),
   },
   capabilities,
 };

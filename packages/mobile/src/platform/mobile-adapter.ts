@@ -52,6 +52,7 @@ import {
   type Settings,
   type Snippet,
   type SnippetInput,
+  type TagCountDTO,
   type TrashQuery,
   type UpdateStatus,
   type WordCloudData,
@@ -440,6 +441,22 @@ export function createMobileAdapter(): PlatformAdapter {
         // 拖出到外部应用是桌面窗口能力（Electron webContents.startDrag），手机端 no-op。
       },
 
+      // ★ v1.0.0 ⑥：标签 / 文件夹是**落库**的整理能力，内存数组里没有这两列。
+      //   如实 reject 而不是静默吞掉：用户点「加入文件夹」后什么都没发生，
+      //   比一句「手机端暂不支持整理」更让人困惑。
+      async setTags(_id: string, _tags: string[]): Promise<void> {
+        throw new Error('手机端暂不支持标签');
+      },
+
+      async setFolder(_id: string, _folderId: string | null): Promise<void> {
+        throw new Error('手机端暂不支持文件夹归类');
+      },
+
+      // 标签只存在 items.tags 里（手机端根本没有这一列），统计不出来就如实抛。
+      async listTags(): Promise<TagCountDTO[]> {
+        throw new Error('手机端暂不支持标签');
+      },
+
       onChanged(cb: () => void): Unsub {
         return subscribe(itemsSubs, cb);
       },
@@ -636,6 +653,30 @@ export function createMobileAdapter(): PlatformAdapter {
       },
     },
 
+    folders: {
+      // ★ 与回收站同理：内存数组里没有 folders 表，五个方法一律如实 reject。
+      //   返回空数组会让界面显示一棵「永远空、建了也不出现」的树，那是假成功。
+      async list(): Promise<never> {
+        throw new Error('手机端暂不支持整理文件夹');
+      },
+
+      async create(): Promise<never> {
+        throw new Error('手机端暂不支持整理文件夹');
+      },
+
+      async rename(): Promise<never> {
+        throw new Error('手机端暂不支持整理文件夹');
+      },
+
+      async move(): Promise<never> {
+        throw new Error('手机端暂不支持整理文件夹');
+      },
+
+      async remove(): Promise<never> {
+        throw new Error('手机端暂不支持整理文件夹');
+      },
+    },
+
     ai: {
       // 手机端不接 AI：七个方法全部如实报不可用，不返回空数组假装成功。
       async listProviders(): Promise<never> {
@@ -655,6 +696,9 @@ export function createMobileAdapter(): PlatformAdapter {
       },
       async optimize(): Promise<never> {
         throw new Error('手机端暂不支持 AI 提示词优化');
+      },
+      async assist(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 助手');
       },
       async cancel(): Promise<never> {
         throw new Error('手机端暂不支持 AI 提示词优化');
@@ -706,6 +750,13 @@ export function createMobileAdapter(): PlatformAdapter {
         throw new Error('手机端暂不支持文字识别');
       },
       onProgress: (): Unsub => () => {},
+    },
+
+    qr: {
+      // ★ 与 ocr 同理：解码器只在桌面主进程里跑，手机端没有这条通道，如实抛错。
+      async recognize(): Promise<never> {
+        throw new Error('手机端暂不支持二维码识别');
+      },
     },
 
     capabilities: { ...CAPABILITIES },

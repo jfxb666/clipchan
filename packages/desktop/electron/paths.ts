@@ -21,6 +21,8 @@ export const IMAGES_DIR_NAME = 'images';
 export const THUMBS_DIR_NAME = 'thumbs';
 /** 日志子目录。★ 放在数据目录里，设置页的「打开数据目录」就能直接找到，不必新增 IPC。 */
 export const LOGS_DIR_NAME = 'logs';
+/** 自动备份子目录。★ 同样放在数据目录里：用户点「打开数据目录」就能看到备份，不必新增 IPC。 */
+export const BACKUPS_DIR_NAME = 'backups';
 
 /**
  * 由「基目录」推出数据目录。
@@ -69,6 +71,11 @@ export function thumbsDir(dataDir: string): string {
 /** 日志目录：<dataDir>/logs */
 export function logsDir(dataDir: string): string {
   return path.join(dataDir, LOGS_DIR_NAME);
+}
+
+/** 备份目录：<dataDir>/backups */
+export function backupsDir(dataDir: string): string {
+  return path.join(dataDir, BACKUPS_DIR_NAME);
 }
 
 /** 数据库文件：<dataDir>/clipchan.db */

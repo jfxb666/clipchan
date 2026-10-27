@@ -163,79 +163,11 @@ function fakeTracker(hwnd: number | null, events: string[] = []): TargetTracker 
       return hwnd;
     },
     lastForeign: () => null,
+    captureTarget: async () => 'captured',
     noteForeground: () => {},
     notePanelShown: async () => {},
   } as unknown as TargetTracker;
 }
-
-// ---------------- TargetTracker ----------------
-
-describe('TargetTracker（一次性消费 / Review Focus 2）', () => {
-  it('consume() 返回一次句柄后再调返回 null（用完即弃）', () => {
-    const t = new TargetTracker();
-    t.noteForeground(0x1001, 0x2002);
-    expect(t.consume()).toBe(0x1001);
-    expect(t.consume()).toBeNull();
-    expect(t.consume()).toBeNull();
-  });
-
-  it('记下的句柄等于自身 hwnd 时视为无目标', () => {
-    const t = new TargetTracker();
-    t.noteForeground(0x2002, 0x2002);
-    expect(t.consume()).toBeNull();
-    expect(t.lastForeign()).toBeNull();
-  });
-
-  it('面板唤起句柄为空时回退到 lastForeign()', async () => {
-    const t = new TargetTracker({ foreground: { foreground: async () => 0x3003 } });
-    t.noteForeground(0, 0x2002); // 唤起那一刻没记到窗口
-    await t.notePanelShown(0x2002); // 面板显示时查到外部前台窗口
-    expect(t.lastForeign()).toBe(0x3003);
-    expect(t.consume()).toBe(0x3003);
-  });
-
-  it('两者都无 → null', () => {
-    const t = new TargetTracker();
-    expect(t.consume()).toBeNull();
-  });
-
-  it('优先用唤起时记下的句柄；消费一次后 lastForeign 也一起清空', async () => {
-    const t = new TargetTracker({ foreground: { foreground: async () => 0x3003 } });
-    await t.notePanelShown(0x2002);
-    t.noteForeground(0x1001, 0x2002);
-    expect(t.consume()).toBe(0x1001);
-    expect(t.consume()).toBeNull(); // 陈旧句柄绝不复用（含回退槽位）
-  });
-
-  it('notePanelShown 查到的是自己 → 不记；查不到 → 不覆盖已有值', async () => {
-    const values = [0x2002, 0, 0x4004];
-    const t = new TargetTracker({ foreground: { foreground: async () => values.shift() ?? 0 } });
-    await t.notePanelShown(0x2002); // 自己
-    expect(t.lastForeign()).toBeNull();
-    await t.notePanelShown(0x2002); // 查不到
-    expect(t.lastForeign()).toBeNull();
-    await t.notePanelShown(0x2002); // 外部窗口
-    expect(t.lastForeign()).toBe(0x4004);
-  });
-
-  it('没有 foreground 来源（助手不可用）时 notePanelShown 是 no-op 且不抛', async () => {
-    const t = new TargetTracker();
-    await expect(t.notePanelShown(0x2002)).resolves.toBeUndefined();
-    expect(t.lastForeign()).toBeNull();
-  });
-
-  it('前台查询抛异常时不抛、不记', async () => {
-    const t = new TargetTracker({
-      foreground: {
-        foreground: async () => {
-          throw new Error('助手没了');
-        },
-      },
-    });
-    await expect(t.notePanelShown(0x2002)).resolves.toBeUndefined();
-    expect(t.lastForeign()).toBeNull();
-  });
-});
 
 // ---------------- PasteService 编排 ----------------
 
@@ -304,8 +236,10 @@ describe('PasteService.pasteItem 编排顺序', () => {
     expect(writer.texts).toEqual(['x']);
   });
 
-  it('helper.available===false → {send-failed} 且**一次都不调** helper.paste', async () => {
-    const helper = fakeHelper({ ok: true }, false);
+  it('helper.available===false 时编排层**不预判**，照样调 paste() 由助手层决定（可自愈）', async () => {
+    // ★ 语义变更：可用性判断已下沉到 HelperClient（它会自己 ensureChild 重启），
+    //   编排层再拦一道会挡住"助手已死但可重启"的自愈路径。
+    const helper = fakeHelper({ ok: false, reason: 'send-failed' }, false);
     const writer = fakeWriter();
     const svc = new PasteService({
       db: fakeDb(textRow('a1', 'x')),
@@ -316,7 +250,7 @@ describe('PasteService.pasteItem 编排顺序', () => {
     });
 
     expect(await svc.pasteItem('a1')).toEqual({ ok: false, reason: 'send-failed' });
-    expect(helper.calls).toEqual([]);
+    expect(helper.calls).toEqual([0x5555]); // 调用发生了，失败由助手层如实上报
     expect(writer.texts).toEqual(['x']); // 复制仍然成功
   });
 
@@ -435,7 +369,7 @@ describe('PasteService.pasteItem 编排顺序', () => {
 
     const noTarget = await mk(fakeHelper({ ok: true }), null).pasteItem('a1');
     const elevated = await mk(fakeHelper(mapHelperCode(6)), 0x5555).pasteItem('a1');
-    const sendFailed = await mk(fakeHelper({ ok: true }, false), 0x5555).pasteItem('a1');
+    const sendFailed = await mk(fakeHelper({ ok: false, reason: 'send-failed' }), 0x5555).pasteItem('a1');
 
     const hints = [pasteHintOf(noTarget), pasteHintOf(elevated), pasteHintOf(sendFailed)];
     expect(new Set(hints).size).toBe(3);
@@ -485,8 +419,9 @@ describe('PasteService 与真 db 的集成（Review Focus 1）', () => {
     try {
       const a = db.insertText('甲', { now: 1000 });
       const b = db.insertText('乙', { now: 2000 });
-      const tracker = new TargetTracker();
-      tracker.noteForeground(0x8888, 0x9999);
+      // 走生产路径：唤起前捕获（captureTarget）写进 pending，再被 consume 取走。
+      const tracker = new TargetTracker({ foreground: { foreground: async () => 0x8888 } });
+      expect(await tracker.captureTarget(0x9999)).toBe('captured');
       const helper = fakeHelper({ ok: true });
       const svc = new PasteService({
         db,
@@ -584,10 +519,10 @@ describe('PasteService.pasteText 编排（与 pasteItem 同构，但不查库、
     expect(helper.calls).toEqual([]);
   });
 
-  it('helper.available===false → {send-failed} 且一次都不调 helper.paste', async () => {
+  it('helper.available===false 时 pasteText 也不预判，直接交给助手层', async () => {
     const events: string[] = [];
     const writer = fakeWriter(events);
-    const helper = fakeHelper({ ok: true }, false);
+    const helper = fakeHelper({ ok: false, reason: 'send-failed' }, false);
     const svc = new PasteService({
       db: fakeDb(null, events),
       helper,
@@ -597,7 +532,7 @@ describe('PasteService.pasteText 编排（与 pasteItem 同构，但不查库、
     });
 
     expect(await svc.pasteText('x')).toEqual({ ok: false, reason: 'send-failed' });
-    expect(helper.calls).toEqual([]);
+    expect(helper.calls).toEqual([0x5555]);
     expect(writer.texts).toEqual(['x']); // 复制仍然成功
     expect(events).not.toContain('touch');
   });

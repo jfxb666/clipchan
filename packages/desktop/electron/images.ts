@@ -6,9 +6,11 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { dhash, rgbaToGray } from '@clipchan/core';
 import { hashBuffer, type Db } from './db';
 import { planBudgetEviction, type ImagePathRow } from './images-policy';
 import { IMAGES_DIR_NAME, THUMBS_DIR_NAME, toRelativePath } from './paths';
+import { bgraToRgba } from './qrcode';
 
 /** 原图长边上限：超过先等比缩放（spec §7.3）。 */
 export const MAX_IMAGE_EDGE = 2560;
@@ -153,6 +155,49 @@ export function saveImage(dir: string, id: string, img: NativeImageLike): SavedI
 /** 图片字节的哈希（去重键）。 */
 export function hashImageBuffer(buf: Buffer | Uint8Array): string {
   return hashBuffer(buf);
+}
+
+/**
+ * v1.1.0：从 NativeImage 算 64 位 dHash；拿不到位图或算不出来返回 undefined（绝不影响入库）。
+ *
+ * ★ 为什么和 hashImageBuffer 并存：sha256 判的是"字节完全相同"，缩放/重新压缩后的同一张图
+ *   会被判成两张；dHash 判的是"视觉结构相近"，这正是"库里已有一张很相似的"要的语义。
+ *   两者用途不同，缺一不可。
+ * ★ 为什么复用 qrcode.ts 的 bgraToRgba：Electron 的 toBitmap() 给的是 **BGRA**，而
+ *   rgbaToGray 要 RGBA。不换序时 R/B 互换，亮度（0.299R + 0.587G + 0.114B）会整体偏移，
+ *   同一张图从剪贴板进来和从截图进来算出的哈希就对不上。换序逻辑已经有一份，
+ *   再抄第三份只会让"哪份是对的"变成猜谜。
+ * ★ 为什么返回 undefined 而不是空串：ImageMeta.phash 是可选的，不传就等于"这张图没有
+ *   感知哈希"，db 层会整段跳过相似判定；传空串反而要多跑一次查询再判空。
+ */
+export function imagePhash(img: NativeImageLike): string | undefined {
+  try {
+    if (!img || typeof img.getSize !== 'function') return undefined;
+    // ★ 没有 toBitmap 就拿不到像素（只有 PNG/JPEG 字节，重新解码不值得）：
+    //   算不出哈希不该让这张图入不了库，安静返回 undefined 即可。
+    if (typeof img.toBitmap !== 'function') return undefined;
+
+    const size = img.getSize();
+    const width = Math.floor(size.width);
+    const height = Math.floor(size.height);
+    if (!(width > 0) || !(height > 0)) return undefined;
+
+    const bmp = img.toBitmap();
+    const span = width * height * 4;
+    // ★ 长度不够就不算：拿半张图算出的哈希是错的，而"错的相似判定"比"没有相似判定"更糟。
+    if (bmp === undefined || bmp.length < span) return undefined;
+
+    // ★ bgraToRgba 回的是 Uint8ClampedArray，而 rgbaToGray 收 Uint8Array —— 两者在 TS 里
+    //   是不同的类型（不是子类型关系），所以这里 Uint8Array.from 拷一份。
+    //   代价是 width*height 字节的一次性拷贝，相对解码位图本身可以忽略。
+    const rgba = Uint8Array.from(bgraToRgba(bmp.subarray(0, span)));
+    const hash = dhash(rgbaToGray(rgba, width, height));
+    return hash.length > 0 ? hash : undefined;
+  } catch {
+    // ★ 静默吞掉：这是入库前的**附属**计算，位图接口在异常图片上抛错是正常的，
+    //   为此丢掉用户刚复制的图片才是真的错。
+    return undefined;
+  }
 }
 
 /**

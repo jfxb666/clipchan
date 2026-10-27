@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  AiProvider,
   AppToast,
+  AssistRequest,
   BurstHint,
   ClipItemDTO,
   ClipchanApi,
+  FolderDTO,
   GhostState,
   ListQuery,
   NavigateTarget,
@@ -85,6 +88,25 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
   let navigated: ((target: NavigateTarget) => void) | null = null;
   /** 主进程推 toast 的回调（app:toast）。 */
   let toastPushed: ((t: AppToast) => void) | null = null;
+  /** v1.0.0 ⑥/⑧：文件夹与条目标签/文件夹写入的调用记录。 */
+  const folderCalls: { op: string; args: unknown[] }[] = [];
+  const setTagsCalls: { id: string; tags: string[] }[] = [];
+  const setFolderCalls: { id: string; folderId: string | null }[] = [];
+  /** 文件夹写操作返回的整表；由用例替换。 */
+  let folderTable: FolderDTO[] = [];
+  /** 让文件夹写操作抛错，验证「失败时状态不变 + toast」。 */
+  let folderThrows = false;
+  /** 让条目的 setTags / setFolder 抛错，验证乐观更新的回滚。 */
+  let itemWriteThrows = false;
+  /** v1.0.0 ⑥：getText 的返回值与「让它抛错」的开关（AI 起标签要读全文）。 */
+  let itemText = '';
+  let getTextThrows = false;
+  /** v1.0.0 ⑥：AI 起标签用——模型列表种子、assist 的调用记录与抛错开关。 */
+  let aiProviderSeed: AiProvider[] = [];
+  let aiAssistReply = '';
+  let aiAssistThrows = false;
+  const aiListProvidersCalls: number[] = [];
+  const aiAssistCalls: AssistRequest[] = [];
 
   const adapter: ClipchanApi = {
     items: {
@@ -122,13 +144,27 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
         importCalls.push(1);
         return importResult;
       },
-      getText: async () => '',
+      getText: async () => {
+        if (getTextThrows) throw new Error('读原文失败');
+        return itemText;
+      },
       saveText: async () => ({ ok: true, id: 'saved-1' }),
       pastePlain: async () => ({ ok: true }),
       pasteMany: async () => ({ ok: true }),
       removeMany: async () => 0,
       pinMany: async () => {},
       startDrag: async () => {},
+      // v1.0.0 ⑥：标签 / 文件夹归类只补形状，本文件不测这两条（它们属于 organize 的用例）。
+      setTags: async (id: string, tags: string[]) => {
+        setTagsCalls.push({ id, tags });
+        if (itemWriteThrows) throw new Error('写标签失败');
+      },
+      setFolder: async (id: string, folderId: string | null) => {
+        setFolderCalls.push({ id, folderId });
+        if (itemWriteThrows) throw new Error('写文件夹失败');
+      },
+      // 标签统计只补形状：本文件不测它（属于 db.spec 的用例）。
+      listTags: async () => [],
       trashList: async (q: { limit?: number; offset?: number }) => {
         trashListCalls.push(q);
         const offset = q.offset ?? 0;
@@ -240,13 +276,44 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       use: async () => [],
       onChanged: () => () => {},
     },
+    folders: {
+      list: async () => folderTable,
+      create: async (input) => {
+        folderCalls.push({ op: 'create', args: [input] });
+        if (folderThrows) throw new Error('文件夹写失败');
+        return folderTable;
+      },
+      rename: async (id: string, name: string) => {
+        folderCalls.push({ op: 'rename', args: [id, name] });
+        if (folderThrows) throw new Error('文件夹写失败');
+        return folderTable;
+      },
+      move: async (id: string, parentId: string | null) => {
+        folderCalls.push({ op: 'move', args: [id, parentId] });
+        if (folderThrows) throw new Error('文件夹写失败');
+        return folderTable;
+      },
+      remove: async (id: string) => {
+        folderCalls.push({ op: 'remove', args: [id] });
+        if (folderThrows) throw new Error('文件夹写失败');
+        return folderTable;
+      },
+    },
     ai: {
-      listProviders: async () => [],
+      listProviders: async () => {
+        aiListProvidersCalls.push(1);
+        return aiProviderSeed;
+      },
       saveProvider: async () => [],
       removeProvider: async () => [],
       listModels: async () => [],
       test: async () => ({ ok: false }),
       optimize: async () => ({ optimized: '', notes: [], degraded: false }),
+      assist: async (req: AssistRequest) => {
+        aiAssistCalls.push(req);
+        if (aiAssistThrows) throw new Error('模型超时');
+        return { text: aiAssistReply, degraded: false };
+      },
       cancel: async () => {},
       scenes: async () => [],
       copyAndPaste: async () => ({ ok: false, reason: 'send-failed' }),
@@ -267,6 +334,9 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       download: async () => ({ ready: false, languages: [], missing: [] }),
       recognize: async () => ({ text: '', confidence: 0, ms: 0 }),
       onProgress: () => () => {},
+    },
+    qr: {
+      recognize: async () => '',
     },
     capabilities: {
       autoPaste: true,
@@ -317,6 +387,35 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       reason?: string;
     }) => {
       importResult = v;
+    },
+    folderCalls,
+    setTagsCalls,
+    setFolderCalls,
+    setFolderTable: (t: FolderDTO[]) => {
+      folderTable = t;
+    },
+    setFolderThrows: (v: boolean) => {
+      folderThrows = v;
+    },
+    setItemWriteThrows: (v: boolean) => {
+      itemWriteThrows = v;
+    },
+    aiListProvidersCalls,
+    aiAssistCalls,
+    setItemText: (text: string) => {
+      itemText = text;
+    },
+    setGetTextThrows: (v: boolean) => {
+      getTextThrows = v;
+    },
+    setAiProviders: (list: AiProvider[]) => {
+      aiProviderSeed = list;
+    },
+    setAiAssistReply: (reply: string) => {
+      aiAssistReply = reply;
+    },
+    setAiAssistThrows: (v: boolean) => {
+      aiAssistThrows = v;
     },
     fireItemChanged: () => itemChanged?.(),
     fireSettingsChanged: (s: Settings) => settingsChanged?.(s),
@@ -1062,5 +1161,578 @@ describe('回收站', () => {
     resetClipStore();
 
     expect(useClipStore.getState().view).toBe('list');
+  });
+});
+
+describe('搜索升级：q 解析成结构化查询（v1.0.0 ⑧）', () => {
+  it('★ 纯文本只传 q，不传 expr —— 老的三路 LIKE 快路径一字未变', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('hello');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    const call = fake.listCalls[0]!;
+    expect(call.q).toBe('hello');
+    expect(call.expr).toBeUndefined();
+    expect(call.time).toBeUndefined();
+  });
+
+  it('多个自由词（隐式 AND）仍然折回 q，不退化成表达式求值', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('foo bar');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    const call = fake.listCalls[0]!;
+    // 两个词是 and 节点 → 不是单个 text 叶子 → 走 expr
+    expect(call.expr).toBeDefined();
+    expect(call.q).toBeUndefined();
+  });
+
+  it('正则 /^ab/ 传 expr，不传 q', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('/^ab/');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    const call = fake.listCalls[0]!;
+    expect(call.q).toBeUndefined();
+    expect(call.expr).toEqual({ op: 'leaf', kind: 'regex', value: '^ab', flags: '' });
+  });
+
+  it('foo AND bar 传 expr，不传 q', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('foo AND bar');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    const call = fake.listCalls[0]!;
+    expect(call.q).toBeUndefined();
+    expect(call.expr).toEqual({
+      op: 'and',
+      children: [
+        { op: 'leaf', kind: 'text', value: 'foo' },
+        { op: 'leaf', kind: 'text', value: 'bar' },
+      ],
+    });
+  });
+
+  it('after:2024-01-01 传 time.from（本地时间当天 00:00），不传 q', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('after:2024-01-01');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    const call = fake.listCalls[0]!;
+    expect(call.q).toBeUndefined();
+    expect(call.time).toEqual({ from: new Date(2024, 0, 1, 0, 0, 0, 0).getTime() });
+  });
+
+  it('★ 非法日期 after:2024-13-01 → searchErrors 非空，且查询照常发出去不崩', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('after:2024-13-01');
+    expect(useClipStore.getState().searchErrors.length).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    // 非法那一段被丢掉 → 没有任何条件，退回无关键词的普通列表
+    expect(fake.listCalls[0]!.q).toBeUndefined();
+    expect(fake.listCalls[0]!.time).toBeUndefined();
+    expect(useClipStore.getState().loading).toBe(false);
+  });
+
+  it('searchErrors 立刻写入（不等防抖），请求仍然 300ms 后才发', async () => {
+    vi.useFakeTimers();
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('after:2024-13-01');
+
+    expect(useClipStore.getState().q).toBe('after:2024-13-01');
+    expect(useClipStore.getState().searchErrors.length).toBeGreaterThan(0);
+    expect(fake.listCalls).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(QUERY_DEBOUNCE_MS);
+    expect(fake.listCalls).toHaveLength(1);
+  });
+
+  it('正常输入会把上一次的 searchErrors 清空', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('after:2024-13-01');
+    expect(useClipStore.getState().searchErrors.length).toBeGreaterThan(0);
+
+    useClipStore.getState().setQuery('hello');
+    expect(useClipStore.getState().searchErrors).toEqual([]);
+  });
+});
+
+describe('标签 / 文件夹筛选（v1.0.0 ⑥）', () => {
+  it('tagFilter 非空时带 tags，且 count 用同一套条件', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setTagFilter(['工作', '紧急']);
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    expect(fake.listCalls[0]!.tags).toEqual(['工作', '紧急']);
+    expect(fake.countCalls.at(-1)!.tags).toEqual(['工作', '紧急']);
+  });
+
+  it('tagFilter 为空数组时不带 tags 键（等同不限）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().load();
+
+    expect('tags' in fake.listCalls[0]!).toBe(false);
+  });
+
+  it('★ folderFilter === null 时 query 里存在 folderId 键且值为 null（不是省略）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setFolderFilter(null);
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    const call = fake.listCalls[0]!;
+    expect(Object.prototype.hasOwnProperty.call(call, 'folderId')).toBe(true);
+    expect(call.folderId).toBeNull();
+  });
+
+  it('★ folderFilter === undefined 时 query 里不存在 folderId 键', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setFolderFilter(undefined);
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    expect('folderId' in fake.listCalls[0]!).toBe(false);
+  });
+
+  it('folderFilter 是字符串时原样带出去', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setFolderFilter('f1');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    expect(fake.listCalls[0]!.folderId).toBe('f1');
+  });
+
+  it('★ setFolderFilter(null) 与 setTagFilter 互不覆盖', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setFolderFilter(null);
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+    useClipStore.getState().setTagFilter(['工作']);
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(2));
+
+    const call = fake.listCalls.at(-1)!;
+    expect(call.folderId).toBeNull();
+    expect(call.tags).toEqual(['工作']);
+    expect(useClipStore.getState().folderFilter).toBeNull();
+    expect(useClipStore.getState().tagFilter).toEqual(['工作']);
+  });
+
+  it('筛选变化会清掉选中（旧选中行可能已不在列表里）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    useClipStore.getState().select('a');
+    expect(useClipStore.getState().selectedIds).toEqual(['a']);
+
+    useClipStore.getState().setTagFilter(['工作']);
+
+    expect(useClipStore.getState().selectedIds).toEqual([]);
+    // selectedId 由重载后的结果收敛（旧选中行已不在列表里 → 变成 null）
+    await vi.waitFor(() => expect(useClipStore.getState().selectedId).toBeNull());
+  });
+
+  it('★ loadMore 用与 load 完全相同的条件（kind/q/tags/folderId/expr/time）', async () => {
+    const seed = Array.from({ length: PAGE_SIZE + 3 }, (_, i) => item('i' + i, { createdAt: 10000 - i }));
+    const fake = makeFakeAdapter(seed);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setTagFilter(['工作']);
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+    useClipStore.getState().setFolderFilter('f1');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(2));
+    useClipStore.getState().setQuery('/^ab/');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(3));
+
+    expect(useClipStore.getState().hasMore).toBe(true);
+    await useClipStore.getState().loadMore();
+
+    const first = fake.listCalls.at(-2)!;
+    const second = fake.listCalls.at(-1)!;
+    expect(second.offset).toBe(PAGE_SIZE);
+    expect(second.kind).toBe(first.kind);
+    expect(second.q).toBe(first.q);
+    expect(second.tags).toEqual(first.tags);
+    expect(second.folderId).toBe(first.folderId);
+    expect(second.expr).toEqual(first.expr);
+    expect(second.time).toEqual(first.time);
+  });
+});
+
+describe('文件夹写操作（v1.0.0 ⑥）', () => {
+  const f1: FolderDTO = { id: 'f1', name: '工作', parentId: null, itemCount: 2 };
+  const f2: FolderDTO = { id: 'f2', name: '私人', parentId: null, itemCount: 0 };
+
+  it('loadFolders 拉到平表写进 state', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setFolderTable([f1, f2]);
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().loadFolders();
+
+    expect(useClipStore.getState().folders.map((f) => f.id)).toEqual(['f1', 'f2']);
+  });
+
+  it('loadFolders 失败时静默（文件夹是可选能力，不打扰首屏）', async () => {
+    const fake = makeFakeAdapter([]);
+    setPlatform(fake.adapter);
+    fake.adapter.folders.list = async () => {
+      throw new Error('老版本主进程没有这个能力');
+    };
+
+    await useClipStore.getState().loadFolders();
+
+    expect(useClipStore.getState().folders).toEqual([]);
+    expect(useClipStore.getState().toasts).toHaveLength(0);
+  });
+
+  it('createFolder 用返回的整表替换 folders', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setFolderTable([f1]);
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().createFolder({ name: '工作' });
+
+    expect(fake.folderCalls[0]).toEqual({ op: 'create', args: [{ name: '工作' }] });
+    expect(useClipStore.getState().folders).toEqual([f1]);
+  });
+
+  it('renameFolder 用返回的整表替换 folders', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setFolderTable([{ ...f1, name: '工作（改）' }]);
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().renameFolder('f1', '工作（改）');
+
+    expect(fake.folderCalls[0]).toEqual({ op: 'rename', args: ['f1', '工作（改）'] });
+    expect(useClipStore.getState().folders[0]!.name).toBe('工作（改）');
+  });
+
+  it('moveFolder 用返回的整表替换 folders', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setFolderTable([{ ...f2, parentId: 'f1' }]);
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().moveFolder('f2', 'f1');
+
+    expect(fake.folderCalls[0]).toEqual({ op: 'move', args: ['f2', 'f1'] });
+    expect(useClipStore.getState().folders[0]!.parentId).toBe('f1');
+  });
+
+  it('★ 写操作失败时 toast 且 folders 状态不变', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setFolderTable([f1]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().loadFolders();
+    expect(useClipStore.getState().folders).toEqual([f1]);
+
+    fake.setFolderThrows(true);
+    await useClipStore.getState().createFolder({ name: '工作2' });
+
+    expect(useClipStore.getState().folders).toEqual([f1]);
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('文件夹写失败');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('error');
+  });
+
+  it('★ removeFolder 成功后额外重载列表（里面的记录回未归类）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    fake.setFolderTable([]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    const before = fake.listCalls.length;
+
+    await useClipStore.getState().removeFolder('f1');
+    await vi.waitFor(() => expect(fake.listCalls.length).toBe(before + 1));
+
+    expect(fake.folderCalls[0]).toEqual({ op: 'remove', args: ['f1'] });
+    expect(useClipStore.getState().folders).toEqual([]);
+  });
+
+  it('★ 删掉的正是当前筛选的文件夹时，folderFilter 重置为 undefined（不停在空列表上）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    fake.setFolderTable([]);
+    setPlatform(fake.adapter);
+    useClipStore.getState().setFolderFilter('f1');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    await useClipStore.getState().removeFolder('f1');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(2));
+
+    expect(useClipStore.getState().folderFilter).toBeUndefined();
+    expect('folderId' in fake.listCalls.at(-1)!).toBe(false);
+  });
+
+  it('删的是别的文件夹时不动当前筛选', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    fake.setFolderTable([]);
+    setPlatform(fake.adapter);
+    useClipStore.getState().setFolderFilter('f1');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    await useClipStore.getState().removeFolder('f2');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(2));
+
+    expect(useClipStore.getState().folderFilter).toBe('f1');
+  });
+
+  it('removeFolder 失败时不重载列表，只 toast', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+    const before = fake.listCalls.length;
+
+    fake.setFolderThrows(true);
+    await useClipStore.getState().removeFolder('f1');
+
+    expect(fake.listCalls.length).toBe(before);
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('文件夹写失败');
+  });
+});
+
+describe('条目的标签 / 文件夹（乐观更新）', () => {
+  it('setItemTags 乐观更新本地那一条的 tags', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+
+    await useClipStore.getState().setItemTags('a', ['工作', '紧急']);
+
+    expect(fake.setTagsCalls).toEqual([{ id: 'a', tags: ['工作', '紧急'] }]);
+    expect(useClipStore.getState().items.find((it) => it.id === 'a')?.tags).toEqual(['工作', '紧急']);
+    expect(useClipStore.getState().items.find((it) => it.id === 'b')?.tags).toBeUndefined();
+  });
+
+  it('★ setItemTags 失败时回滚 + toast', async () => {
+    const fake = makeFakeAdapter([item('a', { tags: ['旧'] })]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+
+    fake.setItemWriteThrows(true);
+    await useClipStore.getState().setItemTags('a', ['新']);
+
+    expect(useClipStore.getState().items.find((it) => it.id === 'a')?.tags).toEqual(['旧']);
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('写标签失败');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('error');
+  });
+
+  it('setItemFolder 乐观更新 folderId；null 表示移出到未归类', async () => {
+    const fake = makeFakeAdapter([item('a', { folderId: 'f1' })]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+
+    await useClipStore.getState().setItemFolder('a', null);
+
+    expect(fake.setFolderCalls).toEqual([{ id: 'a', folderId: null }]);
+    // DTO 用 undefined 表示未归类（见 ClipItemDTO.folderId 注释）
+    expect(useClipStore.getState().items.find((it) => it.id === 'a')?.folderId).toBeUndefined();
+  });
+
+  it('setItemFolder 失败时回滚 + toast', async () => {
+    const fake = makeFakeAdapter([item('a', { folderId: 'f1' })]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+
+    fake.setItemWriteThrows(true);
+    await useClipStore.getState().setItemFolder('a', 'f2');
+
+    expect(useClipStore.getState().items.find((it) => it.id === 'a')?.folderId).toBe('f1');
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('写文件夹失败');
+  });
+
+  it('★ 正按文件夹筛选时改完不乐观摘行（交给 itemsChanged 重载收敛）', async () => {
+    const fake = makeFakeAdapter([item('a', { folderId: 'f1' }), item('b', { folderId: 'f1' })]);
+    setPlatform(fake.adapter);
+    useClipStore.getState().setFolderFilter('f1');
+    // 等这一轮重载真的落地（list 被调用 ≠ 列表已写进 state），否则它会把乐观更新盖掉
+    await vi.waitFor(() => expect(useClipStore.getState().items).toHaveLength(2));
+
+    await useClipStore.getState().setItemFolder('a', 'f2');
+
+    // 行还在（本地不摘），只是 folderId 变了
+    expect(useClipStore.getState().items.map((it) => it.id)).toContain('a');
+    expect(useClipStore.getState().items.find((it) => it.id === 'a')?.folderId).toBe('f2');
+  });
+});
+
+describe('AI 助手面板的开关（v1.0.0 ⑤）', () => {
+  it('openAssist 切到 assist 视图并带出原文', () => {
+    useClipStore.getState().openAssist('原文');
+
+    expect(useClipStore.getState().view).toBe('assist');
+    expect(useClipStore.getState().assistSource).toBe('原文');
+  });
+
+  it('closeAssist 回到列表并清空原文', () => {
+    useClipStore.getState().openAssist('原文');
+
+    useClipStore.getState().closeAssist();
+
+    expect(useClipStore.getState().view).toBe('list');
+    expect(useClipStore.getState().assistSource).toBe('');
+  });
+
+  it('初始状态下 assistSource 是空串（没开过面板就不该带着上次的原文）', () => {
+    expect(useClipStore.getState().assistSource).toBe('');
+  });
+
+  it('★ 关闭后再打开换新文本：面板不会残留上一条记录的全文', () => {
+    useClipStore.getState().openAssist('第一条');
+    useClipStore.getState().closeAssist();
+    useClipStore.getState().openAssist('第二条');
+
+    expect(useClipStore.getState().view).toBe('assist');
+    expect(useClipStore.getState().assistSource).toBe('第二条');
+  });
+});
+
+describe('bindClipStore 顺带拉文件夹（失败静默）', () => {
+  it('绑定时调 folders.list 并写入 folders', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setFolderTable([{ id: 'f1', name: '工作', parentId: null, itemCount: 0 }]);
+    setPlatform(fake.adapter);
+
+    const unbind = bindClipStore();
+    await vi.waitFor(() => expect(useClipStore.getState().folders).toHaveLength(1));
+
+    expect(useClipStore.getState().folders[0]!.id).toBe('f1');
+    unbind();
+  });
+
+  it('folders.list 抛错时绑定照常完成，不弹 toast', async () => {
+    const fake = makeFakeAdapter([]);
+    setPlatform(fake.adapter);
+    fake.adapter.folders.list = async () => {
+      throw new Error('没有这个能力');
+    };
+
+    const unbind = bindClipStore();
+    await vi.waitFor(() => expect(fake.listCalls.length + 1).toBeGreaterThan(0));
+    await Promise.resolve();
+
+    expect(useClipStore.getState().toasts).toHaveLength(0);
+    unbind();
+  });
+});
+
+describe('suggestTagsByAi（v1.0.0 ⑥ 可选项）', () => {
+  const PROVIDER: AiProvider = {
+    id: 'p1',
+    name: '本地中转',
+    protocol: 'openai-compat',
+    baseUrl: 'https://example.com/v1',
+    model: 'gpt-4o-mini',
+    hasKey: true,
+    keyMask: 'sk-***1',
+  };
+
+  it('有可用 provider 时把全文发给 ai.assist 并返回解析后的标签', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setAiProviders([PROVIDER]);
+    fake.setItemText('甲方应于 3 月 1 日前交付验收报告');
+    fake.setAiAssistReply('<result>合同、交付验收</result>');
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().loadAiProviders();
+    await expect(useClipStore.getState().suggestTagsByAi('i1')).resolves.toEqual([
+      '合同',
+      '交付验收',
+    ]);
+
+    expect(fake.aiAssistCalls).toHaveLength(1);
+    expect(fake.aiAssistCalls[0]).toEqual({
+      providerId: 'p1',
+      action: 'tags',
+      text: '甲方应于 3 月 1 日前交付验收报告',
+    });
+  });
+
+  it('没有可用 provider 时返回 [] 且不调 ai.assist', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setAiProviders([{ ...PROVIDER, id: 'p0', hasKey: false }]);
+    fake.setItemText('随便一段文字');
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().loadAiProviders();
+    await expect(useClipStore.getState().suggestTagsByAi('i1')).resolves.toEqual([]);
+    expect(fake.aiAssistCalls).toHaveLength(0);
+  });
+
+  it('items.getText 抛异常时返回 []，不弹 toast', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setAiProviders([PROVIDER]);
+    fake.setGetTextThrows(true);
+    setPlatform(fake.adapter);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await useClipStore.getState().loadAiProviders();
+    await expect(useClipStore.getState().suggestTagsByAi('i1')).resolves.toEqual([]);
+    expect(fake.aiAssistCalls).toHaveLength(0);
+    expect(useClipStore.getState().toasts).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith('[ai] 标签建议失败：读原文失败');
+    warn.mockRestore();
+  });
+
+  it('ai.assist 抛异常时返回 []，不弹 toast，只留一行 console.warn', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setAiProviders([PROVIDER]);
+    fake.setItemText('随便一段文字');
+    fake.setAiAssistThrows(true);
+    setPlatform(fake.adapter);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await useClipStore.getState().loadAiProviders();
+    await expect(useClipStore.getState().suggestTagsByAi('i1')).resolves.toEqual([]);
+    expect(useClipStore.getState().toasts).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith('[ai] 标签建议失败：模型超时');
+    warn.mockRestore();
+  });
+
+  it('本地还没有 provider 时现场补拉一次再挑', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setAiProviders([PROVIDER]);
+    fake.setItemText('合同条款');
+    fake.setAiAssistReply('合同');
+    setPlatform(fake.adapter);
+
+    // 故意不调 loadAiProviders：模拟「刚配好 Key 就回到弹窗」。
+    await expect(useClipStore.getState().suggestTagsByAi('i1')).resolves.toEqual(['合同']);
+    expect(fake.aiListProvidersCalls.length).toBeGreaterThan(0);
+    expect(fake.aiAssistCalls[0]?.providerId).toBe('p1');
+  });
+
+  it('原文是空白时返回 [] 且不调 ai.assist', async () => {
+    const fake = makeFakeAdapter([]);
+    fake.setAiProviders([PROVIDER]);
+    fake.setItemText('   \n  ');
+    setPlatform(fake.adapter);
+
+    await useClipStore.getState().loadAiProviders();
+    await expect(useClipStore.getState().suggestTagsByAi('i1')).resolves.toEqual([]);
+    expect(fake.aiAssistCalls).toHaveLength(0);
   });
 });

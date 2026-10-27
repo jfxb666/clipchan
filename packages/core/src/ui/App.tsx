@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppWindow, CalendarClock, Columns2, LayoutGrid, List, Settings2, Sparkles } from 'lucide-react';
+import {
+  AppWindow,
+  CalendarClock,
+  Columns2,
+  FolderTree,
+  LayoutGrid,
+  List,
+  Settings2,
+  Sparkles,
+  Tags,
+  X,
+} from 'lucide-react';
 import type {
   AiError,
   AiProvider,
   AiProviderInput,
+  AssistRequest,
   OcrProgress,
   OcrResult,
   OcrStatus,
@@ -24,20 +36,26 @@ import { Sidebar } from './Sidebar';
 import { TitleBar } from './TitleBar';
 import { ToastStack } from './Toast';
 import { TrashView } from './TrashView';
-import { copyToast, pasteToast, type ToastTone } from './toastText';
+import { appToastTone, copyToast, pasteToast, type ToastTone } from './toastText';
 import { ContextMenu } from './ContextMenuView';
 import { menuItemsFor, type MenuAction } from './contextMenu';
 import { TextViewer } from './TextViewer';
 import { OcrResultView } from './OcrResultView';
+import { QrResultView } from './QrResultView';
+import { qrStatusOf } from './qrView';
 import { viewerKindOf, viewerTitleOf } from './viewer';
 import { WidgetView, WIDGET_PREVIEW_COUNT } from './WidgetView';
 import { widgetWindowHeight } from './widgetFit';
 import { OptimizeView } from './OptimizeViewCard';
+import { AssistView } from './AssistViewCard';
 import { ocrErrorText, ocrSavedToast } from './ocrView';
 import { WordCloudView } from './WordCloudView';
 import { resolveKey, shouldPreventDefault } from './keymap';
 import { useAutoStart, useHotkeyStatus } from './usePlatformValue';
 import { SnippetView } from './SnippetViewCard';
+import { OrganizeView } from './OrganizeViewCard';
+import { OrganizeItemDialog } from './OrganizeItemDialog';
+import { filterChips } from './organizeView';
 import { batchActions, batchBarText, canBatchRemove } from './batchBar';
 import { cn } from './util';
 
@@ -95,6 +113,11 @@ export function App() {
   const trashLoading = useClipStore((s) => s.trashLoading);
   /** 优化面板的原文初值：由卡片「优化」按钮写进来。 */
   const optimizeSource = useClipStore((s) => s.optimizeSource);
+  /** AI 助手面板的原文初值：由右键菜单「AI 助手…」写进来。 */
+  const assistSource = useClipStore((s) => s.assistSource);
+  const tagFilter = useClipStore((s) => s.tagFilter);
+  const folderFilter = useClipStore((s) => s.folderFilter);
+  const folders = useClipStore((s) => s.folders);
 
   /**
    * 片段库全表。
@@ -123,6 +146,12 @@ export function App() {
 
   /** 右键菜单落点；null = 不显示。 */
   const [menu, setMenu] = useState<MenuAnchor | null>(null);
+  /**
+   * 整理弹窗（右键「标签…」/「移动到文件夹…」）针对的记录 id；null = 关闭。
+   * ★ 两个菜单项共用同一个弹窗：它们改的都是同一条记录的分类属性，
+   *   分成两个弹窗只会让用户在两个几乎一样的界面之间来回跳。
+   */
+  const [organizeItemId, setOrganizeItemId] = useState<string | null>(null);
   /** 全文 / 大图浮层；null = 关闭。 */
   const [viewer, setViewer] = useState<ViewerState | null>(null);
 
@@ -137,6 +166,16 @@ export function App() {
   const [ocrResult, setOcrResult] = useState<OcrResult | null>(null);
   const [ocrError, setOcrError] = useState<string | null>(null);
   const [ocrLoading, setOcrLoading] = useState(false);
+
+  /**
+   * 二维码结果浮层：与 OCR 分开存。
+   * ★ 不并进上面那几个 state：两者的生命周期完全独立（OCR 面板可能开着去下载语言包，
+   *   用户顺手又对另一张图点了「识别二维码」），共用一套状态会互相清掉对方的结果。
+   */
+  const [qr, setQr] = useState<{ itemId: string } | null>(null);
+  const [qrResult, setQrResult] = useState<string | null>(null);
+  const [qrError, setQrError] = useState<string | null>(null);
+  const [qrLoading, setQrLoading] = useState(false);
 
   /** 小组件形态下收起侧栏，把宽度让给内容（spec §6.6 切形态改布局）。 */
   const widgetCompact = mode === 'widget';
@@ -315,6 +354,9 @@ export function App() {
           if (action.fromSearch) searchRef.current?.blur();
           store.moveSelection(action.delta);
           return;
+        case 'copy':
+          void copySelected();
+          return;
         case 'paste':
           void store.pasteSelected();
           return;
@@ -376,6 +418,20 @@ export function App() {
         return;
       }
       useClipStore.getState().openOptimize(text);
+    } catch {
+      useClipStore.getState().toast('读取全文失败，请重试', 'warn');
+    }
+  }, []);
+
+  /** 右键「AI 助手…」：同样先取全文，取不到就不开空面板。 */
+  const openAssist = useCallback(async (id: string) => {
+    try {
+      const text = await getPlatform().items.getText(id);
+      if (text === '') {
+        useClipStore.getState().toast('这条记录没有可处理的文本', 'warn');
+        return;
+      }
+      useClipStore.getState().openAssist(text);
     } catch {
       useClipStore.getState().toast('读取全文失败，请重试', 'warn');
     }
@@ -498,6 +554,29 @@ export function App() {
     [],
   );
 
+  /**
+   * 右键「识别二维码」：开面板即识别，没有语言包那套前置流程。
+   * ★ 先把三个状态清空再调主进程：上一张图的结果若不清，识别期间会短暂显示
+   *   "上一张的二维码"，用户很容易复制错。
+   * ★ 主进程约定未识别到返回空串、永不抛；这里的 catch 只兜真正的异常
+   *   （例如记录已被删除）。空串由 qrStatusOf 判成 empty。
+   */
+  const openQr = useCallback(async (id: string) => {
+    setQr({ itemId: id });
+    setQrLoading(true);
+    setQrError(null);
+    setQrResult(null);
+    try {
+      setQrResult(await getPlatform().qr.recognize(id));
+    } catch (err) {
+      // 不用 ocrErrorText：它的兜底文案是「文字识别失败」，放在二维码面板上是错的。
+      const message = err instanceof Error ? err.message.trim() : String(err).trim();
+      setQrError(message === '' ? '识别二维码失败，请重试' : message);
+    } finally {
+      setQrLoading(false);
+    }
+  }, []);
+
   const menuItems = useCallback((id: string) => {
     const item = useClipStore.getState().items.find((it) => it.id === id);
     if (!item) return [];
@@ -529,8 +608,19 @@ export function App() {
         case 'ocr':
           void openOcr(id);
           return;
+        case 'qr':
+          void openQr(id);
+          return;
         case 'optimize':
           void openOptimize(id);
+          return;
+        case 'assist':
+          void openAssist(id);
+          return;
+        case 'tags':
+        case 'folder':
+          // 两个入口都落到同一个整理弹窗：弹窗里既能改标签也能改文件夹。
+          setOrganizeItemId(id);
           return;
         case 'pin':
           void useClipStore.getState().togglePin(id);
@@ -540,15 +630,54 @@ export function App() {
           return;
       }
     },
-    [copyItem, openOcr, openOptimize, openViewer, paste, pastePlain],
+    [copyItem, openAssist, openOcr, openOptimize, openQr, openViewer, paste, pastePlain],
   );
 
   // 优化面板的平台动作：组件不碰 getPlatform，一律由 App 注入（与设置页一致）。
   const loadScenes = useCallback(() => getPlatform().ai.scenes(), []);
   const runOptimize = useCallback((req: OptimizeRequest) => getPlatform().ai.optimize(req), []);
+  // AI 助手的执行入口：与 runOptimize 同一范式，组件不碰 getPlatform。
+  const runAssist = useCallback((req: AssistRequest) => getPlatform().ai.assist(req), []);
   const copyAndPaste = useCallback((text: string) => getPlatform().ai.copyAndPaste(text), []);
   /** 「复制」只写剪贴板（不贴回），与「直接粘贴」是两条路径。 */
   const writeClipboard = useCallback((text: string) => getPlatform().clipboard.writeText(text), []);
+  /**
+   * Ctrl+C 复制当前选中项。
+   * ★ 单条走 items.copy（富文本 / 图片 / 文件都原样带走），多条只能拼纯文本 ——
+   *   剪贴板一次只装一种格式，拼富文本没有可预期的结果。
+   * ★ 依赖 writeClipboard，所以只能定义在它之后：useCallback 的依赖数组是**当场求值**的，
+   *   提前引用会撞上 const 的 TDZ（渲染即崩，不是类型错误）。
+   */
+  const copySelected = useCallback(async () => {
+    const store = useClipStore.getState();
+    const ids = store.selectedIds;
+    const only = ids.length === 1 ? ids[0] : undefined;
+    if (only !== undefined) {
+      await copyItem(only);
+      return;
+    }
+    if (ids.length === 0) return;
+    const texts: string[] = [];
+    for (const id of ids) {
+      try {
+        const text = await getPlatform().items.getText(id);
+        // 图片 / 文件记录没有文本：跳过而不是把空串拼进结果。
+        if (text !== '') texts.push(text);
+      } catch {
+        // 单条读失败只跳过这一条，不让整次复制作废。
+      }
+    }
+    if (texts.length === 0) {
+      store.toast('没有可复制的文本', 'warn');
+      return;
+    }
+    try {
+      await writeClipboard(texts.join('\n'));
+      store.toast('已复制 ' + texts.length + ' 条', 'ok');
+    } catch (err) {
+      store.toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  }, [copyItem, writeClipboard]);
   /**
    * 流式增量订阅：取消函数原样交给面板（面板的 useEffect 返回它，
    * 切换视图卸载面板时就地清理），App 不额外持有订阅句柄。
@@ -639,6 +768,51 @@ export function App() {
     setOcrError(null);
     setOcrLoading(false);
   }, []);
+
+  const closeQr = useCallback(() => {
+    setQr(null);
+    setQrResult(null);
+    setQrError(null);
+    setQrLoading(false);
+  }, []);
+
+  /**
+   * 「存为文本记录」：复用 OCR 那条路径（items.saveText 写库后主进程自己发 itemsChanged）。
+   * ★ 存完不关面板：用户可能还想把同一串二维码内容复制走，关掉就得重新识别一次。
+   */
+  const saveQrAsItem = useCallback(
+    async (text: string) => {
+      try {
+        const result = await getPlatform().items.saveText(text);
+        const { text: message, tone } = result.ok
+          ? ocrSavedToast()
+          : { text: '存为记录失败，请重试', tone: 'warn' as const };
+        toast(message, tone);
+      } catch (err) {
+        toast(err instanceof Error ? err.message : String(err), 'error');
+      }
+    },
+    [toast],
+  );
+
+  /**
+   * AI 助手的「存为记录」：与 saveQrAsItem 同一条路径（items.saveText 写库后主进程自己发
+   * itemsChanged）。存完同样不关面板 —— 用户可能还想把结果复制走或再换一种动作。
+   */
+  const saveAssistAsItem = useCallback(
+    async (text: string) => {
+      try {
+        const result = await getPlatform().items.saveText(text);
+        const { text: message, tone } = result.ok
+          ? ocrSavedToast()
+          : { text: '存为记录失败，请重试', tone: 'warn' as const };
+        toast(message, tone);
+      } catch (err) {
+        toast(err instanceof Error ? err.message : String(err), 'error');
+      }
+    },
+    [toast],
+  );
 
   /**
    * 片段库的四个动作：主进程一律返回整张表，直接替换本地 state 即可（不再多拉一次）。
@@ -815,6 +989,7 @@ export function App() {
             onOpenSettings={() => useClipStore.getState().setView('settings')}
             onOpenOptimize={() => useClipStore.getState().openOptimize('')}
             onOpenSnippets={() => useClipStore.getState().openSnippets()}
+            onOpenOrganize={() => useClipStore.getState().openOrganize()}
           />
         ) : null}
 
@@ -868,6 +1043,47 @@ export function App() {
                   小组件
                 </button>
               </div>
+
+              {/*
+                筛选条（v1.0.0 ⑥⑧）：只把「当前生效的筛选」摆出来，条件本身由侧栏/整理视图设置。
+                ★ 无筛选时整条不渲染（不是渲染一个空 div）：列表顶部每一行都占高度，
+                  空节点会把列表整体往下推 8px 并挤掉一行卡片。
+              */}
+              {filterChips(tagFilter, folderFilter, folders).length > 0 ? (
+                <div className="cc-no-drag mx-base mb-snug flex shrink-0 flex-wrap items-center gap-tight rounded-button border border-line bg-surface-2 px-snug py-[6px] text-[11px] text-ink-2">
+                  {filterChips(tagFilter, folderFilter, folders).map((chip) => (
+                    <button
+                      key={chip.kind + ':' + chip.value}
+                      type="button"
+                      title="移除这条筛选"
+                      onClick={() => {
+                        if (chip.kind === 'tag') {
+                          useClipStore.getState().setTagFilter(tagFilter.filter((t) => t !== chip.value));
+                        } else {
+                          // 文件夹筛选是三态的，两种 chip（某个文件夹 / 未归类）移除后都回到「不限」。
+                          useClipStore.getState().setFolderFilter(undefined);
+                        }
+                      }}
+                      className="flex shrink-0 items-center gap-[3px] rounded-button border border-line bg-surface px-snug py-[1px] hover:text-ink"
+                    >
+                      {chip.kind === 'tag' ? <Tags size={11} aria-hidden /> : <FolderTree size={11} aria-hidden />}
+                      <span>{chip.label}</span>
+                      <X size={11} aria-hidden />
+                    </button>
+                  ))}
+                  <div className="flex-1" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      useClipStore.getState().setTagFilter([]);
+                      useClipStore.getState().setFolderFilter(undefined);
+                    }}
+                    className="shrink-0 rounded-button px-[6px] py-[1px] hover:bg-surface hover:text-ink"
+                  >
+                    清空筛选
+                  </button>
+                </div>
+              ) : null}
 
               {mergeHint ? (
                 <div className="cc-no-drag mx-base mb-snug flex shrink-0 items-center gap-tight rounded-button border border-line bg-surface-2 px-snug py-[6px] text-[11px] text-ink-2">
@@ -1008,6 +1224,19 @@ export function App() {
             />
           ) : null}
 
+          {view === 'assist' ? (
+            <AssistView
+              source={assistSource}
+              providers={aiProviders}
+              onAssist={runAssist}
+              onCopyToClipboard={writeClipboard}
+              onSaveAsItem={(text) => void saveAssistAsItem(text)}
+              onToast={(message, kind) => toast(message, appToastTone(kind ?? 'info'))}
+              onClose={() => useClipStore.getState().closeAssist()}
+              onGoSettings={() => useClipStore.getState().setView('settings')}
+            />
+          ) : null}
+
           {view === 'trash' ? (
             <TrashView
               items={trashItems}
@@ -1039,6 +1268,10 @@ export function App() {
               onRefresh={() => void useClipStore.getState().loadWordCloud()}
             />
           ) : null}
+
+          {view === 'organize' ? (
+            <OrganizeView onClose={() => useClipStore.getState().closeOrganize()} />
+          ) : null}
         </div>
       </div>
 
@@ -1057,6 +1290,11 @@ export function App() {
           onPick={(action) => pickMenu(action, menu.id)}
           onClose={() => setMenu(null)}
         />
+      ) : null}
+
+      {/* 整理弹窗与右键菜单同层：从菜单里打开，也要盖住所有视图。 */}
+      {organizeItemId !== null ? (
+        <OrganizeItemDialog itemId={organizeItemId} onClose={() => setOrganizeItemId(null)} />
       ) : null}
 
       <TextViewer
@@ -1083,6 +1321,17 @@ export function App() {
         onSaveAsItem={(text) => void saveOcrAsItem(text)}
         onCopy={(text) => void writeClipboard(text).then(() => toast('已复制到剪贴板', 'ok'))}
         onClose={closeOcr}
+      />
+
+      {/* 二维码与 OCR 同层：都是「把图里的信息抠出来」的浮层，层级一致才不会互相盖住。 */}
+      <QrResultView
+        open={qr !== null}
+        status={qrLoading ? 'loading' : qrStatusOf(qrResult, qrError)}
+        result={qrResult ?? ''}
+        error={qrError}
+        onCopy={(text) => void writeClipboard(text).then(() => toast('已复制到剪贴板', 'ok'))}
+        onSaveAsItem={(text) => void saveQrAsItem(text)}
+        onClose={closeQr}
       />
 
       <ToastStack toasts={toasts} onDismiss={(id) => useClipStore.getState().dismissToast(id)} />

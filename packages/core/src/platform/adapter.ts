@@ -42,6 +42,9 @@ const stub: PlatformAdapter = {
     restore: () => Promise.reject(new Error('当前环境没有实现 items.restore')),
     purge: () => Promise.reject(new Error('当前环境没有实现 items.purge')),
     emptyTrash: () => Promise.reject(new Error('当前环境没有实现 items.emptyTrash')),
+    setTags: () => Promise.reject(new Error('当前环境没有实现 items.setTags')),
+    setFolder: () => Promise.reject(new Error('当前环境没有实现 items.setFolder')),
+    listTags: () => Promise.reject(new Error('当前环境没有实现 items.listTags')),
     onChanged: () => unsubscribe(),
     onBurstHint: () => unsubscribe(),
   },
@@ -87,6 +90,13 @@ const stub: PlatformAdapter = {
     use: () => Promise.reject(new Error('当前环境没有实现 snippets.use')),
     onChanged: () => unsubscribe(),
   },
+  folders: {
+    list: () => Promise.reject(new Error('当前环境没有实现 folders.list')),
+    create: () => Promise.reject(new Error('当前环境没有实现 folders.create')),
+    rename: () => Promise.reject(new Error('当前环境没有实现 folders.rename')),
+    move: () => Promise.reject(new Error('当前环境没有实现 folders.move')),
+    remove: () => Promise.reject(new Error('当前环境没有实现 folders.remove')),
+  },
   ai: {
     listProviders: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     saveProvider: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
@@ -94,6 +104,7 @@ const stub: PlatformAdapter = {
     listModels: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     test: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     optimize: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    assist: () => Promise.reject(new Error('当前环境没有实现 ai.assist')),
     cancel: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     scenes: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     copyAndPaste: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
@@ -115,6 +126,9 @@ const stub: PlatformAdapter = {
     recognize: () => Promise.reject(new Error('当前环境没有实现 ocr.recognize')),
     // 订阅类一律 no-op 而不是 reject（同 onToast）：挂载时订阅，抛错会拖崩界面。
     onProgress: () => unsubscribe(),
+  },
+  qr: {
+    recognize: () => Promise.reject(new Error('当前环境没有实现 qr.recognize')),
   },
   capabilities: {
     autoPaste: false,

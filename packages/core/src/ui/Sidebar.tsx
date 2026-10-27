@@ -2,6 +2,7 @@ import {
   Bookmark,
   Code2,
   FileText,
+  FolderTree,
   Image as ImageIcon,
   Layers,
   Link2,
@@ -47,6 +48,7 @@ export function Sidebar({
   onOpenSettings,
   onOpenOptimize,
   onOpenSnippets,
+  onOpenOrganize,
 }: {
   kind: KindFilter;
   view: View;
@@ -57,6 +59,8 @@ export function Sidebar({
   onOpenOptimize?: () => void;
   /** 传入才渲染「片段」入口（v0.6.0 片段库）；不传时侧栏与旧版完全一致。 */
   onOpenSnippets?: () => void;
+  /** 传入才渲染「整理」入口（v1.0.0 ⑥ 标签/文件夹）；不传时侧栏与旧版完全一致。 */
+  onOpenOrganize?: () => void;
 }) {
   /** 分类项、优化入口与底部两个入口共用同一套外观，避免各处各写一遍尺寸与配色。 */
   const itemClass = (active: boolean): string =>
@@ -102,6 +106,20 @@ export function Sidebar({
         >
           <Bookmark size={17} aria-hidden />
           <span className="text-[10px] leading-none">片段</span>
+        </button>
+      ) : null}
+      {/* 整理同理：View = 'organize'，是独立视图而非分类筛选。
+          图标用 FolderTree 而不是 Tags：整理视图里文件夹是主导航（标签只是记录上的属性），
+          树形图标能同时暗示"标签 + 文件夹"这层结构。 */}
+      {onOpenOrganize ? (
+        <button
+          type="button"
+          onClick={onOpenOrganize}
+          className={itemClass(view === 'organize')}
+          title="智能整理"
+        >
+          <FolderTree size={17} aria-hidden />
+          <span className="text-[10px] leading-none">整理</span>
         </button>
       ) : null}
       <div className="flex-1" />

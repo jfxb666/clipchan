@@ -19,6 +19,7 @@ import {
   enforceImageBudget,
   deleteImageFiles,
   hashImageBuffer,
+  imagePhash,
   saveImage,
   type NativeImageLike,
   type SavedImage,
@@ -219,6 +220,11 @@ export class Recorder {
 
     const tmpRels = [saved.image_path, saved.thumb_path];
 
+    // ★ v1.1.0：感知哈希在**落盘之后**算，但用原始 img 的像素（不是磁盘上的 JPEG/PNG 字节）：
+    //   dHash 要的是像素，重新解码一份文件纯属浪费；而哈希值本来就不该受编码质量影响。
+    //   算不出来返回 undefined，此时不传这个字段，db 层会整段跳过相似判定。
+    const phash = imagePhash(img);
+
     let result: InsertResult;
     try {
       // 去重键 = 磁盘上那份原图字节的 sha256（与"库里存的到底是什么"完全一致）
@@ -232,6 +238,9 @@ export class Recorder {
             bytes: saved.bytes,
             imagePath: saved.image_path,
             thumbPath: saved.thumb_path,
+            // ★ 只在真算出哈希时才带上这个键：ImageMeta.phash 是可选的，
+            //   写 phash: undefined 会让"这张图没有感知哈希"和"没算"两种状态混在一起。
+            ...(phash === undefined ? {} : { phash }),
           },
           { now: this.nowFn(), sourceApp: normalizeSourceApp(sourceApp) },
         ),

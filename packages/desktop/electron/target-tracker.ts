@@ -20,9 +20,17 @@ export interface ForegroundSource {
 }
 
 export interface TargetTrackerDeps {
-  /** 前台窗口查询来源；缺省时 `notePanelShown` 退化为 no-op（助手不可用的降级路径）。 */
+  /** 前台窗口查询来源；缺省时 `captureTarget` / `notePanelShown` 退化为 no-op（助手不可用的降级路径）。 */
   foreground?: ForegroundSource;
 }
+
+/**
+ * 一次「唤起时捕获目标」的结果。
+ *
+ * ★ 为什么要把这三种情况分开报给上层：`unavailable`（超时 / 助手没了 / 查不到）绝不能
+ *   顺手把已有目标清成 0 —— 宁可粘错，也别丢目标；只有 `self` 才该视为「这次没有目标」。
+ */
+export type CaptureOutcome = 'captured' | 'self' | 'unavailable';
 
 /** 句柄是否是一个真实可用的窗口句柄（0 / 非整数 / 负数一律视为「没有」）。 */
 function isHandle(value: unknown): value is number {
@@ -63,6 +71,30 @@ export class TargetTracker {
       return;
     }
     this.pending = hwnd;
+  }
+
+  /**
+   * 唤起面板**之前**捕获目标窗口，把结果写进 `pending`。
+   *
+   * ★ 为什么必须在上层 `show()` 之前 await 这一下：面板一旦到前台，助手查到的 FG 就是
+   *   面板自己（历史上就是这么把目标弄丢的）。查不到时**两个槽位都不动**，保留旧值。
+   */
+  async captureTarget(selfHwnd: number): Promise<CaptureOutcome> {
+    const source = this.foreground;
+    if (!source) return 'unavailable';
+    let hwnd = 0;
+    try {
+      hwnd = Number(await source.foreground());
+    } catch {
+      return 'unavailable';
+    }
+    if (!isHandle(hwnd)) return 'unavailable';
+    if (isHandle(selfHwnd) && hwnd === selfHwnd) {
+      this.noteForeground(hwnd, selfHwnd);
+      return 'self';
+    }
+    this.noteForeground(hwnd, selfHwnd);
+    return 'captured';
   }
 
   /**

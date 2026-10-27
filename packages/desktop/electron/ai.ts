@@ -7,10 +7,12 @@
  *   所以 ai.spec.ts 能直接跑（不 import electron，就不会在 node 下炸）。
  */
 import { randomUUID } from 'node:crypto';
-import { BUILTIN_SCENES, DEFAULT_TIMEOUT_MS, sceneById, toAiError } from '@clipchan/ai';
-import type { AiProtocol, OptimizeInput, OptimizeResult, ProviderAdapter, ProviderConfig } from '@clipchan/ai';
-import type { AiError, AiProvider, AiProviderInput, OptimizeRequest } from '@clipchan/core';
+import { BUILTIN_SCENES, DEFAULT_TIMEOUT_MS, assistActionById, sceneById, toAiError } from '@clipchan/ai';
+import type { AiProtocol, AssistInput, AssistResult, OptimizeInput, OptimizeResult, ProviderAdapter, ProviderConfig } from '@clipchan/ai';
+import type { AiError, AiProvider, AiProviderInput, AssistRequest, OptimizeRequest } from '@clipchan/core';
 import { CH } from './channels';
+import { needsSealing } from './keyvault';
+import type { SecretBox } from './keyvault';
 
 /** 主进程能用的最小 KV 访问面（db.ts 的 getSettingValue / setSettingValue）。 */
 export interface AiKv {
@@ -23,12 +25,19 @@ export interface AiDeps {
   kv: AiKv;
   adapterFor: (protocol: AiProtocol) => ProviderAdapter;
   optimize: (adapter: ProviderAdapter, cfg: ProviderConfig, key: string, input: OptimizeInput) => Promise<OptimizeResult>;
+  assist: (adapter: ProviderAdapter, cfg: ProviderConfig, key: string, input: AssistInput) => Promise<AssistResult>;
   /** provider 增删改后通知界面重取列表（默认不广播，测试里可注入 spy）。 */
   onChanged?: () => void;
   /** 流式增量：把 (requestId, 已可展示文本) 交给 main.ts 广播；不注入则退回整段返回。 */
   onDelta?: (requestId: string, text: string) => void;
   /** 请求收尾（成功或失败都会调）：让节流器把最后一段发出去并清表。 */
   onDeltaEnd?: (requestId: string) => void;
+  /**
+   * 可选：Key 的加密保险箱（升级项 ①）。由 main.ts 注入 DPAPI 实现。
+   * ★ 不注入时行为与升级前**完全一致**（明文直读直写）—— 这样 ai.spec.ts 的既有用例
+   *   语义不变，而主进程走加密。渲染层拿到的仍然是 keyMask，与加不加密无关。
+   */
+  secretBox?: SecretBox;
 }
 
 /** provider 元数据在 KV 里的键；Key 拆成 aiKey:<providerId> 单独放。 */
@@ -84,13 +93,45 @@ function readProviders(kv: AiKv): StoredProvider[] {
   return out;
 }
 
-function readKey(kv: AiKv, id: string): string {
-  const raw = kv.getSettingValue(keyKey(id));
-  return typeof raw === 'string' ? raw : '';
+/**
+ * 把库里那条记录翻译成明文 Key（只留在主进程内存里）。
+ *
+ * ★ 解不开（换机器/换用户拷来的库、DPAPI 拒绝）不能把整个 provider 列表带崩：
+ *   记一条警告、当作「没有 Key」，界面表现为 hasKey=false、点测试报缺 Key。
+ */
+function openKey(box: SecretBox, stored: string, id: string): string {
+  try {
+    return box.open(stored);
+  } catch (e) {
+    console.warn('[ai] provider ' + id + ' 的 Key 解不开，按未配置处理：' + String(e));
+    return '';
+  }
 }
 
-function toPublic(kv: AiKv, cfg: StoredProvider): AiProvider {
-  const key = readKey(kv, cfg.id);
+function readKey(kv: AiKv, id: string, box?: SecretBox): string {
+  const raw = kv.getSettingValue(keyKey(id));
+  if (typeof raw !== 'string' || raw === '') return '';
+  // ★ 没注入保险箱 = 升级前的行为：库里是什么就用什么（测试替身与老路径都走这条）。
+  if (!box) return raw;
+  const plain = openKey(box, raw, id);
+  if (plain === '') return '';
+  // ★ 明文迁移：读到历史遗留明文就就地加密回写（升级项 ① 的存量 Key 迁移）。
+  //   判据「不是密文」（含 plain:v1:）→ 等系统加密恢复可用后，降级值也会被升级。
+  //   幂等：写回前先比对，seal 结果与库里的值一样（加密不可用时就是这种情况）就不写。
+  //   失败不致命：写回抛异常只记警告，本次调用照样把明文交出去。
+  if (needsSealing(raw)) {
+    try {
+      const sealed = box.seal(plain);
+      if (sealed !== '' && sealed !== raw) kv.setSettingValue(keyKey(id), sealed);
+    } catch (e) {
+      console.warn('[ai] provider ' + id + ' 的 Key 迁移加密失败（继续用明文）：' + String(e));
+    }
+  }
+  return plain;
+}
+
+function toPublic(kv: AiKv, cfg: StoredProvider, box?: SecretBox): AiProvider {
+  const key = readKey(kv, cfg.id, box);
   // ★ 必须逐字段手写：写成 { ...cfg, apiKey: key } 就是泄密（Review Focus 6）。
   return {
     id: cfg.id,
@@ -110,6 +151,7 @@ export interface AiApi {
   listModels(id: string): Promise<string[]>;
   test(id: string): Promise<{ ok: boolean; error?: AiError; model?: string }>;
   optimize(req: OptimizeRequest): Promise<OptimizeResult>;
+  assist(req: AssistRequest): Promise<AssistResult>;
   /** 中断在途请求（按 requestId）；没有在途请求时静默返回（重复点「停止」不该报错）。 */
   cancel(requestId: string): Promise<void>;
   scenes(): Promise<{ id: string; name: string; description: string }[]>;
@@ -122,9 +164,9 @@ export interface AiApi {
  * @param deps 依赖注入；onChanged 由 main.ts 传 broadcaster.aiChanged。
  */
 export function createAi(deps: AiDeps): AiApi {
-  const { kv, adapterFor, optimize, onChanged, onDelta, onDeltaEnd } = deps;
+  const { kv, adapterFor, optimize, assist, onChanged, onDelta, onDeltaEnd, secretBox } = deps;
 
-  const list = (): AiProvider[] => readProviders(kv).map((cfg) => toPublic(kv, cfg));
+  const list = (): AiProvider[] => readProviders(kv).map((cfg) => toPublic(kv, cfg, secretBox));
 
   /**
    * 在途请求的取消器：requestId → AbortController。
@@ -141,7 +183,7 @@ export function createAi(deps: AiDeps): AiApi {
   const requireProvider = (id: string): { cfg: StoredProvider; key: string } => {
     const cfg = readProviders(kv).find((p) => p.id === id);
     if (!cfg) throw err(NO_PROVIDER);
-    return { cfg, key: readKey(kv, id) };
+    return { cfg, key: readKey(kv, id, secretBox) };
   };
 
   const api: AiApi = {
@@ -164,8 +206,10 @@ export function createAi(deps: AiDeps): AiApi {
       else rows.push(next);
       kv.setSettingValue(PROVIDERS_KEY, rows);
       // ★ 没传 apiKey = 编辑时不改 Key（否则改个名字就把 Key 清了）。
+      // ★ 有保险箱就落密文（enc:v1:，系统加密不可用时是 plain:v1:，由 seal 诚实降级）；
+      //   没有保险箱则原样落明文，与升级前一致。
       if (typeof incoming.apiKey === 'string' && incoming.apiKey !== '') {
-        kv.setSettingValue(keyKey(id), incoming.apiKey);
+        kv.setSettingValue(keyKey(id), secretBox ? secretBox.seal(incoming.apiKey) : incoming.apiKey);
       }
       changed();
       return list();
@@ -194,7 +238,7 @@ export function createAi(deps: AiDeps): AiApi {
       const cfg = readProviders(kv).find((p) => p.id === id);
       if (!cfg) return { ok: false, error: err(NO_PROVIDER) };
       try {
-        return await adapterFor(cfg.protocol).test(cfg, readKey(kv, id));
+        return await adapterFor(cfg.protocol).test(cfg, readKey(kv, id, secretBox));
       } catch (e) {
         return { ok: false, error: toAiError(e, { timeoutMs: DEFAULT_TIMEOUT_MS }) };
       }
@@ -231,6 +275,31 @@ export function createAi(deps: AiDeps): AiApi {
       }
     },
 
+    assist: async (req) => {
+      const text = typeof req.text === 'string' ? req.text : '';
+      if (text.trim() === '') throw err('没有可处理的文本');
+      // ★ 动作是白名单：界面按 ASSIST_ACTIONS 出菜单，认不出就是调用方传错了，别让它落到提示词里。
+      const action = assistActionById(String(req.action));
+      if (!action) throw err('不认识的 AI 动作：' + req.action);
+      const { cfg, key } = requireProvider(req.providerId);
+      // ★ targetLang 只对 translate 有意义：其余动作即使 req 带了也不往下传，
+      //   否则提示词里会冒出一句「翻译成 X」污染总结/改写。extra 同理，空白等于没传。
+      const targetLang = typeof req.targetLang === 'string' ? req.targetLang.trim() : '';
+      const extra = typeof req.extra === 'string' ? req.extra.trim() : '';
+      try {
+        const r = await assist(adapterFor(cfg.protocol), cfg, key, {
+          action: action.id,
+          text,
+          ...(action.needsTargetLang && targetLang !== '' ? { targetLang } : {}),
+          ...(extra !== '' ? { extra } : {}),
+        });
+        // ★ degraded 必须透传：界面要靠它提示"模型没按格式来，正文是兜底"。
+        return { text: r.text, degraded: r.degraded };
+      } catch (e) {
+        throw toAiError(e, { timeoutMs: DEFAULT_TIMEOUT_MS });
+      }
+    },
+
     cancel: async (requestId) => {
       const rid = typeof requestId === 'string' ? requestId : '';
       if (rid === '') return;
@@ -251,6 +320,7 @@ export function createAi(deps: AiDeps): AiApi {
         [CH.ai.listModels]: (_e: unknown, id: string) => api.listModels(String(id)),
         [CH.ai.test]: (_e: unknown, id: string) => api.test(String(id)),
         [CH.ai.optimize]: (_e: unknown, req: OptimizeRequest) => api.optimize(req),
+        [CH.ai.assist]: (_e: unknown, req: AssistRequest) => api.assist(req),
         [CH.ai.cancel]: (_e: unknown, requestId: string) => api.cancel(String(requestId)),
         [CH.ai.scenes]: () => api.scenes(),
       };

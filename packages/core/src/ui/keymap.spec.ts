@@ -87,6 +87,27 @@ describe('resolveKey', () => {
     expect(resolveKey(key('z'), ctx(false))).toEqual({ type: 'none' });
   });
 
+  it('Ctrl+C / Cmd+C 有选中 → copy（大小写都认）', () => {
+    expect(resolveKey(key('c', { ctrl: true }), ctx(false, ['a']))).toEqual({ type: 'copy' });
+    expect(resolveKey(key('C', { meta: true }), ctx(false, ['a']))).toEqual({ type: 'copy' });
+    expect(resolveKey(key('c', { meta: true }), ctx(false, ['a', 'b']))).toEqual({ type: 'copy' });
+  });
+
+  it('Ctrl+C 没有选中 → none（没东西可复制就不拦按键）', () => {
+    expect(resolveKey(key('c', { ctrl: true }), ctx(false))).toEqual({ type: 'none' });
+    expect(resolveKey(key('c', { meta: true }), ctx(false))).toEqual({ type: 'none' });
+  });
+
+  it('搜索框内 Ctrl+C 不拦（那是输入框自己的复制，与 Ctrl+Z 同一约定）', () => {
+    expect(resolveKey(key('c', { ctrl: true }), ctx(true, ['a']))).toEqual({ type: 'none' });
+    expect(resolveKey(key('C', { meta: true }), ctx(true))).toEqual({ type: 'none' });
+  });
+
+  it('不带修饰键的 c 在列表里也不触发 copy', () => {
+    expect(resolveKey(key('c'), ctx(false, ['a']))).toEqual({ type: 'none' });
+    expect(resolveKey(key('C'), ctx(false, ['a']))).toEqual({ type: 'none' });
+  });
+
   it('Ctrl+Shift+V → paste-plain（大小写都认）', () => {
     expect(resolveKey(key('v', { ctrl: true, shift: true }), ctx(false))).toEqual({ type: 'paste-plain' });
     expect(resolveKey(key('V', { ctrl: true, shift: true }), ctx(false))).toEqual({ type: 'paste-plain' });
@@ -123,6 +144,7 @@ describe('shouldPreventDefault', () => {
       { type: 'remove-selected' },
       { type: 'move', delta: 1 },
       { type: 'move', delta: -1, fromSearch: true },
+      { type: 'copy' },
       { type: 'paste' },
       { type: 'paste-plain' },
       { type: 'undo' },

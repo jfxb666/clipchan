@@ -40,6 +40,12 @@ export const CH = {
     pinMany: 'items:pinMany',
     // v0.6.0：拖到外部应用。
     startDrag: 'items:startDrag',
+    // v1.0.0 ⑥：标签与文件夹归类。两条都是写操作（落库 + 广播刷新），
+    // 返回 void 而不是整表：界面只需要知道改成功了，列表由 items:changed 拉。
+    setTags: 'items:setTags',
+    setFolder: 'items:setFolder',
+    // 标签筛选面板要枚举"有哪些标签、各多少条"：只读，回统计表，不广播。
+    listTags: 'items:listTags',
   },
   settings: { get: 'settings:get', set: 'settings:set' },
   ghost: { get: 'ghost:get', set: 'ghost:set' },
@@ -66,6 +72,7 @@ export const CH = {
     listModels: 'ai:listModels',
     test: 'ai:test',
     optimize: 'ai:optimize',
+    assist: 'ai:assist',
     cancel: 'ai:cancel',
     scenes: 'ai:scenes',
     copyAndPaste: 'ai:copyAndPaste',
@@ -87,12 +94,25 @@ export const CH = {
     download: 'ocr:download',
     recognize: 'ocr:recognize',
   },
+  // 二维码识别与 ocr 同为「主进程跑引擎、渲染层只要结果」，但只有一条通道。
+  qr: {
+    recognize: 'qr:recognize',
+  },
   // v0.6.0 片段库：与 items 分开，因为它是"用户刻意存的"，不参与历史上限淘汰。
   snippets: {
     list: 'snippets:list',
     save: 'snippets:save',
     remove: 'snippets:remove',
     use: 'snippets:use',
+  },
+  // v1.0.0 ⑥ 整理文件夹：与 snippets 同一范式 —— 写操作回**变更后的整张平表**，
+  // 界面直接替换即可重建树，不必再拉一次（少一次往返就少一帧闪烁）。
+  folders: {
+    list: 'folders:list',
+    create: 'folders:create',
+    rename: 'folders:rename',
+    move: 'folders:move',
+    remove: 'folders:remove',
   },
 } as const;
 
@@ -128,5 +148,7 @@ export const ALL_INVOKE_CHANNELS: string[] = [
   ...Object.values(CH.ai),
   ...Object.values(CH.capture),
   ...Object.values(CH.ocr),
+  ...Object.values(CH.qr),
   ...Object.values(CH.snippets),
+  ...Object.values(CH.folders),
 ];

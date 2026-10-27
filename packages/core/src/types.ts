@@ -3,6 +3,8 @@
  * 渲染进程与移动端里使用，因此**不得** import 任何 electron / node 模块。
  */
 
+import type { SearchNode, SearchTimeRange } from './logic/searchQuery';
+
 /**
  * 一条剪贴板记录的内容类别。
  *
@@ -20,6 +22,18 @@ export interface ListQuery {
   kind?: KindFilter;
   /** 搜索词。文本匹配 content，图片匹配现场拼出的尺寸/体积描述。 */
   q?: string;
+  /**
+   * v1.0.0 ⑧：结构化搜索表达式（由 core 的 parseSearch 产出）。
+   * ★ 给了 expr 就走 matchSearch 的应用层求值，**不再用 q 的 LIKE 三路**；
+   *   q 与 expr 同时给时以 expr 为准（解析器已经把自由文本收进 text 叶子）。
+   */
+  expr?: SearchNode;
+  /** v1.0.0 ⑧：时间范围（毫秒时间戳，含端点）。任一端缺省表示该端不限。 */
+  time?: SearchTimeRange;
+  /** v1.0.0 ⑥：标签过滤，AND 语义（必须同时带这些标签）。空数组等同不限。 */
+  tags?: string[];
+  /** v1.0.0 ⑥：文件夹过滤。字符串=该文件夹下的记录；null=只看未归类；undefined=不限。 */
+  folderId?: string | null;
   limit?: number;
   offset?: number;
 }
@@ -69,6 +83,57 @@ export interface ClipItemDTO {
   fileCount?: number;
   /** 这条记录带富文本（text/html）原样（v0.6.0）：粘贴时能保留加粗/列表/表格。 */
   hasRich?: boolean;
+  /** v1.0.0 ⑥：标签列表；没有标签时 undefined（不返回空数组，省 IPC 载荷）。 */
+  tags?: string[];
+  /** v1.0.0 ⑥：所在文件夹 id；未归类为 undefined。 */
+  folderId?: string;
+  /** 仅 kind==='link' 且缓存命中时存在 */
+  urlPreview?: UrlPreviewDTO;
+}
+
+/**
+ * 一个整理文件夹（v1.0.0 ⑥）。支持多级（最多 3 层，见 organize.ts 的 MAX_FOLDER_DEPTH）。
+ * ★ 只暴露界面需要的字段；树结构由渲染层用 core 的 buildFolderTree 现场拼，主进程只给平表。
+ */
+export interface FolderDTO {
+  id: string;
+  name: string;
+  /** 父文件夹 id；顶层为 null。 */
+  parentId: string | null;
+  /** 该文件夹下的活跃记录条数（不含子文件夹、不含回收站）。 */
+  itemCount: number;
+}
+
+/** 新建文件夹的入参。 */
+export interface FolderInput {
+  name: string;
+  parentId?: string | null;
+}
+
+/**
+ * 一个标签 + 它被多少条**活跃**记录用过（v1.0.0 ⑥ 标签筛选面板用）。
+ *
+ * ★ 由主进程现算而不是落一张 tags 表：标签只是 items.tags 这个 JSON 列的内容，
+ *   多一张表就多一处要跟软删/去重/导入导出保持同步的副本。数量级是"标签种类"
+ *   而不是"记录条数"，全表扫一遍即可，不值得为它改 schema。
+ */
+export interface TagCountDTO {
+  tag: string;
+  count: number;
+}
+
+/** 链接预览缓存：主进程抓取后落库，列表渲染时挂到 ClipItemDTO 上。 */
+export interface UrlPreviewDTO {
+  /** 归一化后的 URL，与 items.content 一致 */
+  url: string;
+  /** 网页标题；抓不到时为空串 */
+  title: string;
+  /** 主机名（已去 www.） */
+  domain: string;
+  /** 站点图标地址；抓不到时为空串 */
+  iconUrl: string;
+  /** 抓取时间戳（毫秒） */
+  fetchedAt: number;
 }
 
 /**
@@ -327,6 +392,28 @@ export interface OptimizeResult {
   degraded: boolean;
 }
 
+/** 一次剪贴板 AI 助手的请求（v1.0.0 第 ⑤ 项）。 */
+export interface AssistRequest {
+  /** 用哪个 AI provider；id 必须已配置且有 Key。 */
+  providerId: string;
+  /** 六个动作之一；非法值由主进程拒绝。 */
+  action: 'translate' | 'summarize' | 'rewrite' | 'explain' | 'extract' | 'tags';
+  /** 原文。空串由主进程拒绝（没有素材可处理）。 */
+  text: string;
+  /** 只有 action === 'translate' 时有意义：目标语言 id（如 'en'）。其余动作忽略。 */
+  targetLang?: string;
+  /** 用户的额外要求，可为空。 */
+  extra?: string;
+}
+
+/** 一次剪贴板 AI 助手的结果（v1.0.0 第 ⑤ 项）。 */
+export interface AssistResult {
+  /** 结果正文。 */
+  text: string;
+  /** true = 模型没按 <result> 契约输出，正文是整段回复的兜底（界面要提示）。 */
+  degraded: boolean;
+}
+
 /**
  * 导出为 zip 备份包的结果。
  *
@@ -425,6 +512,12 @@ export interface ClipchanApi {
     pinMany(ids: string[], pinned: boolean): Promise<void>;
     /** 把一条记录拖到外部应用（Electron webContents.startDrag；只有主进程能做）。 */
     startDrag(id: string): Promise<void>;
+    /** v1.0.0 ⑥：整体替换一条记录的标签（传入已 sanitize 的标签串）。 */
+    setTags(id: string, tags: string[]): Promise<void>;
+    /** v1.0.0 ⑥：把一条记录放进文件夹；folderId=null 表示移出到未归类。 */
+    setFolder(id: string, folderId: string | null): Promise<void>;
+    /** v1.0.0 ⑥：全部活跃记录的标签及其条数（count 降序、tag 升序），供筛选面板枚举。 */
+    listTags(): Promise<TagCountDTO[]>;
     /** 回收站列表（按删除时间倒序）；缩略图同样走协议 URL。 */
     trashList(q: TrashQuery): Promise<ClipItemDTO[]>;
     /** 回收站总条数（分页显示"共 N 条"）。 */
@@ -503,6 +596,19 @@ export interface ClipchanApi {
     use(id: string): Promise<Snippet[]>;
     onChanged(cb: () => void): () => void;
   };
+  /**
+   * v1.0.0 ⑥：整理文件夹。
+   * ★ 写操作一律返回**变更后的完整平表**（与 snippets 同一范式），界面据此重建树，不必二次拉取。
+   */
+  folders: {
+    list(): Promise<FolderDTO[]>;
+    create(input: FolderInput): Promise<FolderDTO[]>;
+    rename(id: string, name: string): Promise<FolderDTO[]>;
+    /** 改父级；parentId=null 表示提升为顶层。非法移动（成环/超深）返回**原表不变**，不抛。 */
+    move(id: string, parentId: string | null): Promise<FolderDTO[]>;
+    /** 删文件夹：里面的记录回到未归类（不删记录）。 */
+    remove(id: string): Promise<FolderDTO[]>;
+  };
   ai: {
     /** Key 已掩码：只回 keyMask 与 hasKey。 */
     listProviders(): Promise<AiProvider[]>;
@@ -514,6 +620,8 @@ export interface ClipchanApi {
     optimize(req: OptimizeRequest): Promise<OptimizeResult>;
     /** 中断一次在途的优化请求（按 requestId）；没有在途请求时静默返回。 */
     cancel(requestId: string): Promise<void>;
+    /** 剪贴板 AI 助手：翻译/总结/改写/解释/提取要点（v1.0.0 第 ⑤ 项）。 */
+    assist(req: AssistRequest): Promise<AssistResult>;
     /** 只投影 id/name/description（rules 不出主进程）。 */
     scenes(): Promise<{ id: string; name: string; description: string }[]>;
     /** 把优化结果写进剪贴板并贴回目标窗口（不进历史、不刷新排序）。 */
@@ -543,6 +651,10 @@ export interface ClipchanApi {
     /** 识别一条图片记录（id 是 items.id）。 */
     recognize(id: string): Promise<OcrResult>;
     onProgress(cb: (p: OcrProgress) => void): () => void;
+  };
+  qr: {
+    /** 识别该图片记录里的二维码；未识别到返回空串（不抛异常） */
+    recognize(id: string): Promise<string>;
   };
   capabilities: Capabilities;
 }

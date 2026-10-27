@@ -22,7 +22,8 @@
  * - `pasteMany`：多条记录按列表顺序用换行拼成一段再贴出去。
  *
  * 诚实降级（Global Constraints「不假装」）：
- * - `helper.available === false` → **不调** `helper.paste`，直接 `send-failed`；
+ * - 可用性判断**只在 helper 层做**：编排层不预判 `helper.available`，一律交给
+ *   `helper.paste()`（它内部会按需重启助手），失败就如实返回 `send-failed`；
  * - 记录不存在 / 图片路径缺失 / 图片文件读不出来 → 都不假装「已复制」；
  * - 文件记录的路径列表空了（记录还在、文件信息丢了）→ `missing`，不当成功；
  * - 剪贴板被别的进程锁住（writer 抛异常）→ 中止，不 touch、不消耗目标。
@@ -94,7 +95,7 @@ export interface PasteServiceDeps {
 
 /** 内容已进剪贴板、但这次不注入：界面提示「已复制，按 Ctrl+V 粘贴」（spec §7.2 码 1/3）。 */
 const COPY_ONLY: PasteResult = { ok: false, reason: 'no-target' };
-/** 助手不可用 / 编排失败：诚实回退为「已复制，但自动粘贴失败，请按 Ctrl+V」。 */
+/** 助手注入失败（不可用 / 重启后仍失败 / 编排意外）：诚实回退为「已复制，但自动粘贴失败，请按 Ctrl+V」。 */
 const SEND_FAILED: PasteResult = { ok: false, reason: 'send-failed' };
 /** 记录还在，但内容 / 文件路径已经丢了：不能报成「已复制」（那不是复制成功，是数据缺失）。 */
 const MISSING: PasteResult = { ok: false, reason: 'missing' };
@@ -342,9 +343,8 @@ export class PasteService {
     if (!this.getSettings().autoPaste) return COPY_ONLY;
     if (hwnd === null) return COPY_ONLY;
 
-    // ⑥ 助手不可用：不调用 paste()，直接诚实回退（exe 缺失/编译失败的降级路径）
-    if (!this.helper.available) return SEND_FAILED;
-
+    // ⑥ 注入：可用性判断交给 helper 层（它自己会 ensureChild 重启；exe 缺失时
+    //    直接返回 send-failed）。编排层再拦一道会挡住「助手已死但可自愈」的情形。
     try {
       return await this.helper.paste(hwnd);
     } catch {

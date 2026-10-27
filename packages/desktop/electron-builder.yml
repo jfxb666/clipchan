@@ -96,6 +96,31 @@ files:
   - '!node_modules/idb-keyval/**'
   - '!node_modules/lodash.isequal/**'
   - '!node_modules/@clipchan/**'
+  # ★ 瘦身（v1.0.0 启动速度）：tesseract.js-core 的 6 个「非 LSTM」变体共 10.1MB，
+  #   运行时永远不会被 require。依据：electron/ocr.ts 的 createWorker 把 oem 固定传 1
+  #   （OEM.LSTM_ONLY），而 tesseract.js@7.0.0 的 src/worker-script/node/getCore.js:11-38
+  #   只在 oem 为 DEFAULT/LSTM_ONLY 时 require 三个 '-lstm' 结尾的变体
+  #   （relaxedsimd-lstm / simd-lstm / lstm），非 lstm 的那份走不到。
+  #   ★ 三个 lstm 变体的 .wasm 与同名 glue .js 必须一个字节都不动：
+  #   到底挑 relaxed-simd / simd / 无 哪个，取决于运行机器的 wasm-feature-detect 结果。
+  - '!**/tesseract.js-core/tesseract-core.wasm'
+  - '!**/tesseract.js-core/tesseract-core-simd.wasm'
+  - '!**/tesseract.js-core/tesseract-core-relaxedsimd.wasm'
+  - '!**/tesseract.js-core/tesseract-core.js'
+  - '!**/tesseract.js-core/tesseract-core-simd.js'
+  - '!**/tesseract.js-core/tesseract-core-relaxedsimd.js'
+  # ★ tesseract.js 自身的浏览器产物与文档（约 1.1MB）。package.json 的 main 是
+  #   src/index.js，我们的 worker 走 src/worker-script/node/*；
+  #   全仓唯一引用 dist/worker.min.js 的是 src/worker/browser/defaultOptions.js，
+  #   浏览器分支在本项目不会被加载。docs/ 是图片与 markdown，纯文档。
+  - '!**/tesseract.js/dist/**'
+  - '!**/tesseract.js/docs/**'
+  - '!**/tesseract.js/README.md'
+  # ★ node-addon-api 整包 0.4MB，全是 C++ 头文件与 tools/*.js 脚本。better-sqlite3@13.0.3
+  #   的 package.json 把它列为 dependencies，但运行时 lib/binding.js 只 require
+  #   prebuilds/win32-x64.node，从不 require node-addon-api
+  #   （全仓 grep 只命中 node-addon-api/tools/*.js 的内部自引用）。
+  - '!node_modules/node-addon-api/**'
   # ★ 反过来，这几包必须留：tesseract.js 及其 Node 路径的真实依赖
   #   （src/worker-script/node/getCore.js → wasm-feature-detect + tesseract.js-core；
   #    src/worker/node/loadImage.js 与 worker-script/node/index.js → node-fetch 兜底；

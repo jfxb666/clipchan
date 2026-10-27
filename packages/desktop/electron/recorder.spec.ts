@@ -8,7 +8,7 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from './db';
 import { Recorder, normalizeSourceApp } from './recorder';
 import { ClipboardWatcher, RICH_HTML_MAX, type ClipboardLike } from './watcher';
@@ -442,5 +442,76 @@ describe('图片预算淘汰（imageBudgetMB）', () => {
       expect(existsSync(join(imagesDir(dataDir), gone + '.jpg'))).toBe(false);
       expect(existsSync(join(thumbsDir(dataDir), gone + '.png'))).toBe(false);
     }
+  });
+});
+
+describe('图片感知哈希（v1.1.0 phash）', () => {
+  /**
+   * 带 toBitmap 的假图：横向渐变，保证相邻列有明暗差（dHash 才不是全 0）。
+   * ★ 像素按 **BGRA** 填 —— 与 Electron 的 toBitmap() 一致，imagePhash 内部会换序。
+   */
+  function imageWithBitmap(w: number, h: number): NativeImageLike {
+    const buf = Buffer.alloc(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const v = Math.round((x / Math.max(1, w - 1)) * 255);
+        buf[i] = v;
+        buf[i + 1] = v;
+        buf[i + 2] = v;
+        buf[i + 3] = 255;
+      }
+    }
+    return {
+      isEmpty: () => false,
+      getSize: () => ({ width: w, height: h }),
+      resize: () => imageWithBitmap(w, h),
+      toPNG: () => Buffer.from(buf),
+      toJPEG: () => Buffer.from(buf),
+      hasAlpha: false,
+      toBitmap: () => Buffer.from(buf),
+    };
+  }
+
+  it('给了 toBitmap 时 insertImage 收到 phash，且库里那一列有值', () => {
+    const rec = makeRecorder();
+    const result = rec.recordImage(imageWithBitmap(16, 16));
+    expect(result).not.toBeNull();
+
+    const row = db.getRow(result!.id)!;
+    // dhash 固定 16 个十六进制字符；横向渐变不是纯色，所以不该是全 0
+    expect(typeof row.phash).toBe('string');
+    expect(row.phash).toMatch(/^[0-9a-f]{16}$/);
+    expect(row.phash).not.toBe('0000000000000000');
+  });
+
+  it('没给 toBitmap 时 meta 里根本不带 phash 这个键', () => {
+    const spy = vi.spyOn(db, 'insertImage');
+    const rec = makeRecorder();
+    rec.recordImage(fakeImage(8, 8));
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    const meta = spy.mock.calls[0]![0] as unknown as Record<string, unknown>;
+    // ★ 断言"键不存在"而不是"值为 undefined"：ImageMeta.phash 可选，
+    //   多写一个 phash: undefined 会让 db 层多走一次无意义的分支。
+    expect('phash' in meta).toBe(false);
+    spy.mockRestore();
+  });
+
+  it('toBitmap 抛异常时照样入库，不往外抛', () => {
+    const img = imageWithBitmap(8, 8);
+    const boom: NativeImageLike = {
+      ...img,
+      toBitmap: () => {
+        throw new Error('位图接口在异常图片上抛错是正常的');
+      },
+    };
+    const rec = makeRecorder();
+
+    const result = rec.recordImage(boom);
+    expect(result).not.toBeNull();
+    expect(db.getRow(result!.id)!.phash).toBeNull();
+    // 记录成功就不该留失败日志（这是"附属计算失败"，不是"记录失败"）
+    expect(logs.some((m) => m.includes('图片记录失败'))).toBe(false);
   });
 });

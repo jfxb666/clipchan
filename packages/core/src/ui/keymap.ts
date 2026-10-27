@@ -7,7 +7,8 @@
  *
  * 判定顺序与旧版 / 早前 App.tsx 内联实现逐条一致（顺序本身是行为的一部分）：
  *   Esc 隐藏 -> Ctrl+F 聚焦搜索 -> Ctrl+M 拼接 -> Ctrl+D 收藏 -> Delete 删除
- *   -> 搜索框内 ↑/↓ 跳出到列表（其余按键不拦）-> ↑/↓ 移动 -> Enter 粘贴。
+ *   -> 搜索框内 ↑/↓ 跳出到列表（其余按键不拦）-> Ctrl+Z 撤销 -> Ctrl+C 复制
+ *   -> ↑/↓ 移动 -> Ctrl+Shift+V 纯文本粘贴 -> Enter 粘贴。
  */
 export interface KeyEventLike {
   key: string;
@@ -32,6 +33,7 @@ export type KeyAction =
   | { type: 'clear-unpinned' }
   | { type: 'remove-selected' }
   | { type: 'move'; delta: number; fromSearch?: boolean }
+  | { type: 'copy' }
   | { type: 'paste' }
   | { type: 'paste-plain' }
   | { type: 'undo' }
@@ -66,6 +68,13 @@ export function resolveKey(event: KeyEventLike, ctx: KeyContext): KeyAction {
   //   撤销输入，抢过来会把用户刚打的字换回上一版。这与 ↑/↓ 在搜索框里不移动选中
   //   是同一条约定（输入框优先）。
   if (mod && (key === 'z' || key === 'Z')) return { type: 'undo' };
+
+  // ★ Ctrl+C 同样放在 inSearch 分支之后：搜索框里 Ctrl+C 是输入框自己的复制，
+  //   抢过来会把用户选中的搜索词换成列表里某一条。没有选中就返回 none —— 没东西
+  //   可复制时不该拦按键（与 Ctrl+D 同一条约定）。
+  if (mod && (key === 'c' || key === 'C')) {
+    return ctx.selectedIds.length > 0 ? { type: 'copy' } : { type: 'none' };
+  }
 
   if (key === 'ArrowDown') return { type: 'move', delta: 1 };
   if (key === 'ArrowUp') return { type: 'move', delta: -1 };

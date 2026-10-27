@@ -168,13 +168,27 @@ interface Waiter {
 const DISPOSE_GRACE_MS = 2000;
 /** 面板毛玻璃的默认 ABGR（半透明深色），调用方不传色值时用。 */
 const DEFAULT_ABGR = 0xcc1a1a1a;
+/** 自动重启次数上限（含指数退避），避免崩溃循环把 CPU 打满。 */
+const MAX_RESTARTS = 5;
+/** 重启退避的起始时长，按次数翻倍。 */
+const RESTART_BACKOFF_BASE_MS = 200;
+/** 重启退避的封顶时长（再久也不值得等，交给用户重启 App）。 */
+const RESTART_BACKOFF_MAX_MS = 2000;
+/** 子进程稳定存活超过这个时长就把重启计数归零（长命进程不该永久消耗额度）。 */
+const STABLE_UPTIME_MS = 30_000;
+
+/** 第 n 次重启前的冷却时长（指数退避，封顶）。 */
+function restartBackoffMs(restartsUsed: number): number {
+  if (restartsUsed <= 0) return 0;
+  return Math.min(RESTART_BACKOFF_BASE_MS * 2 ** (restartsUsed - 1), RESTART_BACKOFF_MAX_MS);
+}
 
 /**
  * 常驻助手客户端。
  *
  * 生命周期（§8.2）：懒启动；stdout 关闭即视为崩溃 → 标记不可用 → 下次需要时
- * **最多自动重启一次**，再失败就彻底关闭功能（不再反复重启）；dispose 发 QUIT，
- * 2 秒内没退就强杀。
+ * **自动重启（上限 MAX_RESTARTS 次，带指数退避）**，额度用尽才彻底关闭功能；
+ * 子进程稳定存活超过 STABLE_UPTIME_MS 就把额度归零。dispose 发 QUIT，2 秒内没退就强杀。
  *
  * 降级必须诚实：exe 不存在时 available === false，所有方法返回安全值且不抛异常。
  */
@@ -189,8 +203,14 @@ export class HelperClient {
   private disposed = false;
   /** 是否已经成功走到过 spawn 这一步。 */
   private spawnedOnce = false;
-  /** 已经用掉的自动重启次数（上限 1）。 */
+  /** 已经用掉的自动重启次数（上限 MAX_RESTARTS）。 */
   private restartsUsed = 0;
+  /** exe 是否根本不存在：此时任何重启都无意义，永远诚实降级。 */
+  private readonly exeMissing: boolean;
+  /** 上一次崩溃的时刻，用来算重启冷却。 */
+  private lastCrashAt = 0;
+  /** 当前子进程的 spawn 时刻，用来判定「稳定存活」并归零重启计数。 */
+  private spawnedAt = 0;
   private availableFlag: boolean;
 
   constructor(options: HelperClientOptions = {}) {
@@ -199,7 +219,8 @@ export class HelperClient {
     this.timeoutMs = options.timeoutMs ?? 3000;
     // 注入了假子进程工厂时不检查文件存在性（测试用）；
     // 真实 spawn 时 exe 不存在就诚实标不可用，绝不假装。
-    this.availableFlag = options.spawnImpl ? true : existsSync(this.exePath);
+    this.exeMissing = options.spawnImpl ? false : !existsSync(this.exePath);
+    this.availableFlag = !this.exeMissing;
   }
 
   /** 助手当前是否可用。 */
@@ -218,7 +239,7 @@ export class HelperClient {
     try {
       child.stdin?.write('PING prewarm\n');
     } catch {
-      this.markDead();
+      this.markDead(child);
     }
   }
 
@@ -355,17 +376,30 @@ export class HelperClient {
   // ---- 内部实现 ----
 
   /**
-   * 确保有一个活着的子进程。懒启动；崩溃后最多重启一次；再失败返回 null。
+   * 确保有一个活着的子进程。懒启动；崩溃后按指数退避自动重启，额度用尽才返回 null。
    */
   private ensureChild(): ChildProcess | null {
     if (this.disposed) return null;
     if (this.child) return this.child;
-    if (this.spawnedOnce && this.restartsUsed >= 1) {
-      // 已经重启过一次仍然不行：彻底放弃，不再反复重启（§8.2）。
+    if (this.exeMissing) {
+      // exe 根本不存在：重启多少次都没用，直接诚实降级。
       this.availableFlag = false;
       return null;
     }
-    if (this.spawnedOnce) this.restartsUsed += 1;
+    if (this.spawnedOnce) {
+      if (this.restartsUsed >= MAX_RESTARTS) {
+        // 额度用尽：彻底放弃，不再反复重启（§8.2）。
+        this.availableFlag = false;
+        return null;
+      }
+      // ★ 冷却期内不 spawn：崩溃循环时每次调用都立即重启会把 CPU 打满。
+      //   这里只是「这次暂时不可用」，不消耗额度，冷却一过就能自愈。
+      if (Date.now() - this.lastCrashAt < restartBackoffMs(this.restartsUsed)) {
+        this.availableFlag = false;
+        return null;
+      }
+      this.restartsUsed += 1;
+    }
     this.spawnedOnce = true;
 
     let child: ChildProcess;
@@ -373,11 +407,13 @@ export class HelperClient {
       child = this.spawnImpl(this.exePath, ['--serve']);
     } catch {
       this.availableFlag = false;
+      this.lastCrashAt = Date.now();
       return null;
     }
     this.child = child;
     this.availableFlag = true;
     this.stdoutBuffer = '';
+    this.spawnedAt = Date.now();
     this.attach(child);
     return child;
   }
@@ -387,10 +423,10 @@ export class HelperClient {
       this.consume(String(chunk));
     });
     // stdout 关闭 = 助手没了（崩溃检测的唯一可靠信号）。
-    child.stdout?.on('close', () => this.markDead());
-    child.stdout?.on('end', () => this.markDead());
-    child.once('error', () => this.markDead());
-    child.once('exit', () => this.markDead());
+    child.stdout?.on('close', () => this.markDead(child));
+    child.stdout?.on('end', () => this.markDead(child));
+    child.once('error', () => this.markDead(child));
+    child.once('exit', () => this.markDead(child));
   }
 
   /** 按换行切分并逐行解析；最后一段不完整的行留在缓冲区。 */
@@ -449,10 +485,22 @@ export class HelperClient {
     });
   }
 
-  /** 子进程没了：标记不可用、清掉当前子进程、让所有等待者拿到安全值。 */
-  private markDead(): void {
+  /**
+   * 子进程没了：标记不可用、清掉当前子进程、让所有等待者拿到安全值。
+   *
+   * ★ 必须带着「是哪个子进程」：旧子进程迟到的 close/exit 不能误杀刚重启起来的新进程，
+   *   否则重启次数越多越容易自杀。
+   */
+  private markDead(child: ChildProcess): void {
     if (this.disposed) return;
+    if (this.child !== child) return;
+    // 稳定跑够久说明这次崩溃是偶发，把重启额度还回去。
+    if (this.spawnedAt > 0 && Date.now() - this.spawnedAt >= STABLE_UPTIME_MS) {
+      this.restartsUsed = 0;
+    }
     this.child = null;
+    this.spawnedAt = 0;
+    this.lastCrashAt = Date.now();
     this.availableFlag = false;
     this.settleAll(null);
   }

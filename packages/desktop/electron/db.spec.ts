@@ -3,8 +3,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_SETTINGS } from '@clipchan/core';
-import { SCHEMA_VERSION, SNIPPET_LIMIT, buildSearchIndex, openDb } from './db';
+import { DEFAULT_SETTINGS, parseSearch } from '@clipchan/core';
+import {
+  SCHEMA_VERSION,
+  SIMILAR_HAMMING_THRESHOLD,
+  SNIPPET_LIMIT,
+  buildSearchIndex,
+  hammingDistance,
+  openDb,
+} from './db';
 import type { Db } from './db';
 
 const opened: Db[] = [];
@@ -1189,3 +1196,928 @@ describe('v0.6.0：片段库（P1-6）', () => {
   });
 });
 
+/** v0.6.0 形态的库：items 已有 search_index 等列，但还没有 tags/folder_id（user_version=3）。 */
+function seedV3Db(file: string): void {
+  const old = new Database(file);
+  old.exec(`
+    CREATE TABLE items (
+      id TEXT PRIMARY KEY, kind TEXT NOT NULL, content TEXT, content_hash TEXT,
+      image_path TEXT, image_hash TEXT, thumb_path TEXT,
+      width INTEGER, height INTEGER, bytes INTEGER,
+      source TEXT NOT NULL DEFAULT 'clip', pinned INTEGER NOT NULL DEFAULT 0,
+      truncated INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, seq INTEGER NOT NULL,
+      deleted_at INTEGER, source_app TEXT, file_paths TEXT, rich_html TEXT, search_index TEXT
+    );
+    CREATE UNIQUE INDEX idx_content_hash ON items(content_hash) WHERE content_hash IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX idx_image_hash   ON items(image_hash)   WHERE image_hash   IS NOT NULL AND deleted_at IS NULL;
+    CREATE INDEX idx_order ON items(pinned DESC, created_at DESC, seq DESC);
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  `);
+  old.prepare(
+    'INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq, search_index) VALUES (?,?,?,?,?,?,?,?,?,?)',
+  ).run('e'.repeat(32), 'text', '升级前的老行', 'hash-v3', 'clip', 0, 0, 1000, 1, 'shengjiqianlaohang');
+  old.pragma('user_version = 3');
+  old.close();
+}
+
+/** 从平表里按名字取文件夹：createFolder 的返回顺序由 created_at 决定，同毫秒建的两个不能靠下标。 */
+function folderNamed(list: ReturnType<Db['listFolders']>, name: string) {
+  const found = list.find((f) => f.name === name);
+  if (!found) throw new Error('没建出文件夹：' + name);
+  return found;
+}
+
+/**
+ * v1.0.0 ⑥ 智能整理 + ⑧ 搜索升级的库层。
+ *
+ * ★ 除「列是否真的落盘」这类断言外一律走公开 API：以后若把标签拆成关联表，
+ *   这些用例不该跟着重写。
+ */
+describe('v1.0.0 ⑥：schema v4（标签 + 文件夹）', () => {
+  it('全新库：版本 5，tags/folder_id 两列与 folders 表、索引就位', () => {
+    const db = mem();
+    expect(SCHEMA_VERSION).toBe(5);
+    expect(db.raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+
+    const cols = new Set(
+      (db.raw.prepare('PRAGMA table_info(items)').all() as { name: string }[]).map((c) => c.name),
+    );
+    expect(cols.has('tags')).toBe(true);
+    expect(cols.has('folder_id')).toBe(true);
+
+    const table = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='folders'")
+      .get() as { name: string } | undefined;
+    expect(table?.name).toBe('folders');
+
+    const idx = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_items_folder'")
+      .get() as { name: string } | undefined;
+    expect(idx?.name).toBe('idx_items_folder');
+
+    // 文件夹树的父子查找走 parent_id，没有这条索引就只能全表扫
+    const parentIdx = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_folders_parent'")
+      .get() as { name: string } | undefined;
+    expect(parentIdx?.name).toBe('idx_folders_parent');
+  });
+
+  it('v3 老库升级到 v4：补两列、建 folders 表，老数据与搜索不受影响', () => {
+    const file = join(tmpDir(), 'clipchan.db');
+    seedV3Db(file);
+
+    const db = openDb(file);
+    opened.push(db);
+
+    expect(db.raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+
+    const cols = new Set(
+      (db.raw.prepare('PRAGMA table_info(items)').all() as { name: string }[]).map((c) => c.name),
+    );
+    expect(cols.has('tags')).toBe(true);
+    expect(cols.has('folder_id')).toBe(true);
+
+    const table = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='folders'")
+      .get() as { name: string } | undefined;
+    expect(table?.name).toBe('folders');
+
+    // 迁移不该动老行：还在列表里，两列是 NULL（= 无标签、未归类）
+    const row = db.getRow('e'.repeat(32))!;
+    expect(row.tags).toBeNull();
+    expect(row.folder_id).toBeNull();
+    expect(db.list()).toHaveLength(1);
+    expect(db.list({ q: '老行' })).toHaveLength(1);
+    // 升级后老库也能立刻用上新表
+    expect(db.listFolders()).toEqual([]);
+    expect(db.createFolder({ name: '升级后新建' })).toHaveLength(1);
+  });
+});
+
+describe('v1.0.0 ⑥：标签', () => {
+  it('setTags 归一化：去 # / 压空白 / 截 24 码点 / 去重 / 丢含引号与反斜杠 / 空数组存 NULL', () => {
+    const db = mem();
+    const a = db.insertText('打标签的记录', { now: 1000 });
+
+    // '  #代码 ' 归一后与 '#代码' 相同 → 去重；含 " 与 \ 的会被丢掉（否则 LIKE 过滤会误判）
+    db.setTags(a.id, ['#代码', '  #代码 ', 'JSON', 'a"b', 'c\\d', '   ']);
+    expect(db.getTags(a.id)).toEqual(['代码', 'JSON']);
+
+    // 按码点切 24，不是按 UTF-16 单元
+    db.setTags(a.id, ['标'.repeat(30)]);
+    expect(db.getTags(a.id)).toEqual(['标'.repeat(24)]);
+
+    db.setTags(a.id, []);
+    const stored = db.raw.prepare('SELECT tags FROM items WHERE id = ?').get(a.id) as {
+      tags: string | null;
+    };
+    expect(stored.tags).toBeNull();
+    expect(db.getTags(a.id)).toEqual([]);
+  });
+
+  it('DTO：有标签才给 tags 字段，清空后字段整个消失', () => {
+    const db = mem();
+    const a = db.insertText('甲', { now: 1000 });
+    // ★ 断言的是"键不存在"而不是"值为 undefined"：IPC 结构化克隆会保留 undefined 键，
+    //   界面用 'tags' in dto 判断有没有标签，两者必须真的等价。
+    expect('tags' in db.list()[0]!).toBe(false);
+    expect(db.list()[0]!.tags).toBeUndefined();
+
+    db.setTags(a.id, ['代码']);
+    expect('tags' in db.list()[0]!).toBe(true);
+    expect(db.list()[0]!.tags).toEqual(['代码']);
+
+    db.setTags(a.id, []);
+    expect('tags' in db.list()[0]!).toBe(false);
+    expect(db.list()[0]!.tags).toBeUndefined();
+  });
+
+  it('list({tags}) 是 AND 语义，且能与 kind / q 叠加', () => {
+    const db = mem();
+    const both = db.insertText('function a() {}', { now: 1000 });
+    const codeOnly = db.insertText('const b = 1;', { now: 2000 });
+    const link = db.insertText('https://example.com/doc', { now: 3000 });
+    db.setTags(both.id, ['代码', 'JSON']);
+    db.setTags(codeOnly.id, ['代码']);
+    db.setTags(link.id, ['代码', 'JSON']);
+
+    expect(db.list({ tags: ['代码'] }).map((x) => x.id).sort()).toEqual(
+      [both.id, codeOnly.id, link.id].sort(),
+    );
+    // 两个标签要同时命中：只有 codeOnly 缺 JSON，被排除
+    expect(db.list({ tags: ['代码', 'JSON'] }).map((x) => x.id).sort()).toEqual([both.id, link.id].sort());
+    expect(db.count({ tags: ['代码', 'JSON'] })).toBe(2);
+
+    expect(db.list({ tags: ['代码', 'JSON'], kind: 'link' }).map((x) => x.id)).toEqual([link.id]);
+    expect(db.list({ tags: ['代码'], q: 'const' }).map((x) => x.id)).toEqual([codeOnly.id]);
+
+    // 空数组 / 非数组标签等于不加条件
+    expect(db.list({ tags: [] })).toHaveLength(3);
+    expect(db.list({ tags: ['   '] })).toHaveLength(3);
+  });
+
+  it('★ 过滤按 JSON 元素边界匹配：["ab"] 不会命中 ["abc"]', () => {
+    const db = mem();
+    const short = db.insertText('短标签', { now: 1000 });
+    const long = db.insertText('长标签', { now: 2000 });
+    db.setTags(short.id, ['ab']);
+    db.setTags(long.id, ['abc']);
+
+    // 库里存 ["ab"] / ["abc"]，条件串是 '"ab"'：前缀相同的 'abc' 不该被误命中
+    expect(db.list({ tags: ['ab'] }).map((x) => x.id)).toEqual([short.id]);
+    expect(db.list({ tags: ['abc'] }).map((x) => x.id)).toEqual([long.id]);
+
+    // AND 语义下一条记录不可能既是 ["ab"] 又是 ["abc"]
+    expect(db.list({ tags: ['ab', 'abc'] })).toEqual([]);
+    expect(db.count({ tags: ['ab', 'abc'] })).toBe(0);
+  });
+
+  it('★ 脏数据兜底：坏 JSON / 非数组 / 非字符串元素都不让整页读不出来', () => {
+    const db = mem();
+    const badJson = db.insertText('坏 JSON', { now: 1000 });
+    const notArray = db.insertText('非数组', { now: 2000 });
+    const mixed = db.insertText('混了非字符串', { now: 3000 });
+    const writeRaw = (id: string, v: string) =>
+      db.raw.prepare('UPDATE items SET tags = ? WHERE id = ?').run(v, id);
+    // 直接写原始列，模拟 setTags 之前（或别的版本）留下的脏行
+    writeRaw(badJson.id, '{不是 JSON');
+    writeRaw(notArray.id, '"一个字符串"');
+    writeRaw(mixed.id, '["代码", 42, "", null, "JSON"]');
+
+    // ★ parseTags 对坏数据一律回 []：这些行只是"没有标签"，不是"读列表时抛异常"
+    for (const id of [badJson.id, notArray.id]) {
+      expect('tags' in db.list().find((x) => x.id === id)!).toBe(false);
+      expect(db.getTags(id)).toEqual([]);
+    }
+    // 非字符串与空串元素丢掉，好的照留
+    expect(db.getTags(mixed.id)).toEqual(['代码', 'JSON']);
+    // 脏行不该把筛选面板的计数弄错（这里只数到 mixed 那一条）
+    expect(db.listTags().map((t) => t.tag).sort()).toEqual(['JSON', '代码'].sort());
+    expect(db.listTags().every((t) => t.count === 1)).toBe(true);
+  });
+
+  it('回收站往返不动标签：remove 只是软删，restore 后标签原样回来', () => {
+    const db = mem();
+    const a = db.insertText('带标签的记录', { now: 1000 });
+    db.setTags(a.id, ['代码', 'JSON']);
+
+    db.remove(a.id);
+    // 回收站里的记录不进统计（面板枚举的是活跃记录）
+    expect(db.listTags()).toEqual([]);
+    // 但标签列本身没被删
+    expect(db.getTags(a.id)).toEqual(['代码', 'JSON']);
+
+    expect(db.restore(a.id)).toBe(true);
+    expect(db.getTags(a.id)).toEqual(['代码', 'JSON']);
+    expect(db.listTags()).toEqual([
+      { tag: '代码', count: 1 },
+      { tag: 'JSON', count: 1 },
+    ]);
+  });
+});
+
+describe('v1.0.0 ⑥：文件夹与 folderId 三态', () => {
+  it('folderId：string=该文件夹、null=只看未归类、undefined=不限', () => {
+    const db = mem();
+    const f = db.createFolder({ name: '归类' })[0]!;
+    const inside = db.insertText('已归类', { now: 1000 });
+    const outside = db.insertText('未归类', { now: 2000 });
+    db.setFolder(inside.id, f.id);
+
+    expect(db.list({ folderId: f.id }).map((x) => x.id)).toEqual([inside.id]);
+    expect(db.list({ folderId: null }).map((x) => x.id)).toEqual([outside.id]);
+    expect(db.list().map((x) => x.id)).toEqual([outside.id, inside.id]);
+    // ★ 显式传 undefined 必须等于"没传"，不能退化成"未归类"
+    expect(db.list({ folderId: undefined })).toHaveLength(2);
+
+    expect(db.count({ folderId: f.id })).toBe(1);
+    expect(db.count({ folderId: null })).toBe(1);
+    expect(db.list()[0]!.folderId).toBeUndefined();
+    expect(db.list().find((x) => x.id === inside.id)!.folderId).toBe(f.id);
+  });
+
+  it('setFolder 指向不存在的文件夹时落 NULL；id 不存在时静默无操作', () => {
+    const db = mem();
+    const f = db.createFolder({ name: '存在' })[0]!;
+    const a = db.insertText('甲', { now: 1000 });
+
+    db.setFolder(a.id, 'ghost-folder');
+    // 悬空 id 会让记录从界面彻底消失，所以宁可当"未归类"
+    expect(db.getRow(a.id)!.folder_id).toBeNull();
+    expect(db.list({ folderId: null }).map((x) => x.id)).toEqual([a.id]);
+
+    db.setFolder(a.id, f.id);
+    expect(db.getRow(a.id)!.folder_id).toBe(f.id);
+    db.setFolder(a.id, null);
+    expect(db.getRow(a.id)!.folder_id).toBeNull();
+
+    expect(() => db.setFolder('不存在的记录', f.id)).not.toThrow();
+    expect(() => db.setTags('不存在的记录', ['代码'])).not.toThrow();
+    expect(db.getTags('不存在的记录')).toEqual([]);
+  });
+
+  it('folderId 指向不存在的文件夹时是空列表，不退化成"不限"', () => {
+    const db = mem();
+    db.insertText('甲', { now: 1000 });
+    db.insertText('乙', { now: 2000 });
+
+    // ★ 传了一个已被删掉的 folderId（另一个窗口刚删完）时，宁可空列表也不能
+    //   悄悄返回全部——那会让用户以为"这个文件夹里有 200 条"。
+    expect(db.list({ folderId: 'ghost-folder' })).toEqual([]);
+    expect(db.count({ folderId: 'ghost-folder' })).toBe(0);
+    // 空串是 string 分支：同样不该命中任何行（记录里存的是 NULL，不是 ''）
+    expect(db.list({ folderId: '' })).toEqual([]);
+  });
+});
+
+describe('v1.0.0 ⑧：时间范围含端点', () => {
+  it('from/to 两端都闭合，count 与 list 同一套条件', () => {
+    const db = mem();
+    const t1 = 1000;
+    const t2 = 2000;
+    const t3 = 3000;
+    const a = db.insertText('最早', { now: t1 });
+    const b = db.insertText('中间', { now: t2 });
+    const c = db.insertText('最晚', { now: t3 });
+
+    // 端点正好压在两条记录的时间戳上：两条都要在
+    expect(db.list({ time: { from: t1, to: t2 } }).map((x) => x.id)).toEqual([b.id, a.id]);
+    expect(db.list({ time: { from: t2 } }).map((x) => x.id)).toEqual([c.id, b.id]);
+    expect(db.list({ time: { to: t2 } }).map((x) => x.id)).toEqual([b.id, a.id]);
+    expect(db.count({ time: { from: t1, to: t2 } })).toBe(2);
+    expect(db.count({ time: { from: t3 + 1 } })).toBe(0);
+    // 非法值（NaN/字符串）当没给
+    expect(db.list({ time: { from: Number.NaN } })).toHaveLength(3);
+  });
+
+  it('parseSearch 解析出的 time 能直接喂给 list', () => {
+    const db = mem();
+    const t1 = new Date(2024, 0, 1, 12, 0, 0).getTime();
+    const t2 = new Date(2024, 0, 2, 12, 0, 0).getTime();
+    const t3 = new Date(2024, 0, 3, 12, 0, 0).getTime();
+    const a = db.insertText('一月一日', { now: t1 });
+    const b = db.insertText('一月二日', { now: t2 });
+    const c = db.insertText('一月三日', { now: t3 });
+
+    const spec = parseSearch('after:2024-01-02 before:2024-01-02');
+    expect(spec.errors).toEqual([]);
+    expect(spec.expr).toBeUndefined();
+
+    // after 取当日 00:00:00.000、before 取当日 23:59:59.999 → 只落在二日那条
+    expect(db.list({ time: spec.time }).map((x) => x.id)).toEqual([b.id]);
+    expect(db.count({ time: spec.time })).toBe(1);
+    expect(db.list({ time: { from: t1, to: t3 } })).toHaveLength(3);
+    expect(db.list({ time: { from: t1, to: t3 } }).map((x) => x.id)).toEqual([c.id, b.id, a.id]);
+  });
+
+  it('只给 from 或只给 to 时是单边过滤，另一端不限', () => {
+    const db = mem();
+    const a = db.insertText('早', { now: 1000 });
+    const b = db.insertText('中', { now: 2000 });
+    const c = db.insertText('晚', { now: 3000 });
+
+    expect(db.list({ time: { from: 2000 } }).map((x) => x.id)).toEqual([c.id, b.id]);
+    expect(db.list({ time: { to: 2000 } }).map((x) => x.id)).toEqual([b.id, a.id]);
+    // 缺端 / 空对象 / undefined 都等于不限，不能退化成"到 0"或"从现在起"
+    expect(db.list({ time: {} })).toHaveLength(3);
+    expect(db.list({ time: undefined })).toHaveLength(3);
+    expect(db.count({ time: { from: 3000 } })).toBe(1);
+    expect(db.count({ time: { to: 1000 } })).toBe(1);
+  });
+});
+
+describe('v1.0.0 ⑧：结构化搜索（expr 走应用层求值）', () => {
+  it('逐行 matchSearch 判定，count 与 list 条数一致', () => {
+    const db = mem();
+    const hit = db.insertText('bar foo', { now: 1000 });
+    db.insertText('foo bar', { now: 2000 });
+    db.insertText('foo', { now: 3000 });
+    db.insertText('bar', { now: 4000 });
+
+    const spec = parseSearch('foo AND /^ba/');
+    expect(spec.errors).toEqual([]);
+    const expr = spec.expr!;
+
+    const rows = db.list({ expr });
+    // /^ba/ 是"以 ba 开头"：'foo bar' 里的 bar 不算命中——这正是 SQL LIKE 做不到的部分
+    expect(rows.map((x) => x.id)).toEqual([hit.id]);
+    expect(db.count({ expr })).toBe(rows.length);
+
+    expect(db.list({ expr: parseSearch('NOT foo').expr! }).map((x) => x.preview)).toEqual(['bar']);
+    expect(db.list({ expr: parseSearch('foo OR bar').expr! })).toHaveLength(4);
+  });
+
+  it('expr 与 q 同时给时以 expr 为准（不再叠一层 LIKE）', () => {
+    const db = mem();
+    const a = db.insertText('foo', { now: 1000 });
+    db.insertText('bar', { now: 2000 });
+    const expr = parseSearch('foo').expr!;
+    expect(db.list({ q: '根本不存在的词', expr }).map((x) => x.id)).toEqual([a.id]);
+    expect(db.count({ q: '根本不存在的词', expr })).toBe(1);
+  });
+
+  it('expr 时 limit/offset 在命中之后切片，夹取规则与 SQL 路径一致', () => {
+    const db = mem();
+    for (let i = 1; i <= 5; i += 1) db.insertText('foo ' + i, { now: 1000 * i });
+    const expr = parseSearch('foo').expr!;
+
+    expect(db.list({ expr }).map((x) => x.preview)).toEqual(['foo 5', 'foo 4', 'foo 3', 'foo 2', 'foo 1']);
+    expect(db.list({ expr, limit: 2 }).map((x) => x.preview)).toEqual(['foo 5', 'foo 4']);
+    expect(db.list({ expr, limit: 2, offset: 2 }).map((x) => x.preview)).toEqual(['foo 3', 'foo 2']);
+    expect(db.list({ expr, limit: 2, offset: 4 }).map((x) => x.preview)).toEqual(['foo 1']);
+    expect(db.list({ expr, limit: 2, offset: 99 })).toEqual([]);
+    // limit 至少 1（与 buildListSql 同一套夹取）
+    expect(db.list({ expr, limit: 0 })).toHaveLength(1);
+    // 命中总数不受分页影响
+    expect(db.count({ expr })).toBe(5);
+    // 同一个词：SQL 三路 LIKE 与应用层求值必须给出同样多的结果
+    expect(db.list({ q: 'foo' })).toHaveLength(5);
+  });
+
+  it('expr 也能命中图片行的尺寸描述', () => {
+    const db = mem();
+    const img = db.insertImage(
+      { imagePath: 'images/i1.jpg', thumbPath: 'thumbs/i1.png', width: 1920, height: 1080, bytes: 187392, hash: 'hash-expr-i1' },
+      { now: 1000 },
+    );
+    db.insertText('纯文本行', { now: 2000 });
+
+    const expr = parseSearch('/^图片/').expr!;
+    expect(db.list({ expr }).map((x) => x.id)).toEqual([img.id]);
+    expect(db.count({ expr })).toBe(1);
+  });
+
+  it('re: 正则分别命中 content 与 search_index 两路', () => {
+    const db = mem();
+    const code = db.insertText('const token = 1;', { now: 1000 });
+    // 中文行 content 里没有拼音，只有 search_index 带拼音——用来验证第二路
+    const chinese = db.insertText('工作日志', { now: 2000 });
+    db.insertText('无关内容', { now: 3000 });
+
+    // 第一路：content 直接匹配（. 是任意字符，token 中间的 e 被吃掉）
+    expect(db.list({ expr: parseSearch('re:tok.n').expr! }).map((x) => x.id)).toEqual([code.id]);
+    // 第二路：content 里没有 'gongzuo'，命中只能来自 buildSearchIndex 写进去的拼音
+    expect(db.list({ expr: parseSearch('re:gongzuo').expr! }).map((x) => x.id)).toEqual([chinese.id]);
+    // 正则不命中任何一行时是空数组，不是"退化成不过滤"
+    expect(db.list({ expr: parseSearch('re:zzz').expr! })).toEqual([]);
+    expect(db.count({ expr: parseSearch('re:zzz').expr! })).toBe(0);
+  });
+
+  it('★ 布尔 NOT / OR 与括号按优先级求值（应用层才做得到）', () => {
+    const db = mem();
+    const apple = db.insertText('apple', { now: 1000 });
+    const banana = db.insertText('banana', { now: 2000 });
+    db.insertText('cherry', { now: 3000 });
+
+    // 括号把 NOT 绑在 banana 上：apple 命中 OR 左侧；banana 命中右侧；cherry 两侧都不中
+    const spec = parseSearch('apple OR (banana NOT cherry)');
+    expect(spec.errors).toEqual([]);
+    expect(db.list({ expr: spec.expr! }).map((x) => x.id)).toEqual([banana.id, apple.id]);
+    expect(db.count({ expr: spec.expr! })).toBe(2);
+
+    // 去掉括号就是另一套语义：(apple OR banana) NOT cherry —— 结果恰好一样，
+    // 但 NOT 的否定域变了，这里靠 NOT cherry 单独成立来确认 NOT 不是"整句取反"
+    expect(db.list({ expr: parseSearch('NOT cherry').expr! }).map((x) => x.id)).toEqual([banana.id, apple.id]);
+  });
+
+  it('expr 与 tags / folderId 叠加：先 SQL 收窄再应用层求值', () => {
+    const db = mem();
+    const folder = folderNamed(db.createFolder({ name: '工作' }), '工作');
+    const inFolder = db.insertText('foo 在文件夹里', { now: 1000 });
+    const tagged = db.insertText('foo 带标签', { now: 2000 });
+    db.insertText('foo 什么都没有', { now: 3000 });
+    db.setFolder(inFolder.id, folder.id);
+    db.setTags(tagged.id, ['重要']);
+
+    const expr = parseSearch('foo').expr!;
+    // SQL 侧先按 folderId 收窄，应用层只对候选行求值
+    expect(db.list({ expr, folderId: folder.id }).map((x) => x.id)).toEqual([inFolder.id]);
+    expect(db.list({ expr, tags: ['重要'] }).map((x) => x.id)).toEqual([tagged.id]);
+    // 两个条件同时给是交集
+    expect(db.list({ expr, tags: ['重要'], folderId: folder.id })).toEqual([]);
+    // 不加任何收窄条件时三行都在
+    expect(db.count({ expr })).toBe(3);
+  });
+
+  it('expr 命中时 count 返回命中总数而不是分页长度', () => {
+    const db = mem();
+    for (let i = 1; i <= 4; i += 1) db.insertText('hit ' + i, { now: 1000 * i });
+    const expr = parseSearch('hit').expr!;
+
+    expect(db.list({ expr, limit: 1 })).toHaveLength(1);
+    // ★ 分页只影响 list 的返回条数；「共 N 条」必须说总数，否则界面上页码会少算
+    expect(db.count({ expr, limit: 1, offset: 3 })).toBe(4);
+    expect(db.count({ expr, limit: 1, offset: 99 })).toBe(4);
+  });
+
+  it('非法正则降级为文本叶子：errors 非空但不抛', () => {
+    const db = mem();
+    const literal = db.insertText('这一行里就有 [unclosed 这几个字', { now: 1000 });
+    db.insertText('普通一行', { now: 2000 });
+
+    const spec = parseSearch('re:[unclosed');
+    expect(spec.errors.length).toBeGreaterThan(0);
+    expect(spec.errors[0]).toContain('invalid-regex');
+
+    // ★ 降级后按字面量当普通文本搜：用户输错正则不该换来一个空列表 + 崩溃
+    expect(() => db.list({ expr: spec.expr! })).not.toThrow();
+    expect(db.list({ expr: spec.expr! }).map((x) => x.id)).toEqual([literal.id]);
+  });
+});
+
+describe('v1.0.0 ⑥：文件夹 CRUD', () => {
+  it('create：归一化名字、父不存在当顶层、空名不建、返回变更后的平表', () => {
+    const db = mem();
+    expect(db.listFolders()).toEqual([]);
+
+    const created = db.createFolder({ name: '工作' });
+    expect(created).toHaveLength(1);
+    const work = created[0]!;
+    expect(work.name).toBe('工作');
+    expect(work.parentId).toBeNull();
+    expect(work.itemCount).toBe(0);
+    expect(work.id.length).toBeGreaterThan(0);
+
+    // 名字与标签同一套归一：# 去掉、空白压成单空格
+    const spaced = db.createFolder({ name: '  #生活  用品 ' });
+    expect(folderNamed(spaced, '生活 用品')).toBeTruthy();
+
+    // 父不存在 → 当顶层，不抛
+    const orphan = db.createFolder({ name: '孤儿', parentId: '不存在的父' });
+    expect(folderNamed(orphan, '孤儿').parentId).toBeNull();
+
+    // 空名（含只有空白）→ 不建、原表返回
+    expect(db.createFolder({ name: '   ' })).toHaveLength(orphan.length);
+    expect(db.createFolder({ name: '#  #' })).toHaveLength(orphan.length);
+
+    const nested = db.createFolder({ name: '子目录', parentId: work.id });
+    expect(folderNamed(nested, '子目录').parentId).toBe(work.id);
+  });
+
+  it('rename：正常改名；id 不存在或新名为空 → 原表不变（不抛）', () => {
+    const db = mem();
+    const f = db.createFolder({ name: '旧名' })[0]!;
+
+    const renamed = db.renameFolder(f.id, '#新  名字');
+    expect(folderNamed(renamed, '新 名字').id).toBe(f.id);
+
+    const before = db.listFolders();
+    expect(() => db.renameFolder('不存在的 id', '随便')).not.toThrow();
+    expect(db.listFolders()).toEqual(before);
+    expect(db.renameFolder(f.id, '   ')).toEqual(before);
+  });
+
+  it('move：正常改父；成环 / 自指 / 目标不存在 / 超深 → 原表不变', () => {
+    const db = mem();
+    const a = folderNamed(db.createFolder({ name: 'A' }), 'A');
+    const b = folderNamed(db.createFolder({ name: 'B', parentId: a.id }), 'B');
+    const c = folderNamed(db.createFolder({ name: 'C', parentId: b.id }), 'C');
+
+    // 成环：把 A 挂到自己的后代 B 下面 → 整棵树会退化成环，必须拒绝
+    expect(folderNamed(db.moveFolder(a.id, b.id), 'A').parentId).toBeNull();
+    // 自指
+    expect(folderNamed(db.moveFolder(a.id, a.id), 'A').parentId).toBeNull();
+    // 目标不存在
+    expect(folderNamed(db.moveFolder(a.id, '不存在的父'), 'A').parentId).toBeNull();
+    // id 不存在
+    expect(() => db.moveFolder('不存在的 id', null)).not.toThrow();
+
+    // 超深：A(1) → B(2) → C(3)，再往下挂就第 4 层，拒绝
+    const beforeDepth = db.listFolders().length;
+    const deep = db.createFolder({ name: 'D', parentId: c.id });
+    expect(deep).toHaveLength(beforeDepth);
+    expect(deep.some((x) => x.name === 'D')).toBe(false);
+
+    // 正常路径：C 提到顶层
+    expect(folderNamed(db.moveFolder(c.id, null), 'C').parentId).toBeNull();
+    // 提到顶层后空出来的位置能再挂回来
+    expect(folderNamed(db.moveFolder(c.id, a.id), 'C').parentId).toBe(a.id);
+  });
+
+  it('remove：记录回到未归类、子文件夹提升为顶层、文件夹行删掉', () => {
+    const db = mem();
+    const root = folderNamed(db.createFolder({ name: '待删' }), '待删');
+    const kid = folderNamed(db.createFolder({ name: '子夹', parentId: root.id }), '子夹');
+    const a = db.insertText('放进文件夹的记录', { now: 1000 });
+    const b = db.insertText('放进子夹的记录', { now: 2000 });
+    db.setFolder(a.id, root.id);
+    db.setFolder(b.id, kid.id);
+
+    const after = db.removeFolder(root.id);
+    expect(after.map((x) => x.name)).not.toContain('待删');
+    expect(folderNamed(after, '子夹').parentId).toBeNull();
+
+    // ★ 记录一条都不许跟着删，只是回到未归类
+    expect(db.list()).toHaveLength(2);
+    expect(db.getRow(a.id)!.folder_id).toBeNull();
+    // 只有原属于「待删」的那条回到未归类；子夹里的那条仍归子夹
+    expect(db.list({ folderId: null }).map((x) => x.id)).toEqual([a.id]);
+    // 子夹里的记录也还在（子夹本身被提升，不是被删）
+    expect(db.getRow(b.id)!.folder_id).toBe(kid.id);
+    expect(db.list({ folderId: kid.id }).map((x) => x.id)).toEqual([b.id]);
+
+    // 删不存在的 id 不抛，表不变
+    const before = db.listFolders();
+    expect(() => db.removeFolder('不存在的 id')).not.toThrow();
+    expect(db.listFolders()).toEqual(before);
+  });
+
+  it('itemCount：只数未删且直属本文件夹的记录（不含回收站、不含子文件夹）', () => {
+    const db = mem();
+    const f = folderNamed(db.createFolder({ name: '计数' }), '计数');
+    const a = db.insertText('甲', { now: 1000 });
+    const b = db.insertText('乙', { now: 2000 });
+    db.setFolder(a.id, f.id);
+    db.setFolder(b.id, f.id);
+    expect(folderNamed(db.listFolders(), '计数').itemCount).toBe(2);
+
+    // 软删一条：回收站里的记录不该还占着文件夹的计数
+    db.remove(a.id);
+    expect(folderNamed(db.listFolders(), '计数').itemCount).toBe(1);
+
+    const kid = folderNamed(db.createFolder({ name: '子夹', parentId: f.id }), '子夹');
+    const c = db.insertText('丙', { now: 3000 });
+    db.setFolder(c.id, kid.id);
+    const flat = db.listFolders();
+    expect(folderNamed(flat, '计数').itemCount).toBe(1);
+    expect(folderNamed(flat, '子夹').itemCount).toBe(1);
+    // 平表把父子关系原样给出，树由渲染层自己搭
+    expect(folderNamed(flat, '子夹').parentId).toBe(f.id);
+  });
+});
+
+describe('v1.0.0 ⑥：listTags 标签统计（筛选面板枚举用）', () => {
+  it('多标签计数正确：数的是用到它的记录条数，不是标签出现次数', () => {
+    const db = mem();
+    const a = db.insertText('甲', { now: 1000 });
+    const b = db.insertText('乙', { now: 2000 });
+    const c = db.insertText('丙', { now: 3000 });
+    db.setTags(a.id, ['代码', 'JSON']);
+    db.setTags(b.id, ['代码']);
+    db.setTags(c.id, ['代码', 'JSON', '链接']);
+
+    expect(db.listTags()).toEqual([
+      { tag: '代码', count: 3 },
+      { tag: 'JSON', count: 2 },
+      { tag: '链接', count: 1 },
+    ]);
+  });
+
+  it('回收站里的记录不计入', () => {
+    const db = mem();
+    const a = db.insertText('甲', { now: 1000 });
+    const b = db.insertText('乙', { now: 2000 });
+    db.setTags(a.id, ['代码']);
+    db.setTags(b.id, ['代码', 'JSON']);
+    expect(db.listTags()).toEqual([
+      { tag: '代码', count: 2 },
+      { tag: 'JSON', count: 1 },
+    ]);
+
+    // 软删掉那条：它的 JSON 标签不该还挂在面板上
+    db.remove(b.id);
+    expect(db.listTags()).toEqual([{ tag: '代码', count: 1 }]);
+  });
+
+  it('同一条记录里重复的标签只算一次', () => {
+    const db = mem();
+    const a = db.insertText('甲', { now: 1000 });
+    const b = db.insertText('乙', { now: 2000 });
+    // setTags 内部会去重，这里直接写原始列，模拟 setTags 之前就存在的重复标签行
+    db.raw.prepare('UPDATE items SET tags = ? WHERE id = ?').run('["代码","代码","代码"]', a.id);
+    db.raw.prepare('UPDATE items SET tags = ? WHERE id = ?').run('["代码"]', b.id);
+
+    expect(db.listTags()).toEqual([{ tag: '代码', count: 2 }]);
+  });
+
+  it('按 count 降序；同频按 tag 升序（localeCompare zh，面板位置不抖）', () => {
+    const db = mem();
+    // 插入顺序刻意与期望顺序不同：不排序就会得到 b / a / c 的 Map 顺序
+    const first = db.insertText('甲', { now: 1000 });
+    const second = db.insertText('乙', { now: 2000 });
+    const third = db.insertText('丙', { now: 3000 });
+    db.setTags(first.id, ['b', 'a']);
+    db.setTags(second.id, ['a']);
+    db.setTags(third.id, ['c']);
+
+    expect(db.listTags()).toEqual([
+      { tag: 'a', count: 2 },
+      { tag: 'b', count: 1 },
+      { tag: 'c', count: 1 },
+    ]);
+  });
+
+  it('无标签返回 []（空库 / 记录都没标签 / 标签被清空）', () => {
+    const db = mem();
+    expect(db.listTags()).toEqual([]);
+
+    const a = db.insertText('甲', { now: 1000 });
+    expect(db.listTags()).toEqual([]);
+
+    db.setTags(a.id, []);
+    expect(db.listTags()).toEqual([]);
+  });
+});
+
+
+
+/**
+ * v1.1.0：URL 预览缓存表。
+ *
+ * ★ 这是**纯缓存**：写进去的东西随时可以清空重建，所以这里断言的重点不是"数据多重要"，
+ *   而是"同 url 不会长出两行"与"没缓存时字段根本不存在"这两件会影响调用方判断的事。
+ */
+describe('v1.1.0：url_previews 缓存表', () => {
+  const preview = (url: string, title: string, fetchedAt = 1000) => ({
+    url,
+    title,
+    domain: 'example.com',
+    iconUrl: 'https://example.com/favicon.ico',
+    fetchedAt,
+  });
+
+  it('写入后能原样读回（iconUrl ↔ icon_url 映射正确）', () => {
+    const db = mem();
+    db.upsertUrlPreview(preview('https://example.com/a', '甲页面'));
+
+    const got = db.getUrlPreviews(['https://example.com/a']);
+    expect(got).toHaveLength(1);
+    expect(got[0]).toEqual({
+      url: 'https://example.com/a',
+      title: '甲页面',
+      domain: 'example.com',
+      iconUrl: 'https://example.com/favicon.ico',
+      fetchedAt: 1000,
+    });
+  });
+
+  it('同 url 二次写入是更新而不是插入两行', () => {
+    const db = mem();
+    db.upsertUrlPreview(preview('https://example.com/a', '旧标题', 1000));
+    db.upsertUrlPreview(preview('https://example.com/a', '新标题', 2000));
+
+    const rows = db.raw.prepare('SELECT COUNT(*) AS n FROM url_previews').get() as { n: number };
+    expect(rows.n).toBe(1);
+    const got = db.getUrlPreviews(['https://example.com/a']);
+    expect(got).toHaveLength(1);
+    expect(got[0]!.title).toBe('新标题');
+    expect(got[0]!.fetchedAt).toBe(2000);
+  });
+
+  it('url 为空串不写（不落垃圾行）', () => {
+    const db = mem();
+    db.upsertUrlPreview(preview('', '空 url'));
+    const rows = db.raw.prepare('SELECT COUNT(*) AS n FROM url_previews').get() as { n: number };
+    expect(rows.n).toBe(0);
+    expect(db.getUrlPreviews([''])).toEqual([]);
+  });
+
+  it('getUrlPreviews([]) 返回 []；批量查 2 个 url 命中 1 个时只返回 1 条', () => {
+    const db = mem();
+    expect(db.getUrlPreviews([])).toEqual([]);
+
+    db.upsertUrlPreview(preview('https://example.com/a', '甲页面'));
+    const got = db.getUrlPreviews(['https://example.com/a', 'https://example.com/missing']);
+    expect(got).toHaveLength(1);
+    expect(got[0]!.url).toBe('https://example.com/a');
+  });
+
+  it('api.list：kind=link 且有缓存的挂 urlPreview，无缓存的不挂该键', () => {
+    const db = mem();
+    const cached = db.insertText('https://example.com/cached', { now: 1000 });
+    const uncached = db.insertText('https://example.com/uncached', { now: 2000 });
+    const plain = db.insertText('一段普通文字', { now: 3000 });
+    db.upsertUrlPreview(preview('https://example.com/cached', '有缓存的页面'));
+
+    const list = db.list();
+    const byId = new Map(list.map((x) => [x.id, x]));
+
+    const hit = byId.get(cached.id)!;
+    expect(hit.kind).toBe('link');
+    expect(hit.urlPreview?.title).toBe('有缓存的页面');
+    expect(hit.urlPreview?.domain).toBe('example.com');
+
+    // ★ 未命中必须是"没有这个键"，而不是"键存在但值是 undefined"
+    const miss = byId.get(uncached.id)!;
+    expect('urlPreview' in miss).toBe(false);
+    expect('urlPreview' in byId.get(plain.id)!).toBe(false);
+
+    // count 不该因为挂缓存而改变（挂预览只在 list 里做）
+    expect(db.count()).toBe(3);
+  });
+});
+
+/**
+ * v1.1.0：items.phash 与相似图片判定。
+ *
+ * ★ 这里最要紧的一条断言是"相近的图**照样入库**"：相似不等于相同，
+ *   静默丢掉用户刚复制的东西比留一条重复记录糟得多。
+ */
+describe('v1.1.0：图片感知哈希 phash 与相似判定', () => {
+  const BASE = '0123456789abcdef';
+  const imgMeta = (hash: string, phash?: string) => ({
+    imagePath: 'images/' + hash + '.jpg',
+    thumbPath: 'thumbs/' + hash + '.png',
+    width: 100,
+    height: 100,
+    bytes: 2048,
+    hash,
+    ...(phash === undefined ? {} : { phash }),
+  });
+
+  it('hammingDistance：相同串=0、全异=长度、不等长=999', () => {
+    expect(hammingDistance(BASE, BASE)).toBe(0);
+    expect(hammingDistance('0000000000000000', 'ffffffffffffffff')).toBe(16);
+    expect(hammingDistance('0123456789abcdef', '0123456789abcde')).toBe(999);
+    expect(hammingDistance('', BASE)).toBe(999);
+    // 差 1 个字符就是 1，不是"差几位"
+    expect(hammingDistance('0123456789abcdee', BASE)).toBe(1);
+  });
+
+  it('phash 落库后能读回；不传 phash 时该列是 NULL', () => {
+    const db = mem();
+    const withHash = db.insertImage(imgMeta('hash-a', BASE), { now: 1000 });
+    const without = db.insertImage(imgMeta('hash-b'), { now: 2000 });
+
+    expect(db.getRow(withHash.id)!.phash).toBe(BASE);
+    expect(db.getRow(without.id)!.phash).toBeNull();
+  });
+
+  it('相近 phash（差 ≤ 阈值）返回 similarTo，且新记录照样入库', () => {
+    const db = mem();
+    const first = db.insertImage(imgMeta('hash-a', BASE), { now: 1000 });
+    expect(first.touched).toBe(false);
+    expect(first.similarTo).toBeUndefined();
+
+    // 后 10 个字符全不同 → 汉明距离正好 10（= 阈值，算相近）
+    const near = '012345' + '0000000000';
+    expect(hammingDistance(BASE, near)).toBe(SIMILAR_HAMMING_THRESHOLD);
+
+    const second = db.insertImage(imgMeta('hash-b', near), { now: 2000 });
+    expect(second.touched).toBe(false);
+    expect(second.similarTo).toBe(first.id);
+    // ★ 相似不等于相同：新记录必须真的进了库
+    expect(second.id).not.toBe(first.id);
+    expect(db.count()).toBe(2);
+    expect(db.getRow(second.id)!.phash).toBe(near);
+  });
+
+  it('差异 > 阈值时不返回 similarTo', () => {
+    const db = mem();
+    const first = db.insertImage(imgMeta('hash-a', BASE), { now: 1000 });
+
+    // 从第 6 个字符起 11 位全换成 '0'（BASE 那 11 位是 5..f，无一相同）→ 距离 11 > 10
+    const far = '01234' + '00000000000';
+    expect(hammingDistance(BASE, far)).toBeGreaterThan(SIMILAR_HAMMING_THRESHOLD);
+
+    const second = db.insertImage(imgMeta('hash-b', far), { now: 2000 });
+    expect(second.touched).toBe(false);
+    expect(second.similarTo).toBeUndefined();
+    expect(db.count()).toBe(2);
+    expect(second.id).not.toBe(first.id);
+  });
+
+  it('phash 缺省时不返回 similarTo 也不报错', () => {
+    const db = mem();
+    db.insertImage(imgMeta('hash-a', BASE), { now: 1000 });
+    expect(() => db.insertImage(imgMeta('hash-b'), { now: 2000 })).not.toThrow();
+    const plain = db.insertImage(imgMeta('hash-c'), { now: 3000 });
+    expect(plain.similarTo).toBeUndefined();
+    expect(plain.touched).toBe(false);
+    expect(db.count()).toBe(3);
+  });
+
+  it('完全相同的图仍走 touched（命中既有行），此时不填 similarTo', () => {
+    const db = mem();
+    const first = db.insertImage(imgMeta('hash-a', BASE), { now: 1000 });
+    const again = db.insertImage(imgMeta('hash-a', BASE), { now: 2000 });
+    expect(again.id).toBe(first.id);
+    expect(again.touched).toBe(true);
+    expect(again.similarTo).toBeUndefined();
+    expect(db.count()).toBe(1);
+  });
+
+  it('回收站里的相近图片不算（已删的不该被提示）', () => {
+    const db = mem();
+    const first = db.insertImage(imgMeta('hash-a', BASE), { now: 1000 });
+    db.remove(first.id);
+    const second = db.insertImage(imgMeta('hash-b', '012345' + '0000000000'), { now: 2000 });
+    expect(second.similarTo).toBeUndefined();
+  });
+});
+
+/** v1.1.0 形态之前的库：items 有 tags/folder_id，但没有 phash，也没有 url_previews（user_version=4）。 */
+function seedV4Db(file: string): void {
+  const old = new Database(file);
+  old.exec(`
+    CREATE TABLE items (
+      id TEXT PRIMARY KEY, kind TEXT NOT NULL, content TEXT, content_hash TEXT,
+      image_path TEXT, image_hash TEXT, thumb_path TEXT,
+      width INTEGER, height INTEGER, bytes INTEGER,
+      source TEXT NOT NULL DEFAULT 'clip', pinned INTEGER NOT NULL DEFAULT 0,
+      truncated INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, seq INTEGER NOT NULL,
+      deleted_at INTEGER, source_app TEXT, file_paths TEXT, rich_html TEXT, search_index TEXT,
+      tags TEXT, folder_id TEXT
+    );
+    CREATE UNIQUE INDEX idx_content_hash ON items(content_hash) WHERE content_hash IS NOT NULL AND deleted_at IS NULL;
+    CREATE UNIQUE INDEX idx_image_hash   ON items(image_hash)   WHERE image_hash   IS NOT NULL AND deleted_at IS NULL;
+    CREATE INDEX idx_order ON items(pinned DESC, created_at DESC, seq DESC);
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE folders (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, created_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_folders_parent ON folders(parent_id);
+  `);
+  old.prepare(
+    'INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq) VALUES (?,?,?,?,?,?,?,?,?)',
+  ).run('f'.repeat(32), 'text', 'v4 的老行', 'hash-v4', 'clip', 0, 0, 1000, 1);
+  old.pragma('user_version = 4');
+  old.close();
+}
+
+describe('v1.1.0：schema v5（URL 预览缓存 + phash）', () => {
+  it('v4 老库自动补 phash 列与 url_previews 表，openDb 不抛', () => {
+    const file = join(tmpDir(), 'clipchan.db');
+    seedV4Db(file);
+
+    let db: Db | null = null;
+    expect(() => { db = openDb(file); }).not.toThrow();
+    const openedDb = db as unknown as Db;
+    opened.push(openedDb);
+
+    expect(openedDb.raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(SCHEMA_VERSION).toBe(5);
+
+    const cols = new Set(
+      (openedDb.raw.prepare('PRAGMA table_info(items)').all() as { name: string }[]).map((c) => c.name),
+    );
+    expect(cols.has('phash')).toBe(true);
+
+    const table = openedDb.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='url_previews'")
+      .get() as { name: string } | undefined;
+    expect(table?.name).toBe('url_previews');
+
+    // 老数据不受影响，且新列/新表立刻可用
+    expect(openedDb.count()).toBe(1);
+    expect(openedDb.getRow('f'.repeat(32))!.phash).toBeNull();
+    expect(openedDb.getUrlPreviews([])).toEqual([]);
+    openedDb.upsertUrlPreview({
+      url: 'https://example.com/x', title: '升级后写的', domain: 'example.com',
+      iconUrl: '', fetchedAt: 1,
+    });
+    expect(openedDb.getUrlPreviews(['https://example.com/x'])).toHaveLength(1);
+  });
+
+  it('全新库：phash 列与 url_previews 表一开始就在', () => {
+    const db = mem();
+    const cols = new Set(
+      (db.raw.prepare('PRAGMA table_info(items)').all() as { name: string }[]).map((c) => c.name),
+    );
+    expect(cols.has('phash')).toBe(true);
+    const table = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='url_previews'")
+      .get() as { name: string } | undefined;
+    expect(table?.name).toBe('url_previews');
+  });
+});
