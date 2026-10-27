@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 `C:\Users\Administrator\Desktop\剪贴板` 从 C# WinForms 单文件 exe 重做成一份 React 界面代码驱动、Electron 承载的 Windows 桌面应用，界面按 `ojo` 原型、配色按用户给的图标重定，并且**真的支持图片剪贴板**；同一份 `core` 代码留出手机端接入点。
+**Goal:** 把 `C:\Users\<user>\Desktop\剪贴板` 从 C# WinForms 单文件 exe 重做成一份 React 界面代码驱动、Electron 承载的 Windows 桌面应用，界面按 `ojo` 原型、配色按用户给的图标重定，并且**真的支持图片剪贴板**；同一份 `core` 代码留出手机端接入点。
 
 **Architecture:** pnpm workspace 三个包——`@clipchan/core`（平台无关：界面、zustand 状态、类型、主题令牌、纯逻辑）、`@clipchan/desktop`（Electron 主进程 + preload + 一个 C# 原生助手）、`@clipchan/mobile`（Capacitor 壳，本轮只搭壳）。`core` 只通过 `PlatformAdapter` 接口访问系统能力，界面代码一行不改就能换宿主。主进程负责剪贴板轮询、SQLite 持久化、图片落盘、全局热键、托盘、自动粘贴编排；渲染进程不开 `nodeIntegration`、不用 `remote`，只通过 preload 暴露的固定方法通信。自动粘贴与真毛玻璃都由**同一个常驻 C# 助手**（`clipchan-helper.exe`，`csc.exe` 编译）执行，因为 Node/Electron 侧调不到任何 Win32 API。
 
@@ -470,7 +470,7 @@
 | # | 判定 | 证据（路径 / 命令） | 输出摘要 |
 |---|---|---|---|
 | 1 | 通过 | 拷 `release/Clipchan.exe` → `D:\tmp\clipchan-test\` 后双击（该目录外无任何依赖） | 面板出现、剪贴板捕获正常；未装 Node/npm/.NET。截图 `task10-portable-panel.png` |
-| 2 | 通过 | 与 `C:\Users\Administrator\Desktop\ojo\specs\wireframe.jpg` 并排比对 + `task12-main-panel.png` | 900×620 ✓、左侧栏 `Sidebar.tsx:38` `w-16`=64px ✓、顶部搜索栏 ✓、卡片含类型徽章+预览+时间戳+星标 ✓、卡片间距 `ListPanel.tsx:56` `gap-tight`=8px（`tailwind.config.ts:43`）✓。**已知差异**：原型把「切换小组件」放右下角，实现放搜索栏右侧（「小组件」按钮）+ 右下角常驻「设置」；入口存在，位置不同 |
+| 2 | 通过 | 与 `C:\Users\<user>\Desktop\ojo\specs\wireframe.jpg` 并排比对 + `task12-main-panel.png` | 900×620 ✓、左侧栏 `Sidebar.tsx:38` `w-16`=64px ✓、顶部搜索栏 ✓、卡片含类型徽章+预览+时间戳+星标 ✓、卡片间距 `ListPanel.tsx:56` `gap-tight`=8px（`tailwind.config.ts:43`）✓。**已知差异**：原型把「切换小组件」放右下角，实现放搜索栏右侧（「小组件」按钮）+ 右下角常驻「设置」；入口存在，位置不同 |
 | 3 | 通过 | `scripts/measure-hotkey.ps1` + cua `list_windows` | 热键唤起后窗口 bounds `x=510 y=170 w=900 h=620`（1920×1080）→ 水平居中、垂直偏上；几何实现 `packages/desktop/electron/frosted.ts:180-185` `positionFor`（`(wa.width-MAIN_WIDTH)/2`、`(wa.height-MAIN_HEIGHT)/2 - MAIN_TOP_OFFSET`） |
 | 4 | 通过 | `Set-Clipboard -Value clipchan-t10-capture-测试文本` → CDP `items.list` | 1.5s 内新增一条 `ed2a7e5520e74d9588eb3fd1d99838f7` kind=text 且排在最前（pinned 项之后） |
 | 5 | 通过 | `packages/core/src/logic/classify.spec.ts`（7 条） | 链接/Windows+UNC 路径/纯数字/代码关键字/代码符号密度/多行回落/中文文本 全过 |

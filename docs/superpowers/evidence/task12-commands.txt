@@ -165,7 +165,7 @@ dist/assets/index-bPccqgTv.js     353.17 kB �?gzip: 113.56 kB �?map: 1,403.78 
   �?building block map  blockMapFile=C:\Users\<user>\Desktop\剪贴板\release\Clipchan-Setup-0.1.0.exe.blockmap
 [package-win] �?�?electron-builder（portable + nsis�?退出码 0
 
-[package-win] 产物目录：C:\Users\Administrator\Desktop\剪贴板\release
+[package-win] 产物目录：C:\Users\<user>\Desktop\剪贴板\release
   builder-debug.yml  7854 字节
   Clipchan-Setup-0.1.0.exe  96076122 字节
   Clipchan-Setup-0.1.0.exe.blockmap  102045 字节

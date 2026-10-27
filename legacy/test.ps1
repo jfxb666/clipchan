@@ -1,7 +1,7 @@
 ﻿# Clipchan 端到端验收测试
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Continue"
-$exe = "C:\Users\Administrator\Desktop\剪贴板\dist\Clipchan.exe"
+$exe = "C:\Users\<user>\Desktop\剪贴板\dist\Clipchan.exe"
 $fail = 0
 function Ok($m)   { Write-Host ("  [PASS] " + $m) }
 function Bad($m)  { Write-Host ("  [FAIL] " + $m); $script:fail++ }
