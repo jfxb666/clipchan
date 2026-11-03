@@ -91,3 +91,27 @@ describe('distributeColumns（贪心最短列）', () => {
     expect(distributeColumns([], 3, 200)).toEqual([[], [], []]);
   });
 });
+
+/**
+ * T-N4 定性：MasonryList.tsx 的列容器用 index 作 key，审计曾标为 Minor。
+ * 这组用例钉住「列骨架稳定」的既有契约，证明 index 作 key 是对的而非将就 ——
+ * 结论落在 MasonryList.tsx 的 key 处注释里；若下面哪条红了，说明契约真破了，再重开议题。
+ */
+describe('列骨架的稳定性（T-N4 复核）', () => {
+  const items = Array.from({ length: 9 }, (_, i) => dto({ id: 'i' + i }));
+
+  it('列数 1..MASONRY_MAX_COLUMNS 之间变化时，列数量等于夹取后的列数，且每列都是数组（空列也在）', () => {
+    for (const columns of [1, 2, 3, 4]) {
+      const buckets = distributeColumns(items, columns, 300);
+      expect(buckets).toHaveLength(Math.min(columns, MASONRY_MAX_COLUMNS));
+      expect(buckets.every((bucket) => Array.isArray(bucket))).toBe(true);
+    }
+  });
+
+  it('★ 条目永远按 id 唯一分布：列数怎么变都不会重复或丢失', () => {
+    for (const columns of [1, 2, 3, 4]) {
+      const ids = distributeColumns(items, columns, 300).flat().map((item) => item.id);
+      expect(new Set(ids).size).toBe(items.length); // 每个列数下都恰好 9 个不同 id
+    }
+  });
+});

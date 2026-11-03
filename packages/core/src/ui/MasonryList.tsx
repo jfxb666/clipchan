@@ -47,6 +47,13 @@ export function MasonryList({
 
   return (
     <div ref={containerRef} className="flex gap-tight">
+      {/*
+        列容器用 index 作 key 是有意的（审计 T-N4 复核结论）：
+        列没有内在身份 —— "第 3 列"就是它的身份，distributeColumns 也刻意保持列数稳定
+        （见 masonry.ts 的空列注释）；真正有身份的是列内条目，它们按 item.id 加 key。
+        改成拼出来的稳定列 id 会让宽度变化时每列 DOM 全部重建，反而更差。
+        契约由 masonry.spec.ts 的「列骨架的稳定性（T-N4 复核）」钉住。
+      */}
       {buckets.map((bucket, index) => (
         <div key={index} className="flex min-w-0 flex-1 flex-col gap-tight">
           {bucket.map((item) => (
