@@ -9,6 +9,9 @@
  *   Esc 隐藏 -> Ctrl+F 聚焦搜索 -> Ctrl+M 拼接 -> Ctrl+D 收藏 -> Delete 删除
  *   -> 搜索框内 ↑/↓ 跳出到列表（其余按键不拦）-> Ctrl+Z 撤销 -> Ctrl+C 复制
  *   -> ↑/↓ 移动 -> Ctrl+Shift+V 纯文本粘贴 -> Enter 粘贴。
+ *
+ * ★ Esc 是全局表里唯一需要"让路"的判定：浮层与整理页各有自己的关闭语义，
+ *   所有权由 KeyContext 的两个开关告诉这里，App.tsx 负责如实填。
  */
 export interface KeyEventLike {
   key: string;
@@ -23,10 +26,19 @@ export interface KeyContext {
   inSearch: boolean;
   /** 当前选中集（取第一条做 Ctrl+D）。 */
   selectedIds: string[];
+  /**
+   * ★ 有浮层正开着（右键菜单 / 整理弹窗 / 全文大图 / OCR / 二维码 / AI 助手页）。
+   * 浮层自己会接 Esc，全局表这时候必须让路：否则一次按键既关掉浮层又关掉整个面板，
+   * 用户想撤一步就丢了视线（审计 BL-1「Esc 双关」）。
+   */
+  overlayOpen: boolean;
+  /** ★ 「整理」整页视图开着：Esc 先退出整理，回到列表，不关面板。 */
+  organizeOpen: boolean;
 }
 
 export type KeyAction =
   | { type: 'hide' }
+  | { type: 'close-organize' }
   | { type: 'focus-search' }
   | { type: 'merge' }
   | { type: 'pin'; id: string }
@@ -48,7 +60,13 @@ export function resolveKey(event: KeyEventLike, ctx: KeyContext): KeyAction {
   const mod = Boolean(event.ctrlKey || event.metaKey);
   const key = event.key;
 
-  if (key === 'Escape') return { type: 'hide' };
+  if (key === 'Escape') {
+    // ★ 让路顺序：浮层 > 整理页 > 面板。浮层由它自己的监听器关，这里给 none
+    //   就是"全局表什么都不做"；整理页没有自己的监听器，所以给它一个动作。
+    if (ctx.overlayOpen) return { type: 'none' };
+    if (ctx.organizeOpen) return { type: 'close-organize' };
+    return { type: 'hide' };
+  }
   if (mod && (key === 'f' || key === 'F')) return { type: 'focus-search' };
   if (mod && (key === 'm' || key === 'M')) return { type: 'merge' };
   if (mod && (key === 'd' || key === 'D')) {

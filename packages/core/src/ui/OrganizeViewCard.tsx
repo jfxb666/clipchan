@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { FolderPlus, Pencil, Tag, Trash2, X } from 'lucide-react';
+import { FolderPlus, MoveRight, Pencil, Tag, Trash2, X } from 'lucide-react';
 import { useClipStore } from '../state/store';
 import { cn } from './util';
-import { countLabel, folderRows, isOrganizeEmpty } from './organizeView';
+import { countLabel, folderMoveTargets, folderRows, isOrganizeEmpty } from './organizeView';
 
 /**
  * 「整理」整页视图（v1.0.0 ⑥）。
@@ -36,12 +36,15 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
   const createFolder = useClipStore((s) => s.createFolder);
   const renameFolder = useClipStore((s) => s.renameFolder);
   const removeFolder = useClipStore((s) => s.removeFolder);
+  const moveFolder = useClipStore((s) => s.moveFolder);
   const setFolderFilter = useClipStore((s) => s.setFolderFilter);
   const setTagFilter = useClipStore((s) => s.setTagFilter);
 
   const [newName, setNewName] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  /** 正在挑移动目标的文件夹 id；null = 没有行处于「移动到…」展开态。 */
+  const [movingId, setMovingId] = useState<string | null>(null);
 
   // 打开整理页时刷一次文件夹平表：别的窗口可能刚建/删过，列表页那次拉取已经过时了。
   useEffect(() => {
@@ -73,6 +76,19 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
       '确定删除文件夹「' + name + '」吗？\n里面的记录不会被删除，会回到「未归类」。',
     );
     if (ok) void removeFolder(id);
+  };
+
+  /**
+   * 行的父级 id（顶层为 null）。
+   * ★ 问 folders 原表而不是 FolderRow：folderRows 只为树的渲染服务，没带 parentId，
+   *   在这里补一个字段会把纯函数的返回形状牵进这次的修复里。
+   */
+  const parentIdOf = (id: string): string | null =>
+    folders.find((f) => f.id === id)?.parentId ?? null;
+
+  const submitMove = (id: string, parentId: string | null) => {
+    setMovingId(null);
+    void moveFolder(id, parentId);
   };
 
   return (
@@ -157,7 +173,11 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
             {rows.length === 0 ? (
               <p className="py-snug text-center text-[11px] text-ink-3">还没有文件夹</p>
             ) : (
-              rows.map((row) => (
+              rows.map((row) => {
+                // 移动目标只在展开那一行算：每行都算一遍会把 3 层树的每行都跑一次全表校验。
+                const moveTargets = movingId === row.id ? folderMoveTargets(folders, row.id) : [];
+                const canPromote = movingId === row.id && parentIdOf(row.id) !== null;
+                return (
                 <div
                   key={row.id}
                   // ★ 缩进用内联 style 而不是运行时拼出来的 Tailwind 类名：Tailwind 是静态
@@ -183,6 +203,43 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                         className={GHOST_BUTTON_CLASS}
                       >
                         确定
+                      </button>
+                    </div>
+                  ) : movingId === row.id ? (
+                    // ★ 移动目标行内展开，不做弹窗：候选通常只有几个，弹窗反而盖住树，
+                    //   而且用户需要看见自己把这一支拖到了哪儿。校验交给 folderMoveTargets
+                    //   （排除自身与子孙、按 MAX_FOLDER_DEPTH 卡超深），点下去不会被主进程拒绝。
+                    <div className="flex flex-wrap items-center gap-[4px] py-[2px]">
+                      <span className="shrink-0 text-[11px] text-ink-3">移入</span>
+                      {canPromote ? (
+                        <button
+                          type="button"
+                          title="提升为顶层文件夹"
+                          onClick={() => submitMove(row.id, null)}
+                          className={GHOST_BUTTON_CLASS}
+                        >
+                          顶层
+                        </button>
+                      ) : null}
+                      {moveTargets.map((target) => (
+                        <button
+                          key={target.id}
+                          type="button"
+                          onClick={() => submitMove(row.id, target.id)}
+                          className={cn(GHOST_BUTTON_CLASS, 'max-w-[150px] truncate')}
+                        >
+                          {target.label}
+                        </button>
+                      ))}
+                      {!canPromote && moveTargets.length === 0 ? (
+                        <span className="text-[11px] text-ink-3">没有可选的目标</span>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => setMovingId(null)}
+                        className="shrink-0 rounded-button px-snug py-[4px] text-[11px] text-ink-3 hover:text-ink"
+                      >
+                        取消
                       </button>
                     </div>
                   ) : (
@@ -212,7 +269,19 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                       <span className="shrink-0 text-[10px] text-ink-3">
                         {countLabel(row.totalCount)}
                       </span>
-                      {/* 行内动作只在 hover 时显形：常驻两个图标会把 260px 的窄栏挤满。 */}
+                      {/* 行内动作只在 hover 时显形：常驻三个图标会把 260px 的窄栏挤满。 */}
+                      <button
+                        type="button"
+                        title="移动到其它文件夹"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setEditingId(null);
+                          setMovingId(row.id);
+                        }}
+                        className="hidden shrink-0 text-ink-3 hover:text-ink group-hover:block"
+                      >
+                        <MoveRight size={11} aria-hidden />
+                      </button>
                       <button
                         type="button"
                         title="重命名"
@@ -239,7 +308,8 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                     </div>
                   )}
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>

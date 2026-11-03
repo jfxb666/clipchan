@@ -177,6 +177,24 @@ export function App() {
   const [qrError, setQrError] = useState<string | null>(null);
   const [qrLoading, setQrLoading] = useState(false);
 
+  /**
+   * ★ Esc 的所有权快照（BL-1）：这几个浮层 / 接管 Esc 的视图开着时，全局键盘表必须让路，
+   *   否则一次按键会既关浮层又关面板。全局 keydown 那个 effect 依赖是 []，直接读 state
+   *   会拿到挂载那一刻的旧值，所以每次提交后把最新值刷进 ref。
+   */
+  const overlayOpen =
+    menu !== null ||
+    organizeItemId !== null ||
+    viewer !== null ||
+    ocr !== null ||
+    qr !== null ||
+    view === 'assist';
+  const organizeOpen = view === 'organize';
+  const escapeCtx = useRef({ overlayOpen, organizeOpen });
+  useEffect(() => {
+    escapeCtx.current = { overlayOpen, organizeOpen };
+  }, [overlayOpen, organizeOpen]);
+
   /** 小组件形态下收起侧栏，把宽度让给内容（spec §6.6 切形态改布局）。 */
   const widgetCompact = mode === 'widget';
 
@@ -323,7 +341,7 @@ export function App() {
           shiftKey: event.shiftKey,
           altKey: event.altKey,
         },
-        { inSearch, selectedIds: store.selectedIds },
+        { inSearch, selectedIds: store.selectedIds, ...escapeCtx.current },
       );
       if (action.type === 'none') return;
       if (shouldPreventDefault(action)) event.preventDefault();
@@ -331,6 +349,9 @@ export function App() {
       switch (action.type) {
         case 'hide':
           void hidePanel();
+          return;
+        case 'close-organize':
+          useClipStore.getState().closeOrganize();
           return;
         case 'focus-search':
           searchRef.current?.focus();
@@ -1005,7 +1026,6 @@ export function App() {
                     const first = useClipStore.getState().items[0];
                     if (first) useClipStore.getState().select(first.id);
                   }}
-                  onEscape={onHide}
                   className="flex-1"
                 />
                 {LAYOUT_BUTTONS.map(({ key, icon: Icon, label }) => (

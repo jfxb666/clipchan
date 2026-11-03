@@ -7,7 +7,11 @@
 import { describe, expect, it } from 'vitest';
 import { resolveKey, shouldPreventDefault, type KeyAction, type KeyContext } from './keymap';
 
-const ctx = (inSearch: boolean, selectedIds: string[] = []): KeyContext => ({ inSearch, selectedIds });
+const ctx = (
+  inSearch: boolean,
+  selectedIds: string[] = [],
+  extra: Partial<Pick<KeyContext, 'overlayOpen' | 'organizeOpen'>> = {},
+): KeyContext => ({ inSearch, selectedIds, overlayOpen: false, organizeOpen: false, ...extra });
 const key = (k: string, mods: Partial<{ ctrl: boolean; meta: boolean; shift: boolean; alt: boolean }> = {}) => ({
   key: k,
   ctrlKey: mods.ctrl ?? false,
@@ -19,6 +23,38 @@ const key = (k: string, mods: Partial<{ ctrl: boolean; meta: boolean; shift: boo
 describe('resolveKey', () => {
   it('Escape → hide', () => {
     expect(resolveKey(key('Escape'), ctx(false))).toEqual({ type: 'hide' });
+  });
+
+  // ★ BL-1「Esc 双关」的回归钉：浮层开着时全局表必须让路，否则一次按键
+  //   既关掉浮层（浮层自己的监听器）又关掉面板（hide），用户撤一步就丢了整个界面。
+  it('★ Escape 在浮层开着时让路（none），不关面板', () => {
+    // 浮层由调用方如实上报（右键菜单 / 整理弹窗 / 全文大图 / OCR / 二维码 / AI 助手页）。
+    expect(resolveKey(key('Escape'), ctx(false, [], { overlayOpen: true }))).toEqual({
+      type: 'none',
+    });
+    // 焦点在搜索框里也一样让路：搜索框曾经自己接了一次 Esc，与这条叠成双关。
+    expect(resolveKey(key('Escape'), ctx(true, [], { overlayOpen: true }))).toEqual({ type: 'none' });
+  });
+
+  it('★ Escape 在「整理」页时先退出整理，不关面板', () => {
+    expect(resolveKey(key('Escape'), ctx(false, [], { organizeOpen: true }))).toEqual({
+      type: 'close-organize',
+    });
+  });
+
+  it('★ Escape 让路顺序：整理页里还开着浮层时，浮层优先（none）', () => {
+    expect(
+      resolveKey(key('Escape'), ctx(false, [], { overlayOpen: true, organizeOpen: true })),
+    ).toEqual({ type: 'none' });
+  });
+
+  it('★ 只有 Escape 让路：浮层开着时 Ctrl+F / Delete 等照常生效', () => {
+    expect(resolveKey(key('f', { ctrl: true }), ctx(false, [], { overlayOpen: true }))).toEqual({
+      type: 'focus-search',
+    });
+    expect(resolveKey(key('Delete'), ctx(false, ['a'], { overlayOpen: true }))).toEqual({
+      type: 'remove-selected',
+    });
   });
 
   it('Ctrl+F / Cmd+F → focus-search（大小写都认）', () => {
@@ -137,6 +173,7 @@ describe('shouldPreventDefault', () => {
   it('除 none 外都要拦默认行为', () => {
     const actions: KeyAction[] = [
       { type: 'hide' },
+      { type: 'close-organize' },
       { type: 'focus-search' },
       { type: 'merge' },
       { type: 'pin', id: 'a' },

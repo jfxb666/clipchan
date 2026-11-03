@@ -7,7 +7,7 @@ import { cn } from './util';
 /**
  * 顶部搜索框（spec §6.3）。
  * 输入交给 store 的 setQuery（300ms 防抖），这里只负责输入体验：
- * ↓ 从搜索框跳到列表、Esc 交给外层处理（隐藏面板）。
+ * ↓ 从搜索框跳到列表。Esc 不在这里管，交给全局键盘表（见 keymap.ts）。
  * 用 forwardRef 把真实 input 暴露给 App，Ctrl+F 才能直接聚焦。
  *
  * 语法反馈也在这里做：解析器不抛异常（边打边搜时中间态随时非法），
@@ -20,14 +20,10 @@ export const SearchBar = forwardRef<
     value: string;
     onChange: (value: string) => void;
     onArrowDown?: () => void;
-    onEscape?: () => void;
     placeholder?: string;
     className?: string;
   }
->(function SearchBar(
-  { value, onChange, onArrowDown, onEscape, placeholder = '搜索剪贴板…', className },
-  ref,
-) {
+>(function SearchBar({ value, onChange, onArrowDown, placeholder = '搜索剪贴板…', className }, ref) {
   const errors = useMemo(() => parseSearch(value).errors, [value]);
   const errorText = formatSearchErrors(errors);
 
@@ -50,10 +46,10 @@ export const SearchBar = forwardRef<
           if (event.key === 'ArrowDown') {
             event.preventDefault();
             onArrowDown?.();
-          } else if (event.key === 'Escape') {
-            event.preventDefault();
-            onEscape?.();
           }
+          // ★ Esc 不在这里处理：全局键盘表（keymap.ts）是唯一所有者。
+          //   这里以前也接一次 Esc 并调 onEscape，与全局那条叠成"一次按键关两次"（BL-1），
+          //   而浮层开着时两条路径还会互相抢关窗顺序。输入框只保留 ↓ 跳出列表这一件事。
         }}
         className="h-full w-full min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3"
       />

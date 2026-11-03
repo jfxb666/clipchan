@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { FolderOpen, Plus, Sparkles, Tag, X } from 'lucide-react';
+import { FolderOpen, FolderPlus, Plus, Sparkles, Tag, X } from 'lucide-react';
 import { useClipStore } from '../state/store';
-import { sanitizeTag } from '../logic/organize';
+import { sanitizeTag, suggestFolder, suggestTags } from '../logic/organize';
 import { cn } from './util';
 import {
   folderMoveTargets,
@@ -43,6 +43,7 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
   const setItemFolder = useClipStore((s) => s.setItemFolder);
   const aiProviders = useClipStore((s) => s.aiProviders);
   const suggestTagsByAi = useClipStore((s) => s.suggestTagsByAi);
+  const createFolder = useClipStore((s) => s.createFolder);
 
   const [selected, setSelected] = useState<string[]>(() => itemTagsOf(item));
   const [draftTag, setDraftTag] = useState('');
@@ -72,6 +73,62 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
 
   const candidates = tagCandidates(knownTags, selected);
   const targets = folderMoveTargets(folders, null);
+
+  /**
+   * ★ 本地规则给出的标签候选（固定词表、零网络、零 AI）。
+   * 这套规则此前只有单测在调用，产品里一处没接：用户没配 AI、库里又还没有任何标签时，
+   * 弹窗只会说「还没有可选标签」，把已经写好的判定整个晾着（审计 BL-2「标签死代码」）。
+   * 这里只补**未被选中**的那些，已选中的仍归 candidates 的高亮态管，避免同一个词出现两次。
+   * 和 AI 一样进草稿、要点一下才写上 —— 不替用户点头。
+   */
+  const ruleTags = suggestTags({
+    kind: item.kind,
+    text: item.preview ?? '',
+    sourceApp: item.sourceApp,
+    createdAt: item.createdAt,
+  }).filter((tag) => !selected.includes(tag) && !candidates.includes(tag));
+
+  /**
+   * ★ 规则建议的一级文件夹名（suggestTags 的同源兄弟，之前同样是只有单测在跑）。
+   * 只在记录还没归过类时给：已经在某个文件夹里的记录，用户要的是挪一下，
+   * 而不是按内容再开一支重复的树。
+   */
+  const suggestedFolder = item.folderId
+    ? undefined
+    : suggestFolder({
+        kind: item.kind,
+        text: item.preview ?? '',
+        sourceApp: item.sourceApp,
+        createdAt: item.createdAt,
+      });
+
+  /**
+   * 顶层同名文件夹。
+   * ★ 每次都从 store 现读而不是用上面那个 folders 闭包：createFolder 之后闭包还是旧表，
+   *   拿旧表判断"建没建成"会永远判不出来。
+   */
+  const rootFolderNamed = (name: string) =>
+    useClipStore
+      .getState()
+      .folders.find((f) => f.name === name && (f.parentId ?? null) === null);
+
+  const moveToSuggested = async () => {
+    const name = suggestedFolder;
+    if (name === undefined) return;
+    const existing = rootFolderNamed(name);
+    if (existing) {
+      void setItemFolder(itemId, existing.id);
+      onClose();
+      return;
+    }
+    // createFolder 失败时只 toast、不改 folders 表：这时找不到落点，弹窗留着，
+    // 用户看得见"没建成"，比静默关窗然后记录仍然未归类好。
+    await createFolder({ name, parentId: null });
+    const created = rootFolderNamed(name);
+    if (created === undefined) return;
+    void setItemFolder(itemId, created.id);
+    onClose();
+  };
 
   const addDraftTag = () => {
     const tag = sanitizeTag(draftTag);
@@ -157,8 +214,25 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
               )}
             </div>
 
+            {ruleTags.length === 0 ? null : (
+              <div className="mt-tight flex flex-wrap items-center gap-[4px]">
+                <span className="shrink-0 text-[10px] text-ink-3">本地规则识别到</span>
+                {ruleTags.map((tag) => (
+                  <button
+                    key={'rule-' + tag}
+                    type="button"
+                    title="按内容规则判定，点一下加入"
+                    onClick={() => setSelected((current) => toggleTag(current, tag))}
+                    className="rounded-button border border-dashed border-line px-snug py-[3px] text-[11px] text-ink-2 hover:bg-surface-2"
+                  >
+                    + {tag}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div className="mt-tight flex flex-wrap gap-[4px]">
-              {candidates.length === 0 ? (
+              {candidates.length === 0 && ruleTags.length === 0 ? (
                 <span className="text-[11px] text-ink-3">还没有可选标签，在下面新建一个。</span>
               ) : (
                 candidates.map((tag) => {
@@ -215,6 +289,17 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
               <span className="text-[11px] font-semibold text-ink-2">移动到文件夹</span>
               <span className="text-[10px] text-ink-3">· 点一下就生效</span>
             </div>
+
+            {suggestedFolder === undefined ? null : (
+              <button
+                type="button"
+                onClick={() => void moveToSuggested()}
+                className="mt-tight flex w-full items-center gap-[4px] rounded-button border border-dashed border-line px-[6px] py-[4px] text-left text-[12px] text-ink-2 hover:bg-surface-2"
+              >
+                <FolderPlus size={11} className="shrink-0" aria-hidden />
+                {rootFolderNamed(suggestedFolder) ? '移入已有的' : '按内容新建并移入'}「{suggestedFolder}」
+              </button>
+            )}
 
             <div className="mt-tight flex flex-col gap-[2px]">
               <button
