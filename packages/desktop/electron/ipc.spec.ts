@@ -6,9 +6,9 @@
  *   是 "Error invoking remote method 'x': [object Object]"，结构化信息全丢。
  *   所以 registerIpc 在注册处统一把非 Error 抛出物包成 Error（消息保留）。
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { openDb } from './db';
-import { runRestore, toIpcError } from './ipc';
+import { makeBroadcaster, runRestore, toIpcError } from './ipc';
 
 describe('toIpcError', () => {
   it('普通对象（AiError 形状）包成 Error 且保留中文 message', () => {
@@ -77,5 +77,110 @@ describe('runRestore：冲突翻成可读结果，不抛异常', () => {
     const active = db.insertText('活跃内容');
     expect(runRestore(db, active.id)).toEqual({ ok: false, reason: 'missing' });
     db.close();
+  });
+});
+
+/**
+ * ★ T-M5：itemsChanged 必须合并窗口。
+ * 主进程 20 多个调用点 + 渲染层"收到就重拉整页"，连点五张卡片收藏就是五次全量 list。
+ * 断言用假时钟：不能真等 120ms，也不能让测试依赖机器快慢。
+ */
+describe('makeBroadcaster 的 itemsChanged 合并窗口', () => {
+  function fakeWindow() {
+    const sent: string[] = [];
+    return {
+      sent,
+      win: { isDestroyed: () => false, webContents: { send: (ch: string) => sent.push(ch) } },
+    };
+  }
+
+  it('窗口内多次调用只发一次', () => {
+    const { sent, win } = fakeWindow();
+    let t = 1000;
+    const timers: Array<{ fn: () => void; at: number }> = [];
+    const bc = makeBroadcaster(() => win as never, {
+      coalesceMs: 120,
+      now: () => t,
+      setTimeout: (fn: () => void, ms: number) => {
+        timers.push({ fn, at: t + ms });
+        return timers.length as never;
+      },
+      clearTimeout: (h: unknown) => {
+        const i = (h as number) - 1;
+        if (timers[i]) timers[i] = { fn: () => {}, at: -1 };
+      },
+    });
+    bc.itemsChanged();
+    bc.itemsChanged();
+    bc.itemsChanged();
+    expect(sent).toEqual([]); // 合并期内一条都不发
+    // ★ "窗口内跳过"语义：三次调用只排了一个定时器（pending 没到期，后来的调用直接忽略）。
+    expect(timers).toHaveLength(1);
+    timers[0]!.fn();
+    expect(sent).toHaveLength(1); // 到点只发一次
+  });
+
+  it('其它事件不受合并影响（toast / settingsChanged 必须即时）', () => {
+    const { sent, win } = fakeWindow();
+    const bc = makeBroadcaster(() => win as never, {
+      coalesceMs: 120,
+      setTimeout: () => 1 as never,
+      clearTimeout: () => {},
+    });
+    bc.toast('收藏成功', 'info');
+    expect(sent).toHaveLength(1);
+    bc.settingsChanged({ theme: 'dark' });
+    expect(sent).toHaveLength(2);
+  });
+
+  it('窗口结束后再调会重新开一轮（长期变更不能被永久静音）', () => {
+    const { sent, win } = fakeWindow();
+    const timers: Array<{ fn: () => void }> = [];
+    let t = 0;
+    const bc = makeBroadcaster(() => win as never, {
+      coalesceMs: 120,
+      now: () => t,
+      setTimeout: (fn: () => void) => {
+        timers.push({ fn });
+        return timers.length as never;
+      },
+      clearTimeout: () => {},
+    });
+    bc.itemsChanged();
+    timers[0]!.fn(); // 第一轮到点发出
+    expect(sent).toHaveLength(1);
+    bc.itemsChanged(); // 第二轮必须重新排队，而不是永久静音
+    expect(timers).toHaveLength(2);
+    timers[1]!.fn();
+    expect(sent).toHaveLength(2);
+  });
+
+  // ★ 上面的用例都显式传了 coalesceMs：万一有人把默认值改成 0（合并悄悄失效），它们照样绿。
+  //   这里用 vi 假时钟锁死默认路径——调用方一个参数都不传，合并也必须在。
+  it('默认不传 opts 也是 120ms 合并（假时钟锁定默认路径）', () => {
+    vi.useFakeTimers();
+    try {
+      const { sent, win } = fakeWindow();
+      const bc = makeBroadcaster(() => win as never);
+      bc.itemsChanged();
+      expect(sent).toEqual([]); // 默认就有合并窗口
+      vi.advanceTimersByTime(120);
+      expect(sent).toHaveLength(1);
+      bc.itemsChanged(); // 窗口过了再调：新一轮重新排队
+      expect(sent).toHaveLength(1);
+      vi.advanceTimersByTime(120);
+      expect(sent).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesceMs: 0 关闭合并，每条都即时发（需要严格顺序的调用方用）', () => {
+    const { sent, win } = fakeWindow();
+    const bc = makeBroadcaster(() => win as never, { coalesceMs: 0 });
+    bc.itemsChanged();
+    expect(sent).toHaveLength(1); // 不排定时器，立刻发
+    bc.itemsChanged();
+    expect(sent).toHaveLength(2);
   });
 });

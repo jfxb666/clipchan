@@ -126,9 +126,13 @@ export function runRestore(db: RestoreCapableDb, id: string): RestoreResult {
   return { ok: false, reason: 'missing' };
 }
 
+/** 两条 itemsChanged 之间的最小合并窗口：与 AI 增量通道同源的一个数量级，够吃掉一次批量操作。 */
+export const ITEMS_CHANGED_COALESCE_MS = 120;
+
 /** 主进程 -> 渲染进程广播。 */
 export interface Broadcaster {
   send(channel: string, payload?: unknown): void;
+  /** ★ 只发信号不带数据，且带 120ms 合并窗口（见 makeBroadcaster）：渲染层收到后全量重拉即可。 */
   itemsChanged(): void;
   settingsChanged(settings: unknown): void;
   ghostChanged(ghost: unknown): void;
@@ -141,15 +145,56 @@ export interface Broadcaster {
   aiOptimizeDelta(requestId: string, text: string): void;
 }
 
-export function makeBroadcaster(getWindow: () => Electron.BrowserWindow | null): Broadcaster {
+export interface BroadcasterOptions {
+  /** 合并窗口：0 = 关闭合并，每条都即时发（测试与需要严格顺序的调用方用）。 */
+  coalesceMs?: number;
+  /** 时钟（与 deltaThrottle 的依赖形状对齐）；当前合并只看定时器，不读时钟。 */
+  now?: () => number;
+  /** 定时器可注入（测试用假定时器，不真等 120ms）。 */
+  setTimeout?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  /** 合并用"窗口内跳过"语义，从不取消已排的定时器；收进接口只为与 setTimeout 对称。 */
+  clearTimeout?: (h: ReturnType<typeof setTimeout>) => void;
+}
+
+/**
+ * 事件出口。
+ *
+ * ★ itemsChanged 带 120ms 合并窗口：主进程有 20 多个调用点，渲染层收到就重拉整页，
+ *   批量操作（收藏 N 条 / 删除 N 条 / 连续复制）会在同一秒打出十几次全量 list，
+ *   界面就在那儿闪。合并的是**信号**不是数据 —— 反正渲染层拿到信号后拉的是最新全量，
+ *   中间态没有信息量，丢中间帧不丢正确性。
+ * ★ 其它事件一律即时：toast 迟到 120ms 用户会觉得"点了没反应"，settingsChanged
+ *   合并会把两次不同载荷压成一次随机载荷。
+ */
+export function makeBroadcaster(
+  getWindow: () => Electron.BrowserWindow | null,
+  opts: BroadcasterOptions = {},
+): Broadcaster {
+  const coalesceMs = typeof opts.coalesceMs === 'number' && Number.isFinite(opts.coalesceMs)
+    ? Math.max(0, opts.coalesceMs)
+    : ITEMS_CHANGED_COALESCE_MS;
+  const setT = opts.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
+
   const send = (channel: string, payload?: unknown): void => {
     const win = getWindow();
     if (!win || win.isDestroyed()) return;
     win.webContents.send(channel, payload);
   };
+
+  let pending: ReturnType<typeof setTimeout> | null = null;
+  const itemsChanged = (): void => {
+    if (coalesceMs === 0) { send(EV.itemsChanged); return; }
+    // 合并期内后来的调用只是"再确认一次有变更"：定时器只有一条，不重排也不取消。
+    if (pending !== null) return;
+    pending = setT(() => {
+      pending = null;
+      send(EV.itemsChanged);
+    }, coalesceMs);
+  };
+
   return {
     send,
-    itemsChanged: () => send(EV.itemsChanged),
+    itemsChanged,
     settingsChanged: (settings) => send(EV.settingsChanged, settings),
     ghostChanged: (ghost) => send(EV.ghostChanged, ghost),
     toast: (message, kind = 'info') => send(EV.toast, { message, kind }),
