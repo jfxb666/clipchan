@@ -135,30 +135,14 @@ export function domainOf(url: string): string {
   return host.startsWith('www.') ? host.slice(4) : host;
 }
 
-/** 站点图标候选地址（按优先级，最多 2 个）。 */
-export function faviconCandidates(url: string): string[] {
-  const normalized = normalizeUrl(url);
-  if (normalized === null) return [];
-  let parsed: URL;
-  try {
-    parsed = new URL(normalized);
-  } catch {
-    return [];
-  }
-  // ★ 用 hostname 而不是 host：图标走 https，带非 80/443 端口拼出来的地址必然连不上。
-  const host = parsed.hostname.toLowerCase();
-  if (host.length === 0) return [];
-
-  const out: string[] = ['https://' + host + '/favicon.ico'];
-  const domain = domainOf(normalized);
-  if (domain.length > 0) {
-    // ★ 第二个是公共免 Key 的第三方服务，只在本地直连失败时兜底。
-    //   本项目承诺零服务器依赖，所以它只是一个普通的外部 URL：主进程抓不到就算了，
-    //   绝不上报任何东西，也不把它当成本项目自建的服务。
-    out.push('https://www.google.com/s2/favicons?domain=' + domain + '&sz=64');
-  }
-  return out;
-}
+/**
+ * 图标只取「链接自身主机的 /favicon.ico」（见 desktop url-meta.ts 的抓取处）。
+ *
+ * ★ 这里曾经有一个 faviconCandidates()，会生成含 google s2 在内的候选列表。
+ *   它一次都没被调用过，但留在公开包里就是诱导后人"顺手接上"的陷阱：
+ *   把用户复制过的域名交给第三方图标服务，与本项目"零服务器依赖"的承诺直接冲突。
+ *   需要抓不到图标时的兜底 → 用 domainOf() 显示域名，别引入任何外部主机。
+ */
 
 /** 从 HTML 里提取标题与描述。 */
 export interface PageMeta {

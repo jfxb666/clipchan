@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { domainOf, extractMeta, faviconCandidates, normalizeUrl, shouldFetchUrl } from './urlPreview';
+import { domainOf, extractMeta, normalizeUrl, shouldFetchUrl } from './urlPreview';
 
 describe('normalizeUrl', () => {
   it('无协议时补 https', () => {
@@ -101,34 +101,12 @@ describe('domainOf', () => {
   });
 });
 
-describe('faviconCandidates', () => {
-  it('给出两个候选：站点自身 favicon 在前，第三方兜底在后', () => {
-    expect(faviconCandidates('https://www.example.com/a')).toEqual([
-      'https://www.example.com/favicon.ico',
-      'https://www.google.com/s2/favicons?domain=example.com&sz=64',
-    ]);
-  });
-
-  it('第二个候选的 domain 去 www. 且不带端口', () => {
-    expect(faviconCandidates('https://sub.example.com:8080/a')[1]).toBe(
-      'https://www.google.com/s2/favicons?domain=sub.example.com&sz=64',
-    );
-  });
-
-  it('第一个候选不带端口', () => {
-    expect(faviconCandidates('https://sub.example.com:8080/a')[0]).toBe(
-      'https://sub.example.com/favicon.ico',
-    );
-  });
-
-  it('最多 2 个', () => {
-    expect(faviconCandidates('https://example.com/a').length).toBe(2);
-  });
-
-  it('非法 URL 返回空数组', () => {
-    expect(faviconCandidates('')).toEqual([]);
-    expect(faviconCandidates('ftp://a.com/x')).toEqual([]);
-    expect(faviconCandidates('https://')).toEqual([]);
+describe('导出面（隐私承诺）', () => {
+  it('★ 不导出任何"第三方图标服务候选"（隐私承诺：抓不到图标就不显示）', async () => {
+    // faviconCandidates()（含 google s2 候选）因隐私原因被删除，理由见 urlPreview.ts；
+    // 这条用例防止有人把它（或类似的第三方候选逻辑）再"顺手"加回公开导出。
+    const mod = await import('./urlPreview');
+    expect(mod).not.toHaveProperty('faviconCandidates');
   });
 });
 

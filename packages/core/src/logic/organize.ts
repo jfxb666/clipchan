@@ -158,8 +158,8 @@ interface TagRule {
 }
 
 /**
- * 标签规则表（★ 表驱动：顺序即 AUTO_TAGS 顺序即界面展示顺序）。
- * 加规则只改这张表；AUTO_TAGS 由它派生，避免"加了规则忘了补词表"。
+ * 标签规则表（★ 表驱动：规则顺序即 suggestTags 输出顺序即界面展示顺序）。
+ * 加规则只改这张表 —— 词表就是这张表派生的 tag 列，不存在会与之漂移的第二份词表。
  */
 const TAG_RULES: readonly TagRule[] = [
   { tag: '链接', weight: 'primary', test: (c) => c.kind === 'link' || c.cls === 'link' },
@@ -176,9 +176,6 @@ const TAG_RULES: readonly TagRule[] = [
   { tag: '英文', weight: 'weak', test: (c) => isEnglish(c.trimmed) },
   { tag: '长文本', weight: 'neutral', test: (c) => isLongText(c.trimmed) },
 ];
-
-/** 固定标签词表（顺序即界面展示顺序）。新增标签必须同时补进这里。 */
-export const AUTO_TAGS: readonly string[] = TAG_RULES.map((r) => r.tag);
 
 /** 本地规则建议的标签（可能为空数组；去重、顺序稳定）。 */
 export function suggestTags(input: OrganizeInput): string[] {

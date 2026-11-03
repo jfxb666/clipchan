@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AUTO_TAGS,
   MAX_FOLDER_DEPTH,
   buildFolderTree,
   canMoveFolder,
@@ -19,25 +18,52 @@ function input(over: Partial<{ kind: string; text: string; sourceApp: string; cr
 const folders = (...items: [string, string, string | null][]): OrganizeFolder[] =>
   items.map(([id, name, parentId]) => ({ id, name, parentId }));
 
-describe('AUTO_TAGS', () => {
-  it('词表固定且顺序稳定（界面展示顺序）', () => {
-    expect(AUTO_TAGS).toEqual([
+describe('固定词表（不再对外导出常量）', () => {
+  it('★ 词表就是规则表能产出的那些标签：每个类别都有真实输入能打出对应标签', () => {
+    // AUTO_TAGS 常量已删（产品零调用）：词表与规则表从此是同一张表，不存在漂移。
+    // 用真实输入驱动真实输出 —— "词表变了但规则没变"或反之，都会被这条抓到。
+    // 单条输入最多 3 个标签，所以每类一个样例再取并集；单条内部的顺序仍按规则表顺序
+    // （顺序由下方"最多返回 3 个"等用例钉住）。
+    const samples = [
+      input({ kind: 'link', text: 'https://example.com' }), // 链接
+      input({ kind: 'code', text: 'const a = 1;' }), // 代码
+      input({ text: 'C:\\Users\\me\\Desktop' }), // 路径
+      input({ text: '1,234.56' }), // 数字
+      input({ kind: 'image', text: '' }), // 图片
+      input({ kind: 'files', text: '' }), // 文件
+      input({ text: 'dev@example.com' }), // 邮箱
+      input({ text: '13800138000' }), // 电话
+      input({ text: '{"a":1}' }), // JSON
+      input({ text: '#aabbcc' }), // 颜色
+      input({ text: '今天下午三点开会' }), // 中文（weak，无 primary 命中才出现）
+      input({ text: 'hello world this is english text' }), // 英文（weak）
+      input({ text: 'a'.repeat(500) }), // 长文本（neutral，可与结构化标签共存）
+    ];
+    const produced = new Set<string>();
+    for (const sample of samples) {
+      for (const t of suggestTags(sample)) produced.add(t);
+    }
+    for (const expectTag of [
       '链接', '代码', '路径', '数字', '图片', '文件',
       '邮箱', '电话', 'JSON', '颜色', '中文', '英文', '长文本',
-    ]);
+    ]) {
+      expect(produced.has(expectTag)).toBe(true);
+    }
   });
 
-  it('suggestTags 产出的标签一定在词表内且不重复', () => {
+  it('suggestTags 产出的标签永不重复', () => {
+    // 旧断言还检查"产出 ⊆ AUTO_TAGS 词表"；词表常量删除后词表与规则表合一，
+    // 标签只能来自 TAG_RULES 的 tag 字段，该检查不再有独立意义。
     const samples = [
       input({ kind: 'link', text: 'https://example.com' }),
       input({ kind: 'code', text: 'function foo() {}' }),
       input({ kind: 'image' }),
       input({ text: 'dev@example.com' }),
+      input({ text: 'a'.repeat(500) }),
     ];
     for (const s of samples) {
       const tags = suggestTags(s);
       expect(new Set(tags).size).toBe(tags.length);
-      for (const t of tags) expect(AUTO_TAGS).toContain(t);
     }
   });
 });

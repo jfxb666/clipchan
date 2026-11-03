@@ -110,8 +110,9 @@ export function createUrlMeta(deps: UrlMetaDeps): UrlMetaApi {
 
         const meta = extractMeta(html);
 
-        // ★ 图标只用**链接自身主机**的 /favicon.ico，绝不回落到 faviconCandidates 里的
-        //   google s2 第三方服务：那等于把「用户复制了哪些链接」泄露给第三方。
+        // ★ 图标只用**链接自身主机**的 /favicon.ico，绝不引入 google s2 之类的第三方
+        //   图标服务：那等于把「用户复制了哪些链接」泄露给第三方（曾经的
+        //   faviconCandidates() 候选实现已删除，理由见 core 的 urlPreview.ts）。
         //   本项目的承诺是零服务器依赖，抓不到图标就不显示图标。
         const parsed = new URL(normalized);
         const host = parsed.hostname.toLowerCase();
