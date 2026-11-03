@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   AppWindow,
   CalendarClock,
@@ -31,11 +31,9 @@ import { bindClipStore, useClipStore, type AppMode, type View } from '../state/s
 import { ListPanel } from './ListPanel';
 import { ResizeHandles } from './ResizeHandles';
 import { SearchBar } from './SearchBar';
-import { SettingsView } from './SettingsView';
 import { Sidebar } from './Sidebar';
 import { TitleBar } from './TitleBar';
 import { ToastStack } from './Toast';
-import { TrashView } from './TrashView';
 import { appToastTone, copyToast, pasteToast, type ToastTone } from './toastText';
 import { ContextMenu } from './ContextMenuView';
 import { menuItemsFor, type MenuAction } from './contextMenu';
@@ -46,18 +44,32 @@ import { qrStatusOf } from './qrView';
 import { viewerKindOf, viewerTitleOf } from './viewer';
 import { WidgetView, WIDGET_PREVIEW_COUNT } from './WidgetView';
 import { widgetWindowHeight } from './widgetFit';
-import { OptimizeView } from './OptimizeViewCard';
 import { AssistView } from './AssistViewCard';
 import { ocrErrorText, ocrSavedToast } from './ocrView';
-import { WordCloudView } from './WordCloudView';
 import { resolveKey, shouldPreventDefault } from './keymap';
 import { useAutoStart, useHotkeyStatus } from './usePlatformValue';
-import { SnippetView } from './SnippetViewCard';
-import { OrganizeView } from './OrganizeViewCard';
 import { OrganizeItemDialog } from './OrganizeItemDialog';
 import { filterChips } from './organizeView';
 import { batchActions, batchBarText, canBatchRemove } from './batchBar';
 import { cn } from './util';
+
+/**
+ * ★ 低频视图懒加载（Task 12 / T-N7）：826 行的设置页、598 行的优化页这类"重且低频"
+ *   的页面如果静态引入，全部视图都会进主 chunk —— 每个用户首次唤起面板都要吃下
+ *   它们的下载和解析，而多数人大多数时候只停在列表页。这里只切低频页，列表/搜索
+ *   等首屏组件保持静态引入。各组件的真实导出名都用 grep 核对过（export function XxxView）。
+ *   截图 overlay 不在此列：它是独立页面入口（capture.html），根本不经过 App 的视图切换。
+ *   ★ 每个调用带 #__PURE__ 注记（即「斜杠星号 #__PURE__ 星号斜杠」）：顶层的未知函数调用
+ *     会被 rollup 当成模块副作用，把整个 App.tsx 判成"不可摇树"，进而被塞进两个入口
+ *     共享的 chunk（capture 页也得跟着加载全部主面板代码）。标注后模块恢复可摇树，
+ *     App 代码回到主窗口入口。
+ */
+const SettingsView = /*#__PURE__*/ lazy(() => import('./SettingsView').then((m) => ({ default: m.SettingsView })));
+const OptimizeView = /*#__PURE__*/ lazy(() => import('./OptimizeViewCard').then((m) => ({ default: m.OptimizeView })));
+const TrashView = /*#__PURE__*/ lazy(() => import('./TrashView').then((m) => ({ default: m.TrashView })));
+const SnippetView = /*#__PURE__*/ lazy(() => import('./SnippetViewCard').then((m) => ({ default: m.SnippetView })));
+const WordCloudView = /*#__PURE__*/ lazy(() => import('./WordCloudView').then((m) => ({ default: m.WordCloudView })));
+const OrganizeView = /*#__PURE__*/ lazy(() => import('./OrganizeViewCard').then((m) => ({ default: m.OrganizeView })));
 
 /**
  * 应用外壳（spec §6.3）：主面板 900×620，自定义标题栏 + 64px 侧栏 + 搜索栏 + 卡片列表。
@@ -1015,6 +1027,14 @@ export function App() {
         ) : null}
 
         <div className={cn('flex min-h-0 min-w-0 flex-1 flex-col', widgetCompact && 'hidden')}>
+          {/*
+            ★ 一个 Suspense 包住全部视图分支（Task 12）：懒加载视图等 chunk 下载期间落到
+              ViewSkeleton。列表页全是静态组件、永远不会 suspend，包进来不改变它的渲染；
+              Esc/键盘判定在组件树外（escapeCtx + 全局 keydown），不受影响。ErrorBoundary
+              仍在外层（main.tsx 包住 App），chunk 加载失败照常上抛，不被 Suspense 吞掉。
+              （分支体保持原缩进不动，减小 diff。）
+          */}
+          <Suspense fallback={<ViewSkeleton />}>
           {view === 'list' ? (
             <>
               <div className="flex shrink-0 items-center gap-tight px-base py-snug">
@@ -1292,6 +1312,7 @@ export function App() {
           {view === 'organize' ? (
             <OrganizeView onClose={() => useClipStore.getState().closeOrganize()} />
           ) : null}
+          </Suspense>
         </div>
       </div>
 
@@ -1366,6 +1387,11 @@ async function hidePanel(): Promise<void> {
   } catch {
     // 浏览器预览里没有托盘，忽略。
   }
+}
+
+/** 懒加载视图的占位（Task 12）：只撑高度，不做动画 —— 面板是秒开工具，转圈反而显得慢。 */
+function ViewSkeleton(): JSX.Element {
+  return <div className="flex min-h-0 flex-1 items-center justify-center text-[12px] text-ink-3">加载中…</div>;
 }
 
 export type { View };
