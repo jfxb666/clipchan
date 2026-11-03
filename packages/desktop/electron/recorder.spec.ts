@@ -514,4 +514,28 @@ describe('图片感知哈希（v1.1.0 phash）', () => {
     // 记录成功就不该留失败日志（这是"附属计算失败"，不是"记录失败"）
     expect(logs.some((m) => m.includes('图片记录失败'))).toBe(false);
   });
+
+  it('★ 一次复制只解一次像素：alpha 判定与感知哈希共用同一份 toBitmap（T-M10）', () => {
+    let calls = 0;
+    const base = imageWithBitmap(16, 16);
+    // 抹掉显式 hasAlpha 标记：逼 alpha 判定走 A 通道扫描 —— 如果落盘路径不认共享像素，
+    // 它就得自己再调一次 toBitmap，下面的计数立刻变 2。
+    const img: NativeImageLike = {
+      ...base,
+      hasAlpha: undefined,
+      toBitmap: () => {
+        calls += 1;
+        return base.toBitmap!();
+      },
+    };
+    const rec = makeRecorder();
+
+    const result = rec.recordImage(img);
+    expect(result).not.toBeNull();
+    // ★ 一次解码：落盘时的 alpha 判定与感知哈希用的是同一份像素
+    expect(calls).toBe(1);
+    // 共用像素算出的结果也要对：无 alpha 走 .jpg，phash 照常入库
+    expect(db.getRow(result!.id)!.phash).toMatch(/^[0-9a-f]{16}$/);
+    expect(existsSync(join(imagesDir(dataDir), result!.id + '.jpg'))).toBe(true);
+  });
 });

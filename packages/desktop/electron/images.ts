@@ -73,22 +73,47 @@ function fitLongEdge(size: Size, edge: number): Size {
   return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)) };
 }
 
-/** 判断是否带 alpha：优先用显式的 hasAlpha，其次扫 BGRA 位图的 A 通道，最后保守判 false。 */
-export function detectAlpha(img: NativeImageLike): boolean {
-  if (typeof img.hasAlpha === 'function') return img.hasAlpha();
-  if (typeof img.hasAlpha === 'boolean') return img.hasAlpha;
-  if (typeof img.toBitmap === 'function') {
-    try {
-      const bmp = img.toBitmap();
-      for (let i = 3; i < bmp.length; i += 4) {
-        if (bmp[i] !== 255) return true;
-      }
-      return false;
-    } catch {
-      return false;
-    }
+/**
+ * 一次像素解码，alpha 判定与感知哈希共用（T-M10）。
+ * ★ 原来 detectAlpha 与 imagePhash 各自 img.toBitmap()：Electron 每次调用都会重新解一遍
+ *   全图 BGRA，大图就是双份内存 + 双份 CPU。这里把"解码"收敛成一个出口，
+ *   判定函数改成收 Buffer —— 判定规则一个字不动。
+ */
+export function pixelsOf(img: NativeImageLike): Buffer | null {
+  if (!img || typeof img.toBitmap !== 'function') return null;
+  try {
+    const bmp = img.toBitmap();
+    return Buffer.isBuffer(bmp) && bmp.length > 0 ? bmp : null;
+  } catch {
+    return null; // 解码失败与"没有这张图"同一处理：下游按无 alpha / 无 phash 走
+  }
+}
+
+/** 扫 BGRA 位图的 A 通道（每像素第 4 字节）：有一个不是 255 就算带 alpha；空位图按无 alpha。 */
+export function detectAlphaFrom(bmp: Buffer | null): boolean {
+  if (!bmp || bmp.length === 0) return false;
+  for (let i = 3; i < bmp.length; i += 4) {
+    if (bmp[i] !== 255) return true;
   }
   return false;
+}
+
+/**
+ * alpha 判定的统一实现：显式 hasAlpha > 扫位图 A 通道 > 保守 false。
+ * ★ pixels 是调用方已解好的像素（T-M10 的复用通道）：undefined = 没解过，需要时现场解一次
+ *   （detectAlpha 的原行为）；null = 解过了但失败，与空位图一样按无 alpha 走，不重试第二次。
+ * ★ 抽出本函数而不是让 saveImage 直接调 detectAlpha(img)：后者拿不到共享像素，
+ *   只能再解一遍码，T-M10 就白合并了。
+ */
+function detectAlphaOf(img: NativeImageLike, pixels?: Buffer | null): boolean {
+  if (typeof img.hasAlpha === 'function') return img.hasAlpha();
+  if (typeof img.hasAlpha === 'boolean') return img.hasAlpha;
+  return detectAlphaFrom(pixels === undefined ? pixelsOf(img) : pixels);
+}
+
+/** 判断是否带 alpha：优先用显式的 hasAlpha，其次扫 BGRA 位图的 A 通道，最后保守判 false。 */
+export function detectAlpha(img: NativeImageLike): boolean {
+  return detectAlphaOf(img, undefined);
 }
 
 function mkdirp(dir: string): void {
@@ -105,8 +130,14 @@ function mkdirp(dir: string): void {
  * - 返回值里的路径是**相对数据目录的相对路径**，绝对路径不出主进程。
  *
  * @param dir 数据目录（`%APPDATA%\Clipchan`）。
+ * @param pixels 调用方已经解好的像素（pixelsOf 的产物，可选）：传了就不为判 alpha 再解一次。
  */
-export function saveImage(dir: string, id: string, img: NativeImageLike): SavedImage {
+export function saveImage(
+  dir: string,
+  id: string,
+  img: NativeImageLike,
+  pixels?: Buffer | null,
+): SavedImage {
   if (!img || typeof img.isEmpty !== 'function' || img.isEmpty()) {
     throw new Error('saveImage: 空图片');
   }
@@ -121,7 +152,9 @@ export function saveImage(dir: string, id: string, img: NativeImageLike): SavedI
   const width = Math.max(0, Math.round(size.width));
   const height = Math.max(0, Math.round(size.height));
 
-  const hasAlpha = detectAlpha(img);
+  // ★ T-M10：recordImage 已为感知哈希解过一次像素，从这里传进来直接复用，不再二次解码；
+  //   不传（main.ts 的截图路径等旧调用点）按需现场解，行为不变。alpha 优先级见 detectAlphaOf。
+  const hasAlpha = detectAlphaOf(img, pixels);
   const ext = hasAlpha ? 'png' : 'jpg';
   const originalBuf = hasAlpha ? working.toPNG() : working.toJPEG(JPEG_QUALITY);
 
@@ -158,7 +191,11 @@ export function hashImageBuffer(buf: Buffer | Uint8Array): string {
 }
 
 /**
- * v1.1.0：从 NativeImage 算 64 位 dHash；拿不到位图或算不出来返回 undefined（绝不影响入库）。
+ * 从一份已解码位图算 64 位 dHash（T-M10 起与 alpha 判定共用 pixelsOf 的那次解码）。
+ *
+ * ★ 尺寸由调用方给（本函数只认像素不认图）：dHash 要按行取梯度，光有字节推不出布局，
+ *   所以签名是 (bmp, size)。size 不给 / 位图拿不到 / 算不出来都安静返回 undefined ——
+ *   与"这张图没有感知哈希"同一处理，绝不影响入库。
  *
  * ★ 为什么和 hashImageBuffer 并存：sha256 判的是"字节完全相同"，缩放/重新压缩后的同一张图
  *   会被判成两张；dHash 判的是"视觉结构相近"，这正是"库里已有一张很相似的"要的语义。
@@ -170,32 +207,45 @@ export function hashImageBuffer(buf: Buffer | Uint8Array): string {
  * ★ 为什么返回 undefined 而不是空串：ImageMeta.phash 是可选的，不传就等于"这张图没有
  *   感知哈希"，db 层会整段跳过相似判定；传空串反而要多跑一次查询再判空。
  */
-export function imagePhash(img: NativeImageLike): string | undefined {
+export function phashFrom(bmp: Buffer | null, size?: Size): string | undefined {
   try {
-    if (!img || typeof img.getSize !== 'function') return undefined;
-    // ★ 没有 toBitmap 就拿不到像素（只有 PNG/JPEG 字节，重新解码不值得）：
-    //   算不出哈希不该让这张图入不了库，安静返回 undefined 即可。
-    if (typeof img.toBitmap !== 'function') return undefined;
-
-    const size = img.getSize();
+    if (!bmp || !size) return undefined;
     const width = Math.floor(size.width);
     const height = Math.floor(size.height);
     if (!(width > 0) || !(height > 0)) return undefined;
 
-    const bmp = img.toBitmap();
     const span = width * height * 4;
     // ★ 长度不够就不算：拿半张图算出的哈希是错的，而"错的相似判定"比"没有相似判定"更糟。
-    if (bmp === undefined || bmp.length < span) return undefined;
+    if (bmp.length < span) return undefined;
 
     // ★ bgraToRgba 回的是 Uint8ClampedArray，而 rgbaToGray 收 Uint8Array —— 两者在 TS 里
-    //   是不同的类型（不是子类型关系），所以这里 Uint8Array.from 拷一份。
-    //   代价是 width*height 字节的一次性拷贝，相对解码位图本身可以忽略。
-    const rgba = Uint8Array.from(bgraToRgba(bmp.subarray(0, span)));
-    const hash = dhash(rgbaToGray(rgba, width, height));
+    //   是不同的类型。不再 Uint8Array.from 拷一份（T-M10 磨掉的第三个全图拷贝），改用
+    //   同一块内存的零拷贝视图：读字节两种视图语义一致（钳制只发生在写入侧），
+    //   与 qrcode.ts 在 decode 通道间的互转是同一个做法。
+    const rgba = bgraToRgba(bmp.subarray(0, span));
+    const gray = rgbaToGray(new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height);
+    const hash = dhash(gray);
     return hash.length > 0 ? hash : undefined;
   } catch {
     // ★ 静默吞掉：这是入库前的**附属**计算，位图接口在异常图片上抛错是正常的，
     //   为此丢掉用户刚复制的图片才是真的错。
+    return undefined;
+  }
+}
+
+/**
+ * v1.1.0：从 NativeImage 算 64 位 dHash；拿不到位图或算不出来返回 undefined（绝不影响入库）。
+ * ★ T-M10：像素解码收敛到 pixelsOf，本函数只是"取尺寸 + 解码一次"的薄封装，
+ *   外部调用点（recorder / main.ts 截图）签名不变。
+ */
+export function imagePhash(img: NativeImageLike): string | undefined {
+  try {
+    if (!img || typeof img.getSize !== 'function') return undefined;
+    const size = img.getSize();
+    // ★ 没有 toBitmap 就拿不到像素（只有 PNG/JPEG 字节，重新解码不值得）：
+    //   算不出哈希不该让这张图入不了库，安静返回 undefined 即可。
+    return phashFrom(pixelsOf(img), size);
+  } catch {
     return undefined;
   }
 }

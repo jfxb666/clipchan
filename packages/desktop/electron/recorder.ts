@@ -19,7 +19,8 @@ import {
   enforceImageBudget,
   deleteImageFiles,
   hashImageBuffer,
-  imagePhash,
+  phashFrom,
+  pixelsOf,
   saveImage,
   type NativeImageLike,
   type SavedImage,
@@ -220,8 +221,15 @@ export class Recorder {
 
     const tmpId = randomUUID().replace(/-/g, '');
     let saved: SavedImage;
+    // ★ 一次解码，alpha 判定与感知哈希共用同一份像素（原来 saveImage 判 alpha、imagePhash
+    //   算哈希各自 toBitmap 全图解一遍，见 T-M10）。解码本来就是"落盘"这一档的成本，
+    //   所以放进同一个计时里；像素拿不到（null）时两个下游各自安静降级。
+    let pixels: Buffer | null = null;
     try {
-      saved = this.measure('图片解码与落盘', () => saveImage(this.dataDir, tmpId, img));
+      saved = this.measure('图片解码与落盘', () => {
+        pixels = pixelsOf(img);
+        return saveImage(this.dataDir, tmpId, img, pixels);
+      });
     } catch (e) {
       this.log('图片落盘失败（已忽略）：' + describeError(e));
       return null;
@@ -231,8 +239,16 @@ export class Recorder {
 
     // ★ v1.1.0：感知哈希在**落盘之后**算，但用原始 img 的像素（不是磁盘上的 JPEG/PNG 字节）：
     //   dHash 要的是像素，重新解码一份文件纯属浪费；而哈希值本来就不该受编码质量影响。
+    //   T-M10 起不再自己解码 —— 复用上面 pixelsOf 的那份，尺寸从 img 现取。
     //   算不出来返回 undefined，此时不传这个字段，db 层会整段跳过相似判定。
-    const phash = this.measure('图片感知哈希', () => imagePhash(img));
+    const phash = this.measure('图片感知哈希', () => {
+      try {
+        return phashFrom(pixels, img.getSize());
+      } catch {
+        // 与原 imagePhash 相同的兜底：哈希是附属计算，尺寸拿不到也绝不影响入库
+        return undefined;
+      }
+    });
 
     let result: InsertResult;
     try {
