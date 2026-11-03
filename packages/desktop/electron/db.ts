@@ -353,9 +353,40 @@ export interface InsertResult {
   similarTo?: string;
 }
 
+/**
+ * 库空间回收的判定阈值（实测依据：淘汰 1.8 万条后文件仍是 79.9MB，
+ * 其中 freelist 占 90%、真正需要的只有 7.9MB；同规模 VACUUM 花 405ms）。
+ */
+export const MAINTAIN_MIN_FREE_PAGES = 2048;
+/** 空闲页至少要占到全库的这个比例，才值得为它做一次 VACUUM（405ms 量级的主进程阻塞）。 */
+export const MAINTAIN_MIN_FREE_RATIO = 0.25;
+/** 单次 incremental_vacuum 最多还给操作系统多少页（约 8MB），把代价切小。 */
+export const MAINTAIN_TRIM_PAGES = 2048;
+
+/** 一次空间回收的结果；调用方只负责写日志，判定全在 db 层（可脱离 Electron 单测）。 */
+export interface MaintenanceResult {
+  /** 动手前的 auto_vacuum 模式：0=none 1=full 2=incremental。 */
+  modeBefore: number;
+  modeAfter: number;
+  pagesBefore: number;
+  freePagesBefore: number;
+  /** 做了一次「切成 incremental + VACUUM」的转换（老库一辈子只会在首次达标时来一次）。 */
+  converted: boolean;
+  /** incremental_vacuum 实际归还的页数。 */
+  trimmedPages: number;
+  /** 没动手的原因：below-threshold = 空闲页还不够多，不值得为它阻塞主进程。 */
+  skipped?: string;
+}
+
 export interface Db {
   /** 底层句柄（测试与上层诊断用）。 */
   readonly raw: Database.Database;
+  /**
+   * 空间回收：把软删/硬删留下的空闲页真正还给磁盘（T-B1）。
+   * ★ 绝不在启动时调用，只在空闲轮询里调用 —— VACUUM 会独占写锁，实测 2 万行 405ms，
+   *   放在启动路径上就是白屏 0.4 秒，放在复制中途就是卡一下。
+   */
+  maintenance(): MaintenanceResult;
   insertText(text: string, opts?: InsertTextOpts): InsertResult;
   insertImage(meta: ImageMeta, opts?: InsertImageOpts): InsertResult;
   /** 记录一条"复制的文件"（v0.6.0）；空数组不落库，直接回 { id: '', touched: false }。 */
@@ -408,7 +439,11 @@ export interface Db {
   clearOptimizeHistory(): number;
   getImageRow(id: string): ImageRow | null;
   /** 全部图片行；unpinnedOnly=true 时只要未收藏的（清空未收藏 / 预算淘汰用）。 */
+  /** 图片字节总量（预算判定用）。★ 只回一个数：不搬任何行。 */
+  imageBytesTotal(): number;
   allImageRows(opts?: { unpinnedOnly?: boolean }): ImageRow[];
+  /** 见实现：某次写入期间新进回收站的图片行 id（上限淘汰的诊断口径，不读整行）。 */
+  recentlyTrashedImageIds(sinceMs: number): string[];
   touch(id: string): void;
   /** 片段库：按 updated_at DESC, id DESC（最近改过的在前）。 */
   listSnippets(): Snippet[];
@@ -918,12 +953,72 @@ function sanitizeSettings(input: Partial<Settings>): Settings {
  * 打开（必要时创建）数据库。传 ':memory:' 可用于单测。
  * 目录不存在时自动创建。
  */
+/**
+ * 空间回收的具体执行（判定与动作都在这里，调用方只转发）。
+ *
+ * ★ 决策依据是**做出来的效果**，不是 `PRAGMA auto_vacuum` 的读回值：
+ *   对已存在的库，pragma 只是登记了意图，文件布局要等一次整库 VACUUM 才真的变成
+ *   incremental —— 只看模式就会永远停在"便宜但一页还不回来"的分支里。
+ *   （建库时就设过的库没这个问题，内存库也一样：实测增量回收照常生效。）
+ * 所以顺序是：先试便宜的增量回收，量到 page_count 真降下来就收工；
+ * 一页都没降下来才付一次整库 VACUUM 的代价（实测 2 万行 405ms），顺带把布局转成 incremental，
+ * 之后同一道判定就会走在便宜分支上，一辈子只付得起这一次。
+ */
+function runMaintenance(raw: Database.Database): MaintenanceResult {
+  const modeBefore = Number(raw.pragma('auto_vacuum', { simple: true }));
+  const pagesBefore = Number(raw.pragma('page_count', { simple: true }));
+  const freePagesBefore = Number(raw.pragma('freelist_count', { simple: true }));
+  const ratio = pagesBefore > 0 ? freePagesBefore / pagesBefore : 0;
+  const base = { modeBefore, pagesBefore, freePagesBefore };
+
+  // 虚胖到不值得动手：freelist 既没到页数也没到比例
+  if (freePagesBefore < MAINTAIN_MIN_FREE_PAGES || ratio < MAINTAIN_MIN_FREE_RATIO) {
+    return { ...base, modeAfter: modeBefore, converted: false, trimmedPages: 0, skipped: 'below-threshold' };
+  }
+
+  raw.pragma('incremental_vacuum = ' + MAINTAIN_TRIM_PAGES);
+  const pagesAfterTrim = Number(raw.pragma('page_count', { simple: true }));
+  const trimmed = pagesBefore - pagesAfterTrim;
+  if (trimmed > 0) {
+    return {
+      ...base,
+      modeAfter: Number(raw.pragma('auto_vacuum', { simple: true })),
+      converted: false,
+      trimmedPages: trimmed,
+    };
+  }
+
+  // 增量回收无效 → 文件还是 none 布局（或是内存库），付一次整库 VACUUM
+  raw.pragma('auto_vacuum = INCREMENTAL');
+  raw.exec('VACUUM');
+  const pagesAfterVacuum = Number(raw.pragma('page_count', { simple: true }));
+  return {
+    ...base,
+    modeAfter: Number(raw.pragma('auto_vacuum', { simple: true })),
+    converted: true,
+    trimmedPages: Math.max(0, pagesBefore - pagesAfterVacuum),
+  };
+}
+
 export function openDb(file: string): Db {
   if (file !== ':memory:') {
     fs.mkdirSync(path.dirname(file), { recursive: true });
   }
 
   const raw = new Database(file);
+  // ★ 必须在 SCHEMA_SQL 之前：auto_vacuum 只对**空库**生效，建完表再设就得等 VACUUM 转换
+  //   （老库那条转换路径代价是整库重写，新库没必要一上手就欠着）。
+  try {
+    raw.pragma('auto_vacuum = INCREMENTAL');
+  } catch {
+    // 只读介质等场景改不了模式，功能不受影响
+  }
+  /**
+   * ★ T-N2：备份路径自己就写过"会撞 database is locked"（backup.ts 的注释），却一直没用
+   *   busy_timeout —— 遇到锁直接抛错给用户看。5 秒等待比"报错"好，也不会让主进程卡死
+   *   （写事务都是毫秒级）。放在 WAL 之前设，连接整条生命周期有效。
+   */
+  raw.pragma('busy_timeout = 5000');
   // WAL：spec §9.1 注明实测可用。内存库不支持 WAL，跳过。
   if (file !== ':memory:') {
     try {
@@ -1018,14 +1113,21 @@ export function openDb(file: string): Db {
   function evictOverLimit(): void {
     const limit = settingsCache.historyLimit;
     if (!Number.isFinite(limit) || limit <= 0) return;
+    // ★ 区间删除，不用 `id NOT IN (… LIMIT N)`：后者 SQLite 走 CREATE BLOOM FILTER
+    //   把**全部活跃行**过一遍（实测 5000 行 7.1ms、6 万行 104ms），而它挂在每次写入上；
+    //   前者直接落在 idx_order 的 (pinned, created_at) 区间里（同档实测 1.45ms）。
+    // ★ 边界取「第 N 新那条」为界并**严格小于**它（OFFSET 是 N-1，不是 N）：
+    //   seq 由 nextSeq 全库唯一，(created_at, seq) 因此是全序，删掉的集合与旧写法逐行等价，
+    //   留着 N 条就是 N 条 —— 早先用 OFFSET N 时实测多留了一行。
     raw.prepare(
       `UPDATE items SET deleted_at = ?
         WHERE deleted_at IS NULL
           AND pinned = 0
-          AND id NOT IN (
-            SELECT id FROM items WHERE deleted_at IS NULL AND pinned = 0 ORDER BY created_at DESC, seq DESC LIMIT ?
+          AND (created_at, seq) < (
+            SELECT created_at, seq FROM items WHERE deleted_at IS NULL AND pinned = 0
+            ORDER BY created_at DESC, seq DESC LIMIT 1 OFFSET ?
           )`,
-    ).run(Date.now(), Math.floor(limit));
+    ).run(Date.now(), Math.max(0, Math.floor(limit) - 1));
     purgeTrashOverLimit();
   }
 
@@ -1107,6 +1209,8 @@ export function openDb(file: string): Db {
 
   const api: Db = {
     raw,
+
+    maintenance: () => runMaintenance(raw),
 
     insertText(text: string, opts: InsertTextOpts = {}): InsertResult {
       if (typeof text !== 'string') throw new Error('insertText: text 必须是字符串');
@@ -1487,11 +1591,51 @@ export function openDb(file: string): Db {
       return row ? rowToImageRow(row) : null;
     },
 
+    /**
+     * 图片字节总量，走 idx_image_bytes 这条部分索引（键就是 bytes，谓词 kind='image'
+     * 由索引本身保证）—— SQLite 只扫索引、不回头读表，也不搬任何一行。
+     * ★ 这是 T-B3 的关键：预算判定每天要跑几千次，而绝大多数时候库根本没超预算，
+     *   为一个"没超"的结论把全部图片行的 14 列读回来纯属白付。
+     */
+    imageBytesTotal(): number {
+      const r = raw
+        .prepare("SELECT COALESCE(SUM(bytes), 0) AS total FROM items WHERE kind = 'image'")
+        .get() as { total: number };
+      return Number(r?.total ?? 0);
+    },
+
+    /**
+     * 图片行全量。
+     * ★ 只选 `ImageRow` 用得到的 14 列，不用 `SELECT *`：items 有 23 列，其中
+     *   `search_index` / `rich_html` / `file_paths` 是最肥的几列，而图片行根本读不到它们
+     *   （`rowToDto` 从不取 search_index，rich_html 只有富文本记录才写）。
+     *   这个函数会被「预算淘汰」「孤儿扫描」「上限诊断」反复调用，行数 × 列宽就是代价本身（T-B3）。
+     */
     allImageRows(opts: { unpinnedOnly?: boolean } = {}): ImageRow[] {
+      const cols =
+        'id, content, image_path, thumb_path, image_hash, width, height, bytes, created_at, seq, pinned, truncated, source, deleted_at';
       const sql = opts.unpinnedOnly
-        ? "SELECT * FROM items WHERE kind = 'image' AND pinned = 0 ORDER BY created_at ASC, seq ASC"
-        : "SELECT * FROM items WHERE kind = 'image' ORDER BY created_at ASC, seq ASC";
+        ? `SELECT ${cols} FROM items WHERE kind = 'image' AND pinned = 0 ORDER BY created_at ASC, seq ASC`
+        : `SELECT ${cols} FROM items WHERE kind = 'image' ORDER BY created_at ASC, seq ASC`;
       return (raw.prepare(sql).all() as ItemRow[]).map(rowToImageRow);
+    },
+
+    /**
+     * 某次写入期间**新**进回收站的图片行 id（T-B3：替代写入前后的两次全量快照）。
+     * ★ 判定依据是 `deleted_at` 落在 [sinceMs, ∞) 里 —— 上限淘汰写进去的就是这个量级的
+     *   时间戳，回收站里本来就有的行时间更早，天然被排除；恢复操作把 `deleted_at` 置 NULL，
+     *   也不会被算进来。与旧的"前后活跃态差集"结果等价，但只读 id 一列。
+     * ★ 走 idx_items_trash 的范围段（谓词逐字对齐），代价与本次淘汰数成正比，与库大小无关。
+     * ★ 边界只到毫秒：与本次写入同毫秒、但发生在它之前的一次 remove 也会被算进这个计数。
+     *   这只是一个诊断用的条数（调用方拿它写一行日志，不据此删任何文件），
+     *   为它再加一次读或换更高精度的时间源都不划算。
+     */
+    recentlyTrashedImageIds(sinceMs: number): string[] {
+      return (
+        raw
+          .prepare("SELECT id FROM items WHERE deleted_at >= ? AND kind = 'image'")
+          .all(sinceMs) as { id: string }[]
+      ).map((r) => r.id);
     },
 
     touch(id: string): void {
@@ -1755,6 +1899,14 @@ export function openDb(file: string): Db {
     },
 
     close(): void {
+      // ★ T-N2：SQLite 官方建议连接关闭前跑一次 PRAGMA optimize —— 它只针对本次会话
+      //   真正查询过的表更新统计信息（比无脑 ANALYZE 便宜得多），下次启动就能拿到好计划。
+      //   放在 close 里而不是启动路径上：启动路径每一毫秒都在给用户看白屏（T-B4 同理）。
+      try {
+        raw.pragma('optimize');
+      } catch {
+        // 只读介质下更新不了统计，不该挡住关闭
+      }
       raw.close();
     },
   };
@@ -1880,4 +2032,34 @@ function ensureColumns(raw: Database.Database): void {
   //   SCHEMA_SQL 里那句 CREATE INDEX 会抛 no such column: folder_id 直接起不来。
   //   这与文件顶部"两个唯一索引故意不建在建表段"是同一个坑。
   raw.exec('CREATE INDEX IF NOT EXISTS idx_items_folder ON items(folder_id)');
+  /**
+   * ★ T-B3：每次记录图片都要跑「相似判定」，每次写入都要跑「回收站上限清理」，
+   *   这两条原来是 SCAN items + USE TEMP B-TREE FOR ORDER BY（整表扫完再外部排序），
+   *   库到几万行时每次复制都白白磨一遍全库。
+   *   部分索引的谓词与查询里的 WHERE 逐字对齐（deleted_at / kind / phash），SQLite 才会用它；
+   *   排序列写成 DESC 是为了让 ORDER BY created_at DESC, seq DESC 直接顺着索引走出来。
+   *   与 idx_items_folder 同一个理由：列是靠上面那轮 ALTER 补的，只能在这里建。
+   */
+  raw.exec(
+    `CREATE INDEX IF NOT EXISTS idx_items_similar ON items(created_at DESC, seq DESC)
+       WHERE deleted_at IS NULL AND kind = 'image' AND phash IS NOT NULL`,
+  );
+  raw.exec(
+    `CREATE INDEX IF NOT EXISTS idx_items_trash ON items(deleted_at DESC, seq DESC)
+       WHERE deleted_at IS NOT NULL`,
+  );
+  // ★ 预算判定的覆盖索引：SUM(bytes) WHERE kind='image' 只扫索引就答得出来，
+  //   不用回头读表（T-B3 里"每次写入都查一遍预算"的那一遍）。
+  raw.exec(
+    `CREATE INDEX IF NOT EXISTS idx_image_bytes ON items(bytes) WHERE kind = 'image'`,
+  );
+  /**
+   * ★ T-B5：`seq` 原来没有任何索引，而每次写入与每次"去重命中刷新"都要跑一次
+   *   `SELECT COALESCE(MAX(seq),0) FROM items` —— 没有索引时 SQLite 的 min/max 优化用不上，
+   *   这条就是全表扫（而且是每次复制都扫）。补一条单列索引后，MAX 直接取索引末尾那一页，
+   *   代价与库大小无关。
+   * ★ 比"把 last_seq 存进 settings 内存计数"更保守：不动任何写入语义，只让同一条查询变便宜，
+   *   计数缓存一旦与库里实际值漂移就会写出重复 seq（seq 参与排序键，撞了就是顺序错乱）。
+   */
+  raw.exec('CREATE INDEX IF NOT EXISTS idx_items_seq ON items(seq)');
 }

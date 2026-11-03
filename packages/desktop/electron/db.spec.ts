@@ -8,6 +8,8 @@ import {
   SCHEMA_VERSION,
   SIMILAR_HAMMING_THRESHOLD,
   SNIPPET_LIMIT,
+  MAINTAIN_MIN_FREE_PAGES,
+  MAINTAIN_TRIM_PAGES,
   buildSearchIndex,
   hammingDistance,
   openDb,
@@ -2119,5 +2121,326 @@ describe('v1.1.0：schema v5（URL 预览缓存 + phash）', () => {
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='url_previews'")
       .get() as { name: string } | undefined;
     expect(table?.name).toBe('url_previews');
+  });
+});
+
+/**
+ * ★ T-B3 的回归钉：相似判定与回收站清理都必须走部分索引。
+ * 断言的是**查询计划**而不是结果集：这两条语句返回的东西一直是对的，坏的是代价——
+ * 没有索引时 SQLite 给的是 SCAN items + USE TEMP B-TREE FOR ORDER BY（整表扫完再外部排序），
+ * 每复制一次图片就磨一遍全库，行数越多越明显，而测试结果集根本看不出来。
+ */
+describe('T-B3：记录路径上的表扫描（查询计划）', () => {
+  const plan = (db: Db, sql: string, params: unknown[]): string =>
+    (db.raw.prepare('EXPLAIN QUERY PLAN ' + sql).all(...params) as { detail: string }[])
+      .map((r) => r.detail)
+      .join(' | ');
+
+  it('相似判定用 idx_items_similar，不再外部排序', () => {
+    const db = mem();
+    const detail = plan(
+      db,
+      `SELECT id, phash FROM items
+         WHERE deleted_at IS NULL AND kind = 'image' AND phash IS NOT NULL AND id != ?
+         ORDER BY created_at DESC LIMIT 200`,
+      ['some-id'],
+    );
+    expect(detail).toContain('idx_items_similar');
+    expect(detail).not.toContain('TEMP B-TREE');
+  });
+
+  it('回收站上限清理用 idx_items_trash，不再外部排序', () => {
+    const db = mem();
+    const detail = plan(
+      db,
+      `SELECT id FROM items WHERE deleted_at IS NOT NULL
+         ORDER BY deleted_at DESC, seq DESC LIMIT -1 OFFSET ?`,
+      [200],
+    );
+    expect(detail).toContain('idx_items_trash');
+    expect(detail).not.toContain('TEMP B-TREE');
+  });
+
+  it('★ 老库升级后同样拿到这两条索引（只在新库生效等于没修）', () => {
+    const file = join(tmpDir(), 'clipchan.db');
+    seedLegacyDb(file);
+    const db = openDb(file);
+    try {
+      const names = new Set(
+        (db.raw.prepare('PRAGMA index_list(items)').all() as { name: string }[]).map((r) => r.name),
+      );
+      expect(names.has('idx_items_similar')).toBe(true);
+      expect(names.has('idx_items_trash')).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/**
+ * ★ T-B1：软删/硬删之后文件从不缩小（实测淘汰 1.8 万条后 79.9MB 里 90% 是 freelist）。
+ * maintenance() 把"还不还、怎么还"的判定收在 db 层，这里逐条钉住，
+ * 因为代价不对称：不达标就动手是白白阻塞主进程，达标却不动手就是磁盘永远虚胖。
+ */
+describe('T-B1：库空间回收', () => {
+  /**
+   * 灌 n 条**大**行再把它们硬删掉，制造 freelist（DELETE 与 purgeTrashOverLimit 同一条语句）。
+   * ★ 直连 INSERT 而不是 db.insertText：insertText 每条都要建 search_index 并跑一遍上限淘汰，
+   *   500 条 4 万字节的记录能把这组测试拖到几分钟。这里要测的是**页的归还**，
+   *   造页的人是谁不重要 —— 真实淘汰路径由上面那组查询计划测试负责钉住。
+   */
+  function bloat(db: Db, n: number): void {
+    const ins = db.raw.prepare(
+      `INSERT INTO items (id, kind, content, content_hash, created_at, seq, pinned)
+       VALUES (?, 'text', ?, ?, ?, ?, 0)`,
+    );
+    const tx = db.raw.transaction(() => {
+      for (let i = 0; i < n; i++) {
+        ins.run('pad' + i, 'x'.repeat(100000) + i, 'padhash' + i, 1700000000000 + i, i);
+      }
+    });
+    tx();
+    const del = db.raw.prepare('DELETE FROM items WHERE id = ?');
+    const purge = db.raw.transaction((ids: string[]) => {
+      for (const id of ids) del.run(id);
+    });
+    purge((db.raw.prepare('SELECT id FROM items').all() as { id: string }[]).map((r) => r.id));
+  }
+
+  const freePages = (db: Db) => Number(db.raw.pragma('freelist_count', { simple: true }));
+  const pageCount = (db: Db) => Number(db.raw.pragma('page_count', { simple: true }));
+  const mode = (db: Db) => Number(db.raw.pragma('auto_vacuum', { simple: true }));
+
+  /** 新建的**文件**库：只有文件库才谈得上把页还给磁盘，内存库的 freelist 无处可还。 */
+  function newFileDb(): Db {
+    return openDb(join(tmpDir(), 'clipchan.db'));
+  }
+
+  it('新建库一上手就是 incremental，且空库不动手（不白付一次 VACUUM）', () => {
+    const db = newFileDb();
+    try {
+      expect(mode(db)).toBe(2);
+      expect(db.maintenance().skipped).toBe('below-threshold');
+      expect(db.maintenance().converted).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('★ incremental 文件库攒够空闲页：走便宜的增量回收，page_count 真降下来', () => {
+    const db = newFileDb();
+    try {
+      bloat(db, 300);
+      expect(freePages(db)).toBeGreaterThanOrEqual(MAINTAIN_TRIM_PAGES);
+      const before = pageCount(db);
+      const res = db.maintenance();
+      expect(res.modeBefore).toBe(2);
+      expect(res.converted).toBe(false);
+      expect(res.skipped).toBeUndefined();
+      // 一次回收的量级 = MAINTAIN_TRIM_PAGES。★ 不是严格上限：SQLite 按 lock 粒度成批释放，
+      //   实测请求 2048 会还 2051 页 —— 判"代价有界"看的是同一轮只处理这么多，不是逐页相等。
+      expect(res.trimmedPages).toBeGreaterThanOrEqual(MAINTAIN_TRIM_PAGES);
+      expect(res.trimmedPages).toBeLessThan(MAINTAIN_TRIM_PAGES * 2);
+      expect(pageCount(db)).toBe(before - res.trimmedPages);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('★ 虚胖不达标时坚决不动手（VACUUM 是整库重写，不能为一点零头付）', () => {
+    const db = newFileDb();
+    try {
+      // 只灌几百条：freelist 到不了 2048 页
+      const tx = db.raw.transaction(() => {
+        for (let i = 0; i < 200; i++) db.insertText('y'.repeat(512) + i, { now: 1700000000000 + i });
+      });
+      tx();
+      db.raw.prepare('DELETE FROM items').run();
+      expect(freePages(db)).toBeLessThan(MAINTAIN_MIN_FREE_PAGES);
+      const before = pageCount(db);
+      const res = db.maintenance();
+      expect(res.skipped).toBe('below-threshold');
+      expect(res.converted).toBe(false);
+      expect(pageCount(db)).toBe(before);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('★ 内存库同样走便宜路径：openDb 在建表前就设好了 incremental（一次 VACUUM 都不欠）', () => {
+    const db = mem();
+    bloat(db, 300);
+    expect(mode(db)).toBe(2);
+    const before = pageCount(db);
+    const res = db.maintenance();
+    expect(res.converted).toBe(false);
+    expect(res.trimmedPages).toBeGreaterThan(0);
+    expect(pageCount(db)).toBeLessThan(before);
+  });
+
+  it('★ 老库虚胖到阈值：转换成 incremental 并当场缩下去', () => {
+    const file = join(tmpDir(), 'clipchan.db');
+    seedLegacyDb(file);
+    const db = openDb(file);
+    try {
+      bloat(db, 300);
+      const before = pageCount(db);
+      const res = db.maintenance();
+      expect(res.converted).toBe(true);
+      expect(res.modeBefore).toBe(0);
+      expect(res.modeAfter).toBe(2);
+      expect(res.trimmedPages).toBeGreaterThan(0);
+      expect(pageCount(db)).toBeLessThan(before);
+      // 转换之后 freelist 归零，下一轮直接判定为不达标，不会再付第二次 VACUUM
+      expect(db.maintenance().skipped).toBe('below-threshold');
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/**
+ * ★ 上限淘汰改写（每次复制的固定开销）：evictOverLimit 从 `id NOT IN (… LIMIT N)`
+ *   换成按 idx_order 的 (created_at, seq) 区间删。改写只该改**代价**，不该改**结果**，
+ *   所以这里钉的是"留下的到底是哪几条"，而不是速度。
+ *   实测旧写法 5000 活跃行 7.1ms、6 万行 104ms（计划里是 CREATE BLOOM FILTER 过全表），
+ *   新写法同档 1.45ms（SEARCH items USING INDEX idx_order (pinned=? AND created_at<?)）。
+ */
+/**
+ * ★ T-B3：复制一段文字原来要把全部图片行读三遍（写入前后快照 + 预算检查），
+ * 而且用的是 `SELECT *`（23 列，含图片行永远读不到的 search_index / rich_html）。
+ * 这三条钉住改造不回退：列裁剪、聚合判定、以及"只问本次翻转化了哪些行"。
+ */
+describe('T-B3：图片行的读取代价', () => {
+  it('allImageRows 不再把肥列搬回来', () => {
+    const db = mem();
+    db.insertText('正文与图片无关，但 search_index 会写满这一列', { now: 1700000000000 });
+    db.insertImage(
+      { hash: 'h1', width: 10, height: 10, bytes: 5000, imagePath: 'images/h1.jpg', thumbPath: 'thumbs/h1.png' },
+      { now: 1700000001000 },
+    );
+    const rows = db.allImageRows();
+    expect(rows).toHaveLength(1);
+    // 列裁剪的判据：返回的行对象里根本没有那几列的键（不是"值为 null"，是"没读"）
+    expect('search_index' in rows[0]!).toBe(false);
+    expect('rich_html' in rows[0]!).toBe(false);
+    expect('file_paths' in rows[0]!).toBe(false);
+    expect(rows[0]!.bytes).toBe(5000);
+  });
+
+  it('★ 预算判定走覆盖索引，不回表读任何一行', () => {
+    const db = mem();
+    db.insertImage(
+      { hash: 'h1', width: 10, height: 10, bytes: 4096, imagePath: 'images/h1.jpg', thumbPath: 'thumbs/h1.png' },
+      { now: 1700000001000 },
+    );
+    db.insertImage(
+      { hash: 'h2', width: 10, height: 10, bytes: 1024, imagePath: 'images/h2.jpg', thumbPath: 'thumbs/h2.png' },
+      { now: 1700000002000 },
+    );
+    expect(db.imageBytesTotal()).toBe(5120);
+    const detail = (
+      db.raw
+        .prepare("EXPLAIN QUERY PLAN SELECT COALESCE(SUM(bytes), 0) FROM items WHERE kind = 'image'")
+        .all() as { detail: string }[]
+    )
+      .map((r) => r.detail)
+      .join(' | ');
+    expect(detail).toContain('idx_image_bytes');
+    expect(detail).toContain('COVERING INDEX');
+  });
+
+  it('★ recentlyTrashedImageIds 只认本次写入期间新进回收站的图片行', () => {
+    const db = mem();
+    const mk = (hash: string, now: number) =>
+      db.insertImage(
+        { hash, width: 8, height: 8, bytes: 100, imagePath: `images/${hash}.jpg`, thumbPath: `thumbs/${hash}.png` },
+        { now },
+      ).id;
+    const old = mk('a', 1700000000000);
+    const fresh = mk('b', 1700000001000);
+    // 一条早就在回收站里的老行：deleted_at 显式写成历史时间（不用 db.remove，
+    // 它盖的是 Date.now()，和本次写入只差不到 1ms，判不出方向）
+    db.remove(old);
+    db.raw.prepare('UPDATE items SET deleted_at = ? WHERE id = ?').run(1700000000000, old);
+    const startedAt = Date.now();
+    const flipped = db.remove(fresh);
+    expect(flipped).not.toBeNull();
+    const moved = db.recentlyTrashedImageIds(startedAt);
+    expect(moved).toContain(fresh);
+    expect(moved).not.toContain(old);
+    // 恢复之后 deleted_at 置空，再来一次也不该被算进来
+    db.restore(fresh);
+    expect(db.recentlyTrashedImageIds(startedAt)).not.toContain(fresh);
+  });
+});
+
+describe('T-B5：每次写入都要跑的那两条全表级语句', () => {
+  const planOf = (db: Db, sql: string): string =>
+    (db.raw.prepare('EXPLAIN QUERY PLAN ' + sql).all() as { detail: string }[])
+      .map((r) => r.detail)
+      .join(' | ');
+
+  it('★ MAX(seq) 走索引 —— 无索引时它是每次复制与每次去重命中都跑一次的整表遍历', () => {
+    const db = mem();
+    for (let i = 0; i < 50; i++) db.insertText('t' + i, { now: 1700000000000 + i });
+    const detail = planOf(db, 'SELECT COALESCE(MAX(seq), 0) AS m FROM items');
+    expect(detail).toContain('idx_items_seq');
+    expect(detail).not.toContain('SCAN items');
+    // 只该改代价，不该改语义：seq 仍是全库唯一
+    const seqs = (db.raw.prepare('SELECT seq FROM items').all() as { seq: number }[]).map((r) => r.seq);
+    expect(new Set(seqs).size).toBe(50);
+  });
+
+  it('★ busy_timeout 设上了（备份路径自己注释过会撞 database is locked，却一直在直接抛错）', () => {
+    const db = mem();
+    expect(Number(db.raw.pragma('busy_timeout', { simple: true }))).toBe(5000);
+  });
+
+  it('★ 老库升级后同样拿到 seq 索引与图片字节覆盖索引（只在新库生效等于没修）', () => {
+    const file = join(tmpDir(), 'clipchan.db');
+    seedLegacyDb(file);
+    const db = openDb(file);
+    try {
+      const names = new Set(
+        (db.raw.prepare('PRAGMA index_list(items)').all() as { name: string }[]).map((r) => r.name),
+      );
+      expect(names.has('idx_items_seq')).toBe(true);
+      expect(names.has('idx_image_bytes')).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('上限淘汰的边界与收藏豁免', () => {
+  it('★ 留下的必须正好是最新 historyLimit 条（区间改写不能多留一条）', () => {
+    const db = mem();
+    db.setSettings({ ...DEFAULT_SETTINGS, historyLimit: 10 });
+    for (let i = 0; i < 25; i++) db.insertText('内容' + i, { now: 1700000000000 + i });
+    const alive = db.list({ limit: 100 }).map((x) => x.preview);
+    expect(alive).toHaveLength(10);
+    // 第 15 条起（含）才该活着 —— 多留一条就说明 OFFSET 取错了边界
+    expect(alive[0]).toBe('内容24');
+    expect(alive[9]).toBe('内容15');
+  });
+
+  it('★ 收藏项不占名额、也不会被淘汰', () => {
+    const db = mem();
+    // 先给足名额，把最老那条活着等到被收藏
+    db.setSettings({ ...DEFAULT_SETTINGS, historyLimit: 20 });
+    for (let i = 0; i < 12; i++) db.insertText('pinned-' + i, { now: 1700000000000 + i });
+    const old = db.list({ limit: 100 }).find((x) => x.preview === 'pinned-0');
+    expect(old).toBeDefined();
+    db.togglePin(old!.id);
+    // 再把名额收紧到 5：此后每次写入都按 5 条淘汰非收藏
+    db.setSettings({ ...DEFAULT_SETTINGS, historyLimit: 5 });
+    for (let i = 20; i < 26; i++) db.insertText('later-' + i, { now: 1700000000000 + i });
+    const alive = db.list({ limit: 100 }).map((x) => x.preview);
+    expect(alive).toContain('pinned-0');
+    // 5 个非收藏名额 + 1 条收藏 = 6 条活着
+    const unpinned = alive.filter((c) => !c.startsWith('pinned-'));
+    expect(unpinned).toHaveLength(5);
+    expect(unpinned[0]).toBe('later-25');
   });
 });

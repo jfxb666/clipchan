@@ -277,6 +277,14 @@ export function enforceImageBudget(
   budgetBytes: number,
   onLog?: (message: string) => void,
 ): { evicted: string[]; removed: number; log: FileRemovalLog } {
+  // ★ 先用聚合值判"要不要动手"（一条 SUM 查询，走 idx_image_bytes 覆盖索引），
+  //   没超预算就到此为止 —— 绝大多数写入都属于这一档。T-B3 的第三次全量读行因此消失。
+  // ★ 判定必须留在这里、不能挪到调用方：用户把预算调小之后，靠的就是"下一次写入"把它压下去
+  //   （recorder.spec 钉着这条），所以任何 kinds 的写入都得来问一次。
+  if (budgetBytes > 0 && db.imageBytesTotal() <= budgetBytes) {
+    return { evicted: [], removed: 0, log: { removed: [], failures: [] } };
+  }
+
   const all = db.allImageRows();
   const rows = all.map((r) => ({
     id: r.id,

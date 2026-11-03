@@ -26,6 +26,7 @@ import {
 } from './images';
 import { DEFAULT_IMAGE_BUDGET_MB } from './images-policy';
 import { imageAbs, imagesDir, thumbsDir, toRelativePath } from './paths';
+import { timed, type PerfWatch } from './perf';
 import {
   LastSeen,
   RICH_HTML_MAX,
@@ -49,6 +50,8 @@ export interface RecorderDeps {
   settings: () => Settings;
   now?: () => number;
   onLog?: (message: string) => void;
+  /** ★ 最小观测面（T-N8）：把一次复制里"落盘 / 感知哈希 / 回读哈希 / 写库 / 预算"分别计时。 */
+  perf?: PerfWatch;
 }
 
 function describeError(e: unknown): string {
@@ -80,6 +83,7 @@ export class Recorder {
   private readonly dataDir: string;
   private readonly getSettings: () => Settings;
   private readonly nowFn: () => number;
+  private readonly perf: PerfWatch | undefined;
   private readonly onLog: (message: string) => void;
 
   constructor(deps: RecorderDeps) {
@@ -89,6 +93,7 @@ export class Recorder {
     this.getSettings = deps.settings;
     this.nowFn = deps.now ?? (() => Date.now());
     this.onLog = deps.onLog ?? ((m: string) => console.warn('[recorder] ' + m));
+    this.perf = deps.perf;
   }
 
   /**
@@ -165,6 +170,9 @@ export class Recorder {
           richHtml: rich.length > 0 ? rich : undefined,
         }),
       );
+      // ★ 文本写入也要查一次预算：用户把预算调小之后，靠的就是下一次写入把它压下来
+      //   （见 recorder.spec「下一次写入触发淘汰」）。★ 这次查询只是一条 SUM(bytes)，
+      //   没超预算立刻返回 —— T-B3 磨掉的是"为这个判定把全部图片行读三遍"，不是判定本身。
       this.afterWrite();
       return result;
     } catch (e) {
@@ -188,6 +196,7 @@ export class Recorder {
       const result = this.withEvictionWatch(() =>
         this.db.insertFiles(list, { now: this.nowFn(), sourceApp: normalizeSourceApp(sourceApp) }),
       );
+      // ★ 同 recordText：预算判定是一条 SUM 聚合，不为"没超"付全量读行的代价。
       this.afterWrite();
       return result;
     } catch (e) {
@@ -212,7 +221,7 @@ export class Recorder {
     const tmpId = randomUUID().replace(/-/g, '');
     let saved: SavedImage;
     try {
-      saved = saveImage(this.dataDir, tmpId, img);
+      saved = this.measure('图片解码与落盘', () => saveImage(this.dataDir, tmpId, img));
     } catch (e) {
       this.log('图片落盘失败（已忽略）：' + describeError(e));
       return null;
@@ -223,12 +232,14 @@ export class Recorder {
     // ★ v1.1.0：感知哈希在**落盘之后**算，但用原始 img 的像素（不是磁盘上的 JPEG/PNG 字节）：
     //   dHash 要的是像素，重新解码一份文件纯属浪费；而哈希值本来就不该受编码质量影响。
     //   算不出来返回 undefined，此时不传这个字段，db 层会整段跳过相似判定。
-    const phash = imagePhash(img);
+    const phash = this.measure('图片感知哈希', () => imagePhash(img));
 
     let result: InsertResult;
     try {
       // 去重键 = 磁盘上那份原图字节的 sha256（与"库里存的到底是什么"完全一致）
-      const hash = hashImageBuffer(fs.readFileSync(imageAbs(this.dataDir, saved.image_path)));
+      const hash = this.measure('原图回读算哈希', () =>
+        hashImageBuffer(fs.readFileSync(imageAbs(this.dataDir, saved.image_path))),
+      );
       result = this.withEvictionWatch(() =>
         this.db.insertImage(
           {
@@ -283,27 +294,32 @@ export class Recorder {
   }
 
   /**
-   * 包住一次写入，捕捉 `db.evictOverLimit()` 顺手淘汰掉的图片行，并**同步删掉它们的图片文件**。
+   * 包住一次写入，把"本次写入把哪些活跃图片行送进了回收站"记一笔日志。
    *
-   * ★ v0.3.0 起 `evictOverLimit` 是**软删**（只盖 `deleted_at`），所以"前后差集"恒为空 ——
-   *   按 id 差集判断会一个文件都删不到，被淘汰的图片永远留在盘上。
-   *   这里改成看 `deleted_at` 的**翻转**：写入前活跃、写入后进回收站的行才是本次淘汰的目标。
+   * ★ v0.3.0 起 `evictOverLimit` 是**软删**（只盖 `deleted_at`），所以旧的"活跃 id 前后差集"
+   *   恒为空；改看 `deleted_at` 的**翻转**。
+   * ★ T-B3：翻转判定不再读两次全量图片行（原来 `allImageRows()` 前后各一次，加上 afterWrite
+   *   的预算检查，复制一段文字要把全部图片行搬三遍）。现在只问一条
+   *   `deleted_at >= 本次写入起始时刻` 的范围查询，代价与本次淘汰数成正比，与库大小无关。
    * ★ 只认"活跃 → 回收站"这一个方向：回收站 → 活跃（恢复）不该删文件；
-   *   回收站里本来就有的行也不该被这次写入顺手删盘。
+   *   回收站里本来就有的行时间更早，落在范围之外，也不会被算进来。
    * ★ 已经在回收站里的行**不重复删文件**：它们的文件按 §1.1 必须留着等用户恢复或 purge。
    *   所以这里刻意**不删盘**——上限淘汰进回收站，文件留在原处（这正是回收站的意义）。
    */
+  /**
+   * 给一段同步工作计时（T-N8）。没接观测器时就是裸调用，不留任何分支开销。
+   * ★ 计时用 `Date.now()` 而不是 `nowFn`：`nowFn` 是"这条记录发生在何时"的记录时钟，
+   *   测试里是每调一次就走一格的假计数器，借它计时会把记录时间戳莫名其妙推走。
+   */
+  private measure<T>(label: string, fn: () => T): T {
+    if (!this.perf) return fn();
+    return timed(() => Date.now(), label, this.perf, fn);
+  }
+
   private withEvictionWatch<T>(fn: () => T): T {
-    const before = new Map(this.db.allImageRows().map((r) => [r.id, r.deleted_at] as const));
-    const result = fn();
-    // 仅用于诊断：把"本次写入把哪些活跃图片行送进了回收站"记一笔，
-    // 便于真机上核对上限淘汰确实发生了（文件按设计不删）。
-    const moved: string[] = [];
-    for (const row of this.db.allImageRows()) {
-      if (row.deleted_at === null) continue;
-      const was = before.get(row.id);
-      if (was === null) moved.push(row.id);
-    }
+    const startedAt = Date.now();
+    const result = this.measure('写库（含去重与上限淘汰）', fn);
+    const moved = this.db.recentlyTrashedImageIds(startedAt);
     if (moved.length > 0) this.log('上限淘汰把 ' + moved.length + ' 条图片记录送进回收站（文件保留）');
     return result;
   }
@@ -313,7 +329,7 @@ export class Recorder {
     const mb = this.getSettings().imageBudgetMB;
     const budget = (Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_IMAGE_BUDGET_MB) * 1024 * 1024;
     try {
-      enforceImageBudget(this.db, this.dataDir, budget, this.onLog);
+      this.measure('图片预算判定', () => enforceImageBudget(this.db, this.dataDir, budget, this.onLog));
     } catch (e) {
       this.log('图片预算淘汰失败（已忽略）：' + describeError(e));
     }
