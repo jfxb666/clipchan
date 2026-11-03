@@ -1790,6 +1790,86 @@ describe('v1.0.0 ⑥：文件夹 CRUD', () => {
   });
 });
 
+describe('文件夹同级重名（T-N6）', () => {
+  it('★ 同名同级第二次创建要报错，不同父级下同名仍然允许', () => {
+    const db = mem();
+    db.createFolder({ name: '工作', parentId: null });
+    const p2 = db.createFolder({ name: '私人', parentId: null });
+    expect(() => db.createFolder({ name: '工作', parentId: null })).toThrow('同级已有同名文件夹');
+    const child = folderNamed(p2, '私人');
+    const withParent = db.createFolder({ name: '工作', parentId: child.id });
+    expect(withParent.some((f) => f.name === '工作' && f.parentId === child.id)).toBe(true);
+    // 报错那次的确没写进去：顶层 1 个 + 私人底下 1 个
+    expect(db.listFolders().filter((f) => f.name === '工作')).toHaveLength(2);
+  });
+
+  it('rename 撞同名同样报错，且原表不变', () => {
+    const db = mem();
+    db.createFolder({ name: 'A', parentId: null });
+    const b = folderNamed(db.createFolder({ name: 'B', parentId: null }), 'B');
+    expect(() => db.renameFolder(b.id, 'A')).toThrow('同级已有同名文件夹');
+    expect(db.listFolders().find((f) => f.id === b.id)!.name).toBe('B');
+  });
+
+  it('rename 到自己当前的名字不抛（判重排除自己，UI 允许原样再提交）', () => {
+    const db = mem();
+    const f = folderNamed(db.createFolder({ name: '工作', parentId: null }), '工作');
+    expect(() => db.renameFolder(f.id, '工作')).not.toThrow();
+    // 没抛也别多出行：还是原来那一条
+    expect(db.listFolders()).toHaveLength(1);
+    expect(db.listFolders()[0]!.name).toBe('工作');
+  });
+
+  it('★ 老库遗留的同级重名：self 被排除、另一条重复仍命中报错', () => {
+    const db = mem();
+    const f = folderNamed(db.createFolder({ name: '工作', parentId: null }), '工作');
+    // 模拟判重落地前的历史遗留：库里并排躺着两条同名顶层文件夹
+    db.raw.exec("INSERT INTO folders (id, name, parent_id, created_at) VALUES ('legacydup', '工作', NULL, 1)");
+    // 自己不挡自己，但另一条同名真的在同级 → 仍然报错（遗留重复不允许靠改名再复制一个）
+    expect(() => db.renameFolder(f.id, '工作')).toThrow('同级已有同名文件夹');
+    expect(db.listFolders().filter((x) => x.name === '工作')).toHaveLength(2);
+  });
+
+  it('空名仍然静默返回原表（不弹错误框，既有约定）', () => {
+    const db = mem();
+    db.createFolder({ name: 'A', parentId: null });
+    expect(db.createFolder({ name: '   ', parentId: null })).toHaveLength(1);
+  });
+});
+
+describe('文件夹校验不再跑聚合查询（T-N5）', () => {
+  /**
+   * 数一下 listFolders 那条 items↔folders 计数聚合（GROUP BY folder_id）跑了几次。
+   * ★ 数的是 prepare() 调用次数而不是执行次数（本库现用现 prepare、语句不缓存，
+   *   这里一一对应）；匹配前先把整段 SQL 的空白压成单空格，多行模板串换行排布
+   *   变了也不会漏数。
+   */
+  function countAggregateQueries(db: Db): () => number {
+    let n = 0;
+    const orig = db.raw.prepare.bind(db.raw);
+    (db.raw as unknown as { prepare: unknown }).prepare = ((sql: string, ...rest: unknown[]) => {
+      const norm = sql.replace(/\s+/g, ' ');
+      if (/GROUP BY folder_id|folder_id, COUNT/i.test(norm)) n += 1;
+      return (orig as (s: string, ...r: unknown[]) => unknown)(sql, ...rest);
+    }) as unknown;
+    return () => n;
+  }
+
+  it('★ createFolder 全程只做一次聚合查询（返回新表那次），校验不查计数', () => {
+    const db = mem();
+    const reads = countAggregateQueries(db);
+    db.createFolder({ name: '校验只查骨架', parentId: null });
+    expect(reads()).toBe(1); // 改动前是 2
+  });
+
+  it('校验仍然有效：父不存在时按既有约定当顶层，不抛（不能因为换查询就把行为改掉）', () => {
+    const db = mem();
+    const table = db.createFolder({ name: '孤儿父', parentId: '不存在的父' });
+    const made = folderNamed(table, '孤儿父');
+    expect(made.parentId).toBeNull();
+  });
+});
+
 describe('v1.0.0 ⑥：listTags 标签统计（筛选面板枚举用）', () => {
   it('多标签计数正确：数的是用到它的记录条数，不是标签出现次数', () => {
     const db = mem();

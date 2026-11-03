@@ -455,12 +455,15 @@ export interface Db {
   getSnippet(id: string): Snippet | null;
   /**
    * v1.0.0 ⑥ 整理文件夹的平表（树由渲染层用 core 的 buildFolderTree 现场拼）。
-   * ★ 五个写操作一律返回**变更后的完整平表**（与 snippets 同一范式）：界面据此重建树，
-   *   不必再拉一次；非法操作返回原表不变，绝不抛——它们都来自用户的拖拽/改名，
-   *   一次误拖不该炸掉整条 IPC 调用。
+   * ★ 写操作一律返回**变更后的完整平表**（与 snippets 同一范式）：界面据此重建树，
+   *   不必再拉一次；非法操作（成环 / 超深 / 目标或 id 不存在 / 空名）返回原表不变。
+   * ★ 例外：createFolder / renameFolder 撞同级同名时**抛错**（T-N6）——静默并存
+   *   两个同名文件夹比一个错误提示更难排查；渲染层 catch 后 toast，不会炸 IPC。
    */
   listFolders(): FolderDTO[];
+  /** 同级已有同名 → 抛「同级已有同名文件夹…」；空名不建、静默返回原表。 */
   createFolder(input: FolderInput): FolderDTO[];
+  /** 同级已有同名（不含自己）→ 抛「同级已有同名文件夹…」；id 不存在或空名 → 原表不变。 */
   renameFolder(id: string, name: string): FolderDTO[];
   /** 改父级；parentId=null 表示提升为顶层。成环 / 超深 / 目标不存在 → 原表不变。 */
   moveFolder(id: string, parentId: string | null): FolderDTO[];
@@ -755,16 +758,6 @@ const KIND_GROUPS: Record<KindFilter, Kind[]> = {
  */
 const IMAGE_DESC_SQL =
   "('图片 ' || width || '×' || height || ' · ' || CAST(bytes / 1024 AS INTEGER) || ' KB')";
-
-/**
- * FolderDTO 平表 → core 的 OrganizeFolder 形状。
- *
- * ★ canMoveFolder / buildFolderTree 都只认 { id, name, parentId }，而 DTO 多一个 itemCount。
- *   在这里剥一次，比让 core 去接受 DTO 更干净（core 不该知道计数从哪来）。
- */
-function toOrganizeFolders(folders: FolderDTO[]): OrganizeFolder[] {
-  return folders.map((f) => ({ id: f.id, name: f.name, parentId: f.parentId }));
-}
 
 /** 只拼 WHERE：list 与 count 必须用同一套条件，否则「共 N 条」和列表对不上。 */
 function buildWhere(q: ListQuery): { where: string; params: unknown[] } {
@@ -1313,6 +1306,29 @@ export function openDb(file: string): Db {
     ).run(SNIPPET_LIMIT);
   }
 
+  /**
+   * 文件夹骨架（id / name / parent_id），**不带**记录计数。
+   *
+   * ★ T-N5：createFolder / renameFolder / moveFolder 的校验（父存在性、深度、同级重名）
+   *   只需要这三列，而 listFolders() 带一段 LEFT JOIN + GROUP BY folder_id 的计数聚合
+   *   （代价随记录数涨），写一次跑两遍就白花了一遍聚合。校验一律查这张骨架；
+   *   写完返回新表的那次仍然是 listFolders()（契约就是"回完整平表"）。
+   * ★ 排序与 listFolders 对齐（created_at ASC, id ASC）：canMoveFolder 不看顺序，
+   *   但同一口径让两张表能逐行对照。不开到 Db 接口上 —— 它只是校验用的内部件。
+   */
+  function folderSkeleton(): { id: string; name: string; parentId: string | null }[] {
+    const rows = raw
+      .prepare('SELECT id, name, parent_id AS parentId FROM folders ORDER BY created_at ASC, id ASC')
+      .all() as { id: string; name: string; parentId: string | null }[];
+    // ★ parent_id 与 listFolders 用同一个 ''→null 归一：两个读这张表的口子必须对空串
+    //   （历史遗留数据）给出同一种"顶层"表示，否则同级判重的 === 比较会和列表口径对不上。
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      parentId: typeof r.parentId === 'string' && r.parentId.length > 0 ? r.parentId : null,
+    }));
+  }
+
   const api: Db = {
     raw,
 
@@ -1838,18 +1854,29 @@ export function openDb(file: string): Db {
      * ★ 父不存在 → 当顶层而不是拒绝：父可能在另一个窗口里刚被删掉。
      * ★ 深度校验把候选节点先塞进列表再问 canMoveFolder —— 复用它同一套规则，
      *   别在这里另写一份"算深度"的逻辑，两份迟早会不一致。
+     * ★ 同级已有同名 → 抛错而不是静默并存（T-N6）：用户点"新建"却多出两个同名文件夹，
+     *   比直接告诉他重名更难排查。判重用骨架表在内存里比较（parentId 同为 null 的
+     *   两条也算同级，=== 比较天然覆盖），不另写一条查同名的 SQL。
+     * ★ 校验（父存在性 / 深度 / 重名）只查 folderSkeleton()（T-N5）：listFolders() 的
+     *   计数聚合在校验里用不上，带聚合的全量查询留给写完后的返回值。
      */
     createFolder(input: FolderInput): FolderDTO[] {
       const name = sanitizeTag(typeof input?.name === 'string' ? input.name : '');
-      const existing = api.listFolders();
-      if (name.length === 0) return existing;
+      if (name.length === 0) return api.listFolders();
 
+      const skeleton = folderSkeleton();
       const wanted = typeof input?.parentId === 'string' && input.parentId.length > 0 ? input.parentId : null;
-      const parentId = wanted !== null && existing.some((f) => f.id === wanted) ? wanted : null;
+      const parentId = wanted !== null && skeleton.some((f) => f.id === wanted) ? wanted : null;
 
       const id = randomUUID().replace(/-/g, '');
-      const candidate: OrganizeFolder[] = [...toOrganizeFolders(existing), { id, name, parentId }];
-      if (!canMoveFolder(candidate, id, parentId)) return existing;
+      const candidate: OrganizeFolder[] = [...skeleton, { id, name, parentId }];
+      if (!canMoveFolder(candidate, id, parentId)) return api.listFolders();
+
+      // ★ 同级重名 → 明确报错，不再"静默原样返回"。（空名仍然是静默返回：那是输入框里
+      //   的一个空格，弹错误框才是打扰 —— 见本函数顶部的既有注释。）
+      if (skeleton.some((f) => f.parentId === parentId && f.name === name)) {
+        throw new Error('同级已有同名文件夹「' + name + '」，换个名字或建到别的文件夹下');
+      }
 
       raw
         .prepare('INSERT INTO folders (id, name, parent_id, created_at) VALUES (?, ?, ?, ?)')
@@ -1857,10 +1884,25 @@ export function openDb(file: string): Db {
       return api.listFolders();
     },
 
-    /** 改名。id 不存在或新名归一后为空 → 原表不变（不抛）。 */
+    /**
+     * 改名。id 不存在或新名归一后为空 → 原表不变（不抛）。
+     *
+     * ★ 同级已有同名（不含自己）→ 抛错而不是静默并存（T-N6）：改完界面上冒出两个
+     *   同名文件夹，用户只会以为改名没生效。同为顶层（parentId 都是 null）也算同级。
+     * ★ 校验（id 存在性 / 重名）查 folderSkeleton()（T-N5），写完返回的那次仍是 listFolders()。
+     */
     renameFolder(id: string, name: string): FolderDTO[] {
       const clean = sanitizeTag(typeof name === 'string' ? name : '');
       if (clean.length === 0) return api.listFolders();
+
+      const skeleton = folderSkeleton();
+      const row = skeleton.find((f) => f.id === id);
+      if (!row) return api.listFolders();
+
+      if (skeleton.some((f) => f.id !== id && f.parentId === row.parentId && f.name === clean)) {
+        throw new Error('同级已有同名文件夹「' + clean + '」，换个名字或建到别的文件夹下');
+      }
+
       raw.prepare('UPDATE folders SET name = ? WHERE id = ?').run(clean, id);
       return api.listFolders();
     },
@@ -1870,11 +1912,13 @@ export function openDb(file: string): Db {
      *
      * ★ 防环交给 canMoveFolder（它会从目标往上爬，撞到自己就拒绝）：一次误拖
      *   若真把 A 挂到 A 的子节点下，整棵树就从"森林"退化成环，界面会整块消失。
+     * ★ canMoveFolder 只认 { id, name, parentId }，骨架表直接喂给它（T-N5），
+     *   校验不再为它跑一遍带计数的聚合；写完返回的那次仍是 listFolders()。
      */
     moveFolder(id: string, parentId: string | null): FolderDTO[] {
-      const existing = api.listFolders();
+      const skeleton = folderSkeleton();
       const target = typeof parentId === 'string' && parentId.length > 0 ? parentId : null;
-      if (!canMoveFolder(toOrganizeFolders(existing), id, target)) return existing;
+      if (!canMoveFolder(skeleton, id, target)) return api.listFolders();
       raw.prepare('UPDATE folders SET parent_id = ? WHERE id = ?').run(target, id);
       return api.listFolders();
     },
