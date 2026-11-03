@@ -311,7 +311,7 @@ describe('迁移失败兜底', () => {
 
   it('describeMigrationFailure 给出中文文案，非迁移错误返回 null', () => {
     const err = new SchemaMigrationError('step', 'no such column: seq', 'C:\\x\\clipchan.db', 'C:\\x\\backup.db');
-    expect(describeMigrationFailure(err)).toContain('历史数据已保留');
+    expect(describeMigrationFailure(err)).toContain('历史数据未丢失');
     expect(describeMigrationFailure(new Error('别的'))).toBeNull();
   });
 });
