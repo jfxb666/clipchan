@@ -58,7 +58,7 @@ async function main() {
   buildMain({ root: ROOT });
 
   console.log('[dev] 2/3 启动 Vite dev server（' + URL_ + '）…');
-  const vite = spawn(process.execPath, [viteEntry(), '--port', String(PORT), '--strictPort'], {
+  const vite = spawn(process.execPath, [viteEntry(), '--port', String(PORT), '--strictPort', '--host', '127.0.0.1'], {
     cwd: DESKTOP,
     env: cleanEnv(),
     stdio: 'inherit',

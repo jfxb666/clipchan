@@ -10,7 +10,7 @@ describe('classify', () => {
   });
 
   it('识别 Windows 路径与 UNC 路径', () => {
-    expect(classify('C:\\Users\\Administrator\\Desktop')).toBe('path');
+    expect(classify('C:\\Users\\me\\Desktop')).toBe('path');
     expect(classify('D:/tmp/x.txt')).toBe('path');
     expect(classify('\\\\server\\share\\file.txt')).toBe('path');
   });

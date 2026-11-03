@@ -60,7 +60,7 @@ describe('suggestTags 各标签正例/反例', () => {
   });
 
   it('路径：正例（Windows 盘符与 UNC）', () => {
-    expect(suggestTags(input({ text: 'C:\\Users\\Administrator\\Desktop' }))).toContain('路径');
+    expect(suggestTags(input({ text: 'C:\\Users\\me\\Desktop' }))).toContain('路径');
     expect(suggestTags(input({ text: '\\\\server\\share\\file.txt' }))).toContain('路径');
   });
 

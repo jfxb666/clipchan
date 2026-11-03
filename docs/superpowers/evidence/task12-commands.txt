@@ -13,7 +13,7 @@ EXIT=0
 === 2/5 pnpm vitest run ===
 $ pnpm vitest run
 
- RUN  v3.2.7 C:/Users/Administrator/Desktop/å‰ªè´´æ?
+ RUN  v3.2.7 C:/Users/<user>/Desktop/å‰ªè´´æ?
 
  âœ?packages/core/src/logic/layout.spec.ts (12 tests) 95ms
  âœ?packages/core/src/state/store.spec.ts (17 tests) 23ms
