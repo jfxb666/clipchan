@@ -35,21 +35,26 @@ function toRelPosix(dir: string, p: string): string {
   return rel.split(path.sep).join('/').replace(/^\.\//, '');
 }
 
+/**
+ * 列出一个目录里的普通文件。
+ *
+ * ★ T-B4：原来先 `readdirSync` 再对**每个条目** `statSync` —— 图片多的时候那是几万次
+ *   syscall，而它整个跑在白屏路径上。改成 `withFileTypes`，类型直接来自 readdir 的返回。
+ * ★ 一处有意的行为差异：符号链接不再算作文件（旧实现用 statSync 会跟随链接，
+ *   于是 orphan 逻辑会把链接本身 unlink 掉）。images/ 与 thumbs/ 只由本应用写入，
+ *   里面不该有链接；真出现链接时"跳过不删"也比"跟着链接去删"安全。
+ */
 function listFiles(absDir: string): string[] {
-  let names: string[];
+  let entries: fs.Dirent[];
   try {
-    names = fs.readdirSync(absDir);
+    entries = fs.readdirSync(absDir, { withFileTypes: true });
   } catch {
     return []; // 目录还不存在（全新安装）
   }
   const out: string[] = [];
-  for (const name of names) {
-    const full = path.join(absDir, name);
-    try {
-      if (fs.statSync(full).isFile()) out.push(full);
-    } catch {
-      // 读不到的条目直接忽略
-    }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    out.push(path.join(absDir, entry.name));
   }
   return out;
 }

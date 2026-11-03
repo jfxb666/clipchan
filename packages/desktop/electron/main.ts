@@ -43,6 +43,7 @@ import type { Db, InsertResult } from './db';
 import { runLegacyMigration } from './migrate-runner';
 import { createLogSink, installCrashHooks } from './logs';
 import { deleteImageFiles, enforceImageBudget, hashImageBuffer, imagePhash, purgeItemsWithFiles, purgeTrashOverLimitWithFiles, saveImage } from './images';
+import { createPerfWatch, type PerfWatch } from './perf';
 import type { NativeImageLike, SavedImage } from './images';
 import { sweepOrphans } from './images-policy';
 import { DB_FILE_NAME, backupsDir, imageAbs, imagesDir, logsDir, thumbsDir, dbFile, resolveDataDir, toRelativePath } from './paths';
@@ -154,6 +155,12 @@ let logSink: ReturnType<typeof createLogSink> | null = null;
  *   等 did-finish-load 之后再补发一条，用户才知道自己的历史去哪了。
  */
 let recoveredFromDb: string | null = null;
+/**
+ * ★ 最小观测面（T-N8）：模块级而不是 setupServices 的局部 —— 空闲轮询里那条
+ *   「把慢操作快照写进行日志」需要读到它，而那个轮询建在 app ready 的装配段里。
+ *   与 watcher / ghostSvc / helperClient 同一个惯例。
+ */
+let perf: PerfWatch | undefined;
 /**
  * 本次启动是否成功从备份恢复过（值是备份文件名）。
  * ★ 和 recoveredFromDb 分开存：一个是"数据救回来了"，一个是"数据没救回来、只留了档"，
@@ -420,8 +427,11 @@ function setupStorage(dataDir: string): {
   recoveredFrom?: string;
   /** 成功恢复所用的备份文件名（数据救回来了）。 */
   restoredFrom?: string;
-  /** 本次启动自检备份的绝对路径（做了才 set）。 */
-  backupPath?: string;
+  /**
+   * ★ T-B4：启动期两件磁盘重活（孤儿扫描 + 自检备份）。
+   * 不在 setupStorage 里跑，改由 app ready 在面板加载完成后调度 —— 调用方负责只跑一次。
+   */
+  runStartupTasks(): void;
 } {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(imagesDir(dataDir), { recursive: true });
@@ -458,38 +468,56 @@ function setupStorage(dataDir: string): {
   const migration = runLegacyMigration(db, dataDir, isFresh);
   const migrated = migration.imported;
 
-  try {
-    const orphans = sweepOrphans(dataDir, db.allImageRows(), {
-      onLog: (m: string) => logWarn('[images] ' + m),
-    });
-    if (orphans.length > 0) logLine('[images] 清理孤儿文件 ' + orphans.length + ' 个');
-  } catch (e) {
-    logError('[images] 孤儿扫描失败（不阻断启动）：' + String(e));
-  }
+  /**
+   * ★ T-B4：孤儿扫描与自检备份从"建窗之前"挪出来，交回调用方在面板加载完成后调度。
+   * 这两件事都要动全量磁盘 IO —— 孤儿扫描遍历 images/ 与 thumbs/ 的每个条目，
+   * 自检备份要 wal_checkpoint + 整库 copyFileSync —— 而它们一件都不影响"面板能不能用"，
+   * 却都直接算进白屏时长，且随数据量线性增长。
+   * ★ 后移不改变语义的两条依据：
+   *  - sweepOrphans 在**执行时**才读 allImageRows()，延迟不会拿旧快照去删刚写入的文件；
+   *  - maybeBackup 本来就是"距上次超过 24 小时才真做"，晚几秒不改变做不做。
+   * ★ 顺带挂上观测（T-N8）：这两段以前完全没有耗时数据，改启动路径必须先能量出来。
+   */
+  const runStartupTasks = (): void => {
+    if (SMOKE) return;
 
-  // ★ 启动自检备份：库已经打开（checkpoint 必须跑在持有写句柄的这条连接上），
-  //   且距上次备份超过 24 小时才真做。备份失败只 warn —— 备份是增值功能，
-  //   绝不能因为它让用户打不开应用。SMOKE 下也允许跑：它只读+复制，无害。
-  const backup = maybeBackup({
-    dataDir,
-    dbPath,
-    // ★ checkpoint 必须跑在持有写句柄的这条连接上，所以走 db.raw（同一个 Database 实例）。
-    checkpoint: () => {
-      db.raw.pragma('wal_checkpoint(TRUNCATE)');
-    },
-    intervalMs: DEFAULT_BACKUP_INTERVAL_MS,
-    keep: DEFAULT_BACKUP_KEEP,
-  });
-  let backupPath: string | undefined;
-  if (backup.ran) {
-    if (backup.result?.ok && backup.result.path) {
-      backupPath = backup.result.path;
-      logLine('[db] 自动备份 ' + backupPath);
-    } else {
-      logWarn('[db] 自动备份失败（不阻断启动）：' + (backup.result?.reason ?? '未知原因'));
+    const sweepStartedAt = Date.now();
+    try {
+      const orphans = sweepOrphans(dataDir, db.allImageRows(), {
+        onLog: (m: string) => logWarn('[images] ' + m),
+      });
+      if (orphans.length > 0) logLine('[images] 清理孤儿文件 ' + orphans.length + ' 个');
+    } catch (e) {
+      logError('[images] 孤儿扫描失败（不阻断启动）：' + String(e));
+    } finally {
+      perf?.observe('启动：孤儿扫描', Date.now() - sweepStartedAt);
     }
-  }
-  return { db, migrated, recoveredFrom, restoredFrom, backupPath };
+
+    const backupStartedAt = Date.now();
+    try {
+      // 库已经打开（checkpoint 必须跑在持有写句柄的这条连接上），失败只 warn ——
+      // 备份是增值功能，绝不能因为它让用户打不开应用。
+      const backup = maybeBackup({
+        dataDir,
+        dbPath,
+        checkpoint: () => {
+          db.raw.pragma('wal_checkpoint(TRUNCATE)');
+        },
+        intervalMs: DEFAULT_BACKUP_INTERVAL_MS,
+        keep: DEFAULT_BACKUP_KEEP,
+      });
+      if (backup.ran) {
+        if (backup.result?.ok && backup.result.path) logLine('[db] 自动备份 ' + backup.result.path);
+        else logWarn('[db] 自动备份失败（不阻断启动）：' + (backup.result?.reason ?? '未知原因'));
+      }
+    } catch (e) {
+      logWarn('[db] 启动自检备份异常（不阻断运行）：' + String(e));
+    } finally {
+      perf?.observe('启动：自检备份', Date.now() - backupStartedAt);
+    }
+  };
+
+  return { db, migrated, recoveredFrom, restoredFrom, runStartupTasks };
 }
 
 /**
@@ -524,12 +552,20 @@ function setupServices(dataDir: string): void {
   tracker = new TargetTracker({ foreground: helperClient });
   frosted = new FrostedGlass({ helper: helperClient });
 
+  perf = createPerfWatch({
+    thresholdMs: Number(process.env.CLIPCHAN_PERF_MS) > 0 ? Number(process.env.CLIPCHAN_PERF_MS) : undefined,
+    // ★ T-N8：慢操作走 logLine 的双写通道（控制台 + 日志文件）。这是"用户机器上到底哪儿在慢"
+    //   第一次有一条能被事后读到的记录；限流与阈值都在观测器里，不会把日志刷爆。
+    onReport: (m) => logWarn('[perf] ' + m),
+  });
+
   const recorder = new Recorder({
     db,
     clip: clipboard,
     dataDir,
     settings: () => rt.settings ?? DEFAULT_SETTINGS,
     onLog: (m: string) => logWarn('[recorder] ' + m),
+    perf,
   });
 
   mergeSvc = new MergeService({ db });
@@ -573,6 +609,7 @@ function setupServices(dataDir: string): void {
     //   C# 的 DragQueryFileW 能拿到全部路径。助手不可用时回 null，watcher 会退回 Electron 通道。
     readFiles: () => helperClient?.readFiles() ?? Promise.resolve(null),
     onNotice: (_kind, message) => makeBroadcaster(() => rt.win).toast(message, 'info'),
+    perf,
   });
 
   ghostSvc = new Ghost({
@@ -1749,7 +1786,7 @@ function main(): void {
 
     // ★ 协议处理器必须在 ready 之后注册（registerSchemesAsPrivileged 已在上面的模块作用域执行）。
     registerThumbProtocol(rt.dataDir);
-    const { db, recoveredFrom, restoredFrom } = setupStorage(rt.dataDir);
+    const { db, recoveredFrom, restoredFrom, runStartupTasks: startupTasks } = setupStorage(rt.dataDir);
     recoveredFromDb = recoveredFrom ?? null;
     restoredFromDb = restoredFrom ?? null;
     rt.db = db;
@@ -1783,6 +1820,52 @@ function main(): void {
       }, BACKUP_POLL_MS);
     }
 
+    /**
+     * ★ 定期回收库空间（T-B1）：软删/硬删只把页放进 freelist，文件本身从不缩小。
+     *   实测淘汰 1.8 万条后文件仍占 79.9MB，而真需要的是 7.9MB（90% 是空闲页）。
+     * ★ 30 分钟轮询、且**绝不在启动路径上跑**：db.maintenance() 内部按阈值决定动不动手，
+     *   虚胖不达标就立刻返回；达标时最贵的一次是老库首次 VACUUM（2 万行实测 405ms），
+     *   放在空闲轮询里用户感觉不到，放在启动里就是白屏。smoke 跳过。
+     */
+    if (!SMOKE) {
+      setInterval(() => {
+        try {
+          if (!rt.db) return;
+          /**
+           * ★ T-N8 的另一半：`-wal` 尺寸以前没有任何地方看。WAL 只在 checkpoint 时回落，
+           *   而唯一的 checkpoint 挂在 24 小时一次的备份路径上 —— 常驻托盘的应用可以让 -wal
+           *   涨到比主库还大，用户只看见"文件夹越来越胖"。这里只报数，不擅自 checkpoint
+           *   （那是备份路径的事，改它属于行为变更）。
+           */
+          const walPath = dbFile(rt.dataDir) + '-wal';
+          try {
+            if (fs.existsSync(walPath)) {
+              const walBytes = fs.statSync(walPath).size;
+              if (walBytes > 32 * 1024 * 1024) {
+                logWarn('[db] -wal 已 ' + Math.round(walBytes / 1048576) + 'MB，下次自动备份会做 checkpoint');
+              }
+            }
+          } catch {
+            // 只是量个尺寸，读不到不该影响空间回收
+          }
+          // 把这一轮之前累计的慢操作快照写进行日志，让人能回答"到底是哪一步在慢"
+          if (perf) {
+            const snapshot = perf.summary();
+            if (snapshot !== '') logLine('[perf] ' + snapshot);
+          }
+          const res = rt.db.maintenance();
+          if (res.converted) {
+            logLine('[db] 空间回收：切换 incremental 并整理，归还 ' + res.trimmedPages + ' 页（约 '
+              + Math.round((res.trimmedPages * 4096) / 1048576) + 'MB）');
+          } else if (res.trimmedPages > 0) {
+            logLine('[db] 空间回收：incremental 归还 ' + res.trimmedPages + ' 页');
+          }
+        } catch (e) {
+          logWarn('[db] 空间回收异常（不阻断运行）：' + String(e));
+        }
+      }, 30 * 60 * 1000);
+    }
+
     // ★ 自动更新（P0-3）：开发环境整体禁用（app.isPackaged === false），否则每次启动都会
     //   去 GitHub 打一次请求并在控制台刷错误。构造完不自动 check —— 见 CH.app.checkUpdate 的注释。
     updater = new Updater({
@@ -1811,6 +1894,29 @@ function main(): void {
     rt.win.on('closed', () => {
       rt.win = null;
     });
+
+    /**
+     * ★ T-B4：启动期两件磁盘重活挪到「面板加载完成」之后跑（原来是排在 createMainWindow 之前，
+     *   直接算进白屏时长）。
+     * ★ 为什么不是 setImmediate/0ms 定时器：那种写法仍然可能在渲染进程首帧之前执行，
+     *   而这两段一跑就是几百毫秒起，用户看到的还是白屏；did-finish-load 才是"界面已经出来了"。
+     * ★ 兜底 5 秒：加载失败或停在崩溃页时 did-finish-load 不会再触发，不能让孤儿扫描和
+     *   自检备份一辈子不做；ran 守卫保证两条路只兑现一次。
+     */
+    if (!SMOKE) {
+      let startupTasksRan = false;
+      const runStartupTasksOnce = () => {
+        if (startupTasksRan) return;
+        startupTasksRan = true;
+        try {
+          startupTasks();
+        } catch (e) {
+          logWarn('[startup] 启动后任务异常（不影响已打开的面板）：' + String(e));
+        }
+      };
+      rt.win.webContents.once('did-finish-load', runStartupTasksOnce);
+      setTimeout(runStartupTasksOnce, 5000);
+    }
 
     // ★ 库损坏这条必须等页面加载完再发：setupStorage 跑的时候窗口还不存在，
     //   直接 toast 会被 makeBroadcaster 的 isDestroyed 守卫静默丢掉，用户永远不知道历史去哪了。

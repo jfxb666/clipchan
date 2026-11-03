@@ -20,6 +20,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseCfHtml } from './cfhtml';
 import { filePathsSignature, readFilePaths } from './files';
+import type { PerfWatch } from './perf';
 import type { NativeImageLike } from './images';
 
 /** 轮询间隔（spec §7.1）。 */
@@ -331,6 +332,11 @@ export interface ClipboardWatcherDeps {
   /** 诊断日志出口，默认走 `writeWatcherTrace`。 */
   onTrace?: (message: string) => void;
   /**
+   * ★ 最小观测面（T-N8）：把每一跳轮询的实际耗时记一笔，超阈才出声（限流在观测器里）。
+   * 缺省不接 = 完全无开销，测试与老调用点都不必传。
+   */
+  perf?: PerfWatch;
+  /**
    * 取前台窗口所属进程的 exe 文件名。**只在真的检测到剪贴板变化时才调用**
    * （每跳都问助手等于每 300ms 一次 IPC），缺省视为"来源未知"。
    */
@@ -366,6 +372,7 @@ export class ClipboardWatcher {
   private readonly intervalMs: number;
   private readonly onNotice: ((kind: NoticeKind, message: string) => void) | undefined;
   private readonly onTrace: ((message: string) => void) | undefined;
+  private readonly perf: PerfWatch | undefined;
   private readonly foregroundExe: (() => Promise<string | null>) | undefined;
   private readonly excludeApps: () => string[];
   private readonly readFiles: (() => Promise<string[] | null>) | undefined;
@@ -393,6 +400,7 @@ export class ClipboardWatcher {
     this.intervalMs = ms;
     this.onNotice = deps.onNotice;
     this.onTrace = deps.onTrace;
+    this.perf = deps.perf;
     this.foregroundExe = deps.foregroundExe;
     this.excludeApps = deps.excludeApps ?? (() => []);
     this.readFiles = deps.readFiles;
@@ -434,6 +442,10 @@ export class ClipboardWatcher {
   private tick(): void {
     if (this.isGhostActive()) return;
 
+    // ★ T-N8：整跳耗时进观测器。轮询间隔是 300ms，一跳磨到几百毫秒就意味着读取
+    //   （尤其是图片解码 / 写库）已经开始挤掉下一跳，这正是之前完全没有的可见度。
+    const startedAt = Date.now();
+
     const suppressed = this.suppress;
     this.suppress = false;
 
@@ -469,6 +481,8 @@ export class ClipboardWatcher {
       if (this.failures >= FAILURE_TRACE_THRESHOLD && this.failures % FAILURE_TRACE_THRESHOLD === 0) {
         this.trace('剪贴板连续读取失败 ' + this.failures + ' 次：' + describeError(e));
       }
+    } finally {
+      this.perf?.observe('剪贴板轮询', Date.now() - startedAt);
     }
   }
 

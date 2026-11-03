@@ -1381,3 +1381,59 @@ describe('ClipboardWatcher 生命周期', () => {
     expect(w.isRunning()).toBe(false);
   });
 });
+
+/**
+ * ★ T-N8 的"接线"验证。审计上一轮刚批评过这个项目：纯函数有测试、把线接上的那一层没有。
+ * 观测器本体的阈值/限流已由 perf.spec 覆盖，这里只钉两件事：
+ * 每一跳真的被记了一笔，以及幽灵模式那一跳真的没被记。
+ */
+describe('T-N8：轮询耗时接进观测器', () => {
+  /** 手写一个够用的假观测器（结构匹配 PerfWatch），省得把 perf 的实现拖进这条断言。 */
+  function fakePerf() {
+    const observed: { label: string; ms: number }[] = [];
+    const perf = {
+      observe: (label: string, ms: number) => { observed.push({ label, ms }); },
+      stats: () => [],
+      summary: () => '',
+      reset: () => {},
+    };
+    return { observed, perf };
+  }
+
+  it('每跳都记一笔「剪贴板轮询」（耗时非负，测试环境里就是亚毫秒级）', async () => {
+    const clip = makeClip();
+    const { sink } = makeSink();
+    const { observed, perf } = fakePerf();
+    const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {}, perf });
+
+    w.start();
+    await sleep(40);
+    w.stop();
+
+    // 5ms 一跳跑 40ms，至少要看到 3 跳（定时器被事件循环挤掉一两跳属正常，不能断言精确值）
+    expect(observed.length).toBeGreaterThanOrEqual(3);
+    expect(observed.every((o) => o.label === '剪贴板轮询')).toBe(true);
+    expect(observed.every((o) => o.ms >= 0 && Number.isFinite(o.ms))).toBe(true);
+  });
+
+  it('★ 幽灵模式：tick 第一行就 return，连观测都不该产生一跳', async () => {
+    const clip = makeClip({ formats: ['text/plain'], text: '幽灵期间的内容' });
+    const { sink } = makeSink();
+    const { observed, perf } = fakePerf();
+    const w = new ClipboardWatcher({
+      clip,
+      recorder: sink,
+      isGhostActive: () => true,
+      intervalMs: 5,
+      onTrace: () => {},
+      perf,
+    });
+
+    w.start();
+    await sleep(40);
+    w.stop();
+
+    expect(observed).toEqual([]);
+    expect(clip.calls).toEqual([]);
+  });
+});
