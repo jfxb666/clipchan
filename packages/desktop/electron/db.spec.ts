@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -10,7 +10,9 @@ import {
   SNIPPET_LIMIT,
   MAINTAIN_MIN_FREE_PAGES,
   MAINTAIN_TRIM_PAGES,
+  SchemaMigrationError,
   buildSearchIndex,
+  describeMigrationFailure,
   hammingDistance,
   openDb,
 } from './db';
@@ -2442,5 +2444,102 @@ describe('上限淘汰的边界与收藏豁免', () => {
     const unpinned = alive.filter((c) => !c.startsWith('pinned-'));
     expect(unpinned).toHaveLength(5);
     expect(unpinned[0]).toBe('later-25');
+  });
+});
+
+// ---------------- 迁移失败兜底（T-M7） ----------------
+
+/**
+ * ★ T-M7：迁移失败必须"保住数据 + 说人话"，而不是把进程炸掉。
+ *
+ * 注入方式：items 表造得和真库几乎一样（ensureColumns 管理的 12 列全部在位，
+ * 所以"补列"一步修不回去也修不坏），但把 **content_hash** 改名成 content_hash_BROKEN。
+ * content_hash 不在 ensureColumns 的补列清单里（它属于建表段），而迁移尾段的
+ * UNIQUE_INDEX_SQL 谓词引用它 —— 所以重建唯一索引那一步必然抛 `no such column: content_hash`。
+ */
+describe('迁移失败兜底', () => {
+  function seedBrokenDb(file: string): void {
+    const seed = new Database(file);
+    seed.exec(`
+      CREATE TABLE items (
+        id TEXT PRIMARY KEY, kind TEXT NOT NULL, content TEXT, content_hash_BROKEN TEXT,
+        image_path TEXT, image_hash TEXT, thumb_path TEXT,
+        width INTEGER, height INTEGER, bytes INTEGER,
+        source TEXT NOT NULL DEFAULT 'clip', pinned INTEGER NOT NULL DEFAULT 0,
+        truncated INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, seq INTEGER NOT NULL,
+        deleted_at INTEGER, source_app TEXT, file_paths TEXT, rich_html TEXT, search_index TEXT,
+        tags TEXT, folder_id TEXT, phash TEXT
+      );
+      CREATE INDEX idx_order ON items(pinned DESC, created_at DESC, seq DESC);
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `);
+    seed.prepare(
+      'INSERT INTO items (id, kind, content, content_hash_BROKEN, source, pinned, truncated, created_at, seq) VALUES (?,?,?,?,?,?,?,?,?)',
+    ).run('c'.repeat(32), 'text', '用户的老数据', 'hash-old', 'clip', 0, 0, 1000, 1);
+    seed.pragma('user_version = 0');
+    seed.close();
+  }
+
+  it('★ 迁移抛错时：库文件先留一份备份，错误包成 SchemaMigrationError（原始消息保留）', () => {
+    const dir = tmpDir();
+    const file = join(dir, 'clipchan.db');
+    seedBrokenDb(file);
+
+    let caught: unknown = null;
+    try { openDb(file); } catch (e) { caught = e; }
+
+    expect(caught).toBeInstanceOf(SchemaMigrationError);
+    const err = caught as SchemaMigrationError;
+    // 坏在迁移尾段（重建唯一索引），不在建表/补列两步
+    expect(err.step).toBe('索引与回收站');
+    expect(err.dbFile).toBe(file);
+    expect(err.backupFile).not.toBeNull();
+    expect(existsSync(err.backupFile!)).toBe(true); // 用户的库还在（另存了一份）
+    expect(/no such column/i.test(String(err.cause))).toBe(true);
+    // 原始 SQLite 消息保留在错误文本里，排查日志时能对上
+    expect(err.message).toContain('content_hash');
+    // ★ 备份必须是"迁移前的原样"：种子行读得回来，而不是半改的 schema
+    //   （这条钉住本任务存在的意义 —— 用户拿到的备份得真能救回数据）。
+    const snap = new Database(err.backupFile!);
+    try {
+      const row = snap.prepare('SELECT content FROM items WHERE id = ?').get('c'.repeat(32)) as
+        | { content: string }
+        | undefined;
+      expect(row?.content).toBe('用户的老数据');
+    } finally {
+      snap.close();
+    }
+  });
+
+  it('describeMigrationFailure 给出中文文案，非迁移错误返回 null', () => {
+    const err = new SchemaMigrationError('step', 'no such column: seq', 'C:\\x\\clipchan.db', 'C:\\x\\backup.db');
+    // ★ 文案不许给"用备份替换后重启"这类自救指令：同样的 schema 再启动只会再失败一次。
+    //   该说的是"数据在哪、别删、等修复"。
+    const human = describeMigrationFailure(err);
+    expect(human).toContain('历史数据未丢失');
+    expect(human).toContain('请勿删改');
+    expect(describeMigrationFailure(new Error('别的'))).toBeNull();
+  });
+
+  it('★ 连续三次迁移失败：数据目录里最多留 2 份迁移失败备份（超出就裁最旧的）', () => {
+    const dir = tmpDir();
+    const file = join(dir, 'clipchan.db');
+    seedBrokenDb(file);
+
+    const backups: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      let caught: unknown = null;
+      try { openDb(file); } catch (e) { caught = e; }
+      const err = caught as SchemaMigrationError;
+      expect(err).toBeInstanceOf(SchemaMigrationError);
+      if (err.backupFile) backups.push(err.backupFile);
+    }
+    // 迁移失败对同一份库是确定性的，每次启动都会再失败一次：不裁剪就是每次白攒一份。
+    const left = readdirSync(dir).filter(
+      (n) => n.startsWith('clipchan-migration-failed-') && n.endsWith('.db'),
+    );
+    expect(left).toHaveLength(2);
+    // 最近一次失败给出的备份必须是留下来的两份之一（最新那份绝不能被自己裁掉）
+    expect(existsSync(backups[2]!)).toBe(true);
   });
 });

@@ -348,8 +348,8 @@ export class SchemaMigrationError extends Error {
 export function describeMigrationFailure(e: unknown): string | null {
   if (!(e instanceof SchemaMigrationError)) return null;
   return e.backupFile
-    ? '数据库升级失败。你的历史数据已原样保留，并另存了一份到 ' + e.backupFile
-      + '。程序将带着旧数据结构继续运行 —— 如果列表打不开，请用备份文件替换 clipchan.db 后再启动。'
+    ? '数据库升级失败。你的历史数据未丢失（原库文件与一份备份都在数据目录，备份已另存到 ' + e.backupFile
+      + '）。历史记录读写暂不可用，程序其余功能仍可使用。请反馈此问题并等待修复版本，期间请勿删改数据目录中的文件。'
     : '数据库升级失败（' + e.step + '），且备份也没写成。请确认 ' + e.dbFile + ' 所在磁盘可写、有剩余空间。';
 }
 ```

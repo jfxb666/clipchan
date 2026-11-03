@@ -1000,6 +1000,86 @@ function runMaintenance(raw: Database.Database): MaintenanceResult {
   };
 }
 
+/**
+ * 迁移失败。★ 与"库损坏"是两件事：损坏是文件本身读不出页（走 main.ts storage-guard 的
+ * 备份恢复），迁移失败是文件能读、但我们的 DDL 在它上面跑不通（升级事故）。
+ * 用户需要知道的是"数据还在哪"，不是 SQLite 的英文错误串，所以原始消息放在 cause 里保留。
+ */
+export class SchemaMigrationError extends Error {
+  constructor(
+    /** 失败的迁移步骤名（schema / 补列 / 索引与回收站），日志与人话文案都用它定位。 */
+    readonly step: string,
+    // ES2022 的 Error 自带可选 cause，这里收窄为必有，所以要用 override 标记。
+    override readonly cause: unknown,
+    /** 出问题的库文件绝对路径。 */
+    readonly dbFile: string,
+    /** 迁移前复制出来的备份文件绝对路径；连备份都没写成时为 null。 */
+    readonly backupFile: string | null,
+  ) {
+    super('迁移步骤「' + step + '」失败：' + (cause instanceof Error ? cause.message : String(cause)));
+    this.name = 'SchemaMigrationError';
+  }
+}
+
+/** 把迁移失败翻成给用户看的一句话；不是迁移错误就返回 null 让调用方走原路径。 */
+export function describeMigrationFailure(e: unknown): string | null {
+  if (!(e instanceof SchemaMigrationError)) return null;
+  // ★ 不给"用备份替换后重启"这类自救指令：迁移失败对这份 schema 是确定性的，
+  //   换上备份重启只会原样再失败一次；降级模式下库根本没打开，"带着旧结构继续运行"
+  //   也是假的。用户真正需要的是"数据在哪、别删、等修复"。
+  return e.backupFile
+    ? '数据库升级失败。你的历史数据未丢失（原库文件与一份备份都在数据目录，备份已另存到 ' + e.backupFile
+      + '）。历史记录读写暂不可用，程序其余功能仍可使用。请反馈此问题并等待修复版本，期间请勿删改数据目录中的文件。'
+    : '数据库升级失败（' + e.step + '），且备份也没写成。请确认 ' + e.dbFile + ' 所在磁盘可写、有剩余空间。';
+}
+
+/** 迁移失败备份的文件名前缀与保留份数（保留最新 2 份，见 backupBeforeMigrationFailure）。 */
+const MIGRATION_FAILED_BACKUP_PREFIX = 'clipchan-migration-failed-';
+const MIGRATION_FAILED_BACKUP_KEEP = 2;
+
+/**
+ * 迁移失败时把用户的库文件复制一份留底，返回备份路径；连备份都写不成时返回 null。
+ *
+ * ★ 与 backup.ts 的 createBackup 同一条铁律：先写 .tmp 再 renameSync —— 复制中途
+ *   断电/被杀会留下半截文件，而半截的"备份"被用户当救命稻草拿去恢复，比没有备份更害人。
+ *   最终名要么不存在、要么完整。自己这步失败时尽力删掉 .tmp，返回 null ——
+ *   备份失败绝不能把"迁移失败"这个更大的真相挡住。
+ * ★ 只保留最新 2 份：迁移失败对同一份库是确定性的（同样的 schema 每次启动都失败），
+ *   不裁剪的话每次启动都白攒一份，数据目录迟早堆满几 MB 的副本。
+ */
+function backupBeforeMigrationFailure(file: string): string | null {
+  const dir = path.dirname(file);
+  try {
+    // 先裁旧的（这次的新备份还没写出去）：文件名里是同长度的毫秒时间戳，按名排序即按时间排序。
+    const olds = fs.readdirSync(dir)
+      .filter((n) => n.startsWith(MIGRATION_FAILED_BACKUP_PREFIX) && n.endsWith('.db'))
+      .sort();
+    for (const name of olds.slice(0, Math.max(0, olds.length - (MIGRATION_FAILED_BACKUP_KEEP - 1)))) {
+      try {
+        fs.rmSync(path.join(dir, name), { force: true });
+      } catch {
+        /* 单份删不掉不影响其余（可能正被用户开着） */
+      }
+    }
+  } catch {
+    /* 读不了目录就跳过裁剪：备份本身照样做 */
+  }
+  const target = path.join(dir, MIGRATION_FAILED_BACKUP_PREFIX + Date.now() + '.db');
+  const tmp = target + '.tmp';
+  try {
+    fs.copyFileSync(file, tmp);
+    fs.renameSync(tmp, target);
+    return target;
+  } catch {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* 半截 .tmp 删不掉就只能留着：不在任何恢复路径上，无害 */
+    }
+    return null;
+  }
+}
+
 export function openDb(file: string): Db {
   if (file !== ':memory:') {
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -1028,13 +1108,39 @@ export function openDb(file: string): Db {
     }
   }
   raw.pragma('foreign_keys = ON');
-  raw.exec(SCHEMA_SQL);
+
+  // ★ 三段迁移任何一步失败，都必须先把用户的库文件留在原地（只读复制一份），
+  //   再抛带备份路径的错误。绝不"就地失败"让半改的 schema 悬在那里（T-M7）。
+  //   ★ 备份只复制主库文件、且发生在 close 之前：WAL 里此时只有本次启动刚写的建表
+  //   语句，主库文件正是"升级前"的原样快照 —— 这正是我们要保住的东西。
+  //   ⚠ 例外：上次不干净退出留下的 -wal 里可能还有上一场会话没 checkpoint 的尾巴，
+  //   这份快照会缺那一段（那段数据仍在原库的 -wal 里，原库文件一个字节都没动过）。
+  const migrate = (step: string, fn: () => void): void => {
+    try {
+      fn();
+    } catch (cause) {
+      let backupFile: string | null = null;
+      try {
+        if (file !== ':memory:') {
+          backupFile = backupBeforeMigrationFailure(file);
+        }
+      } catch {
+        backupFile = null; // 备份也写不成：仍然要抛出，只是没有备份可指
+      }
+      try {
+        raw.close(); // Windows 上不关句柄，调用方连改名/替换文件都做不了
+      } catch { /* 已关闭 */ }
+      throw new SchemaMigrationError(step, cause, file, backupFile);
+    }
+  };
+
+  migrate('schema', () => raw.exec(SCHEMA_SQL));
 
   // 老库可能缺列：用 PRAGMA 检查后补，避免"升级即崩"。
-  ensureColumns(raw);
+  migrate('补列', () => ensureColumns(raw));
   // ★ 顺序不能换：索引谓词引用 deleted_at，必须等 ensureColumns 补完列才建；
   //   同时 SQLite 没有 ALTER INDEX，旧谓词的索引只能 drop 后重建。
-  migrateTrashSchema(raw);
+  migrate('索引与回收站', () => migrateTrashSchema(raw));
 
   const settingsCache: Settings = loadSettings(raw);
 

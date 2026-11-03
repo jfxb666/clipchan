@@ -38,7 +38,7 @@ import { maybeBackup, recoverCorruptDb } from './storage-guard';
 import { createDeltaThrottle } from './deltaThrottle';
 import type { AiApi } from './ai';
 import Database from 'better-sqlite3';
-import { openDb } from './db';
+import { describeMigrationFailure, openDb } from './db';
 import type { Db, InsertResult } from './db';
 import { runLegacyMigration } from './migrate-runner';
 import { createLogSink, installCrashHooks } from './logs';
@@ -167,6 +167,24 @@ let perf: PerfWatch | undefined;
  *   提示语和严重级别完全不同，混成一个变量必然把好消息说成坏消息。
  */
 let restoredFromDb: string | null = null;
+/**
+ * 本次启动是否因「迁移失败」进入了降级模式（值是 describeMigrationFailure 的完整文案）。
+ * ★ 存模块级与 recoveredFromDb 同一个理由：setupStorage 跑在窗口创建之前，那时没有 win
+ *   可以弹 toast；等 did-finish-load 之后再补发，用户才知道升级出了什么事、备份在哪。
+ */
+let dbMigrationHint: string | null = null;
+
+/**
+ * db 不可用时给 IPC 的报错。★ 降级启动（迁移失败，T-M7）与"还没开库"要说不同的话：
+ * 前者是这次升级出了问题、但数据还在；后者只是启动时序里的一次早到调用。
+ */
+function dbUnavailableError(): Error {
+  return new Error(
+    dbMigrationHint
+      ? '数据库未完成升级，已降级启动：历史数据已保留在数据目录，历史记录读写暂不可用'
+      : '数据库尚未就绪',
+  );
+}
 
 /** 控制台 + 文件双写。★ 控制台留着是因为开发期 console 更好用，落盘是给用户看的。 */
 function logLine(msg: string): void {
@@ -241,11 +259,11 @@ function buildAiApi(getBroadcast: () => { aiChanged(): void; aiOptimizeDelta(req
     secretBox,
     kv: {
       getSettingValue: <T,>(key: string): T | undefined => {
-        if (!rt.db) throw new Error('数据库尚未就绪');
+        if (!rt.db) throw dbUnavailableError();
         return rt.db.getSettingValue<T>(key);
       },
       setSettingValue: (key: string, value: unknown): void => {
-        if (!rt.db) throw new Error('数据库尚未就绪');
+        if (!rt.db) throw dbUnavailableError();
         rt.db.setSettingValue(key, value);
       },
     },
@@ -421,7 +439,8 @@ function backupCorruptDb(dbPath: string, dataDir: string): string {
 
 /** 建目录、开库、按需迁移、清孤儿、启动自检备份。 */
 function setupStorage(dataDir: string): {
-  db: Db;
+  /** ★ T-M7 起可能是 null：迁移失败时降级启动（数据留在原文件里），不再是"启动失败"。 */
+  db: Db | null;
   migrated: number;
   /** 坏库留档文件名（数据没救回来时的产物）。 */
   recoveredFrom?: string;
@@ -463,9 +482,27 @@ function setupStorage(dataDir: string): {
   //   恢复成功 → dbPath 存在 → isFresh=false（库里有用户数据）；
   //   走兜底 → dbPath 已被挪走 → isFresh=true。
   const isFresh = !fs.existsSync(dbPath);
-  const db = openDb(dbPath);
+  // ★ 迁移失败不再等于"启动失败"（T-M7）：库文件本身能读，只是我们的 DDL 在它上面
+  //   跑不通。openDb 已经把原始库复制了一份备份再抛 SchemaMigrationError，这里把错误
+  //   翻成中文存进 dbMigrationHint（等窗口出来后用现成的 toast 出口带给首屏），
+  //   然后带着 db=null 降级启动 —— 用户至少还有托盘、设置和"打开数据目录"，
+  //   能自己把备份找回来。不是迁移错误（例如真损坏）仍然原样上抛，走启动失败弹窗。
+  let db: Db | null = null;
+  try {
+    db = openDb(dbPath);
+  } catch (e) {
+    const human = describeMigrationFailure(e);
+    if (human === null) throw e;
+    logError('[db] ' + human);
+    dbMigrationHint = human;
+  }
 
-  const migration = runLegacyMigration(db, dataDir, isFresh);
+  // ★ 降级启动（db=null）时跳过旧数据导入：没有库可写，history.json 留在原地不动。
+  //   ⚠ 代价要如实记下：这次失败后 dbPath 一直存在，isFresh 从此为 false，旧数据的
+  //   自动导入在后续每次启动都会被跳过（数据不丢，只是不再自动导）。
+  const migration = db === null
+    ? { attempted: false, imported: 0, skipped: 0, settingsFromLegacy: false }
+    : runLegacyMigration(db, dataDir, isFresh);
   const migrated = migration.imported;
 
   /**
@@ -480,6 +517,11 @@ function setupStorage(dataDir: string): {
    */
   const runStartupTasks = (): void => {
     if (SMOKE) return;
+
+    // ★ 降级启动没有库可查（T-M7）：孤儿扫描（allImageRows）与自检备份（wal_checkpoint）
+    //   都做不了，直接跳过 —— 不加这条，两段会各抛一次 TypeError，被外层 catch 记成
+    //   两条吓人却与真因无关的错误日志。
+    if (db === null) return;
 
     const sweepStartedAt = Date.now();
     try {
@@ -718,7 +760,7 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
   const broadcast = makeBroadcaster(() => rt.win);
   aiBroadcast = broadcast;
   const needDb = (): Db => {
-    if (!rt.db) throw new Error('数据库尚未就绪');
+    if (!rt.db) throw dbUnavailableError();
     return rt.db;
   };
   const needSettings = (): Settings => {
@@ -1167,7 +1209,7 @@ function needWin(): BrowserWindow {
 
 /** buildHandlers() 里那份 needDb 是闭包局部量，模块级的截图/历史逻辑用这个。 */
 function requireDb(): Db {
-  if (!rt.db) throw new Error('数据库尚未就绪');
+  if (!rt.db) throw dbUnavailableError();
   return rt.db;
 }
 
@@ -1790,7 +1832,14 @@ function main(): void {
     recoveredFromDb = recoveredFrom ?? null;
     restoredFromDb = restoredFrom ?? null;
     rt.db = db;
-    rt.settings = db.getSettings();
+    // ★ 降级启动（迁移失败）时 rt.settings 也不能是 null：窗口尺寸、热键、托盘都还要读它。
+    //   用默认设置兜底 —— 设置页能打开、能看；改设置里的"写库"动作会由 needDb 的降级
+    //   文案挡下来，而不是把界面搞崩。
+    rt.settings = db ? db.getSettings() : DEFAULT_SETTINGS;
+    // dbMigrationHint 是本次迁移失败留下的用户可读提示；非迁移失败路径不会走到这里。
+    if (db === null && dbMigrationHint) {
+      logWarn('[db] 以降级模式启动：所有读写历史的入口会提示"数据库未完成升级"');
+    }
 
     // ★ smoke 只验骨架，不碰真实剪贴板，也不启动助手（保持冒烟又快又干净）。
     if (!SMOKE) setupServices(rt.dataDir);
@@ -1918,15 +1967,18 @@ function main(): void {
       setTimeout(runStartupTasksOnce, 5000);
     }
 
-    // ★ 库损坏这条必须等页面加载完再发：setupStorage 跑的时候窗口还不存在，
+    // ★ 库损坏/迁移失败这条必须等页面加载完再发：setupStorage 跑的时候窗口还不存在，
     //   直接 toast 会被 makeBroadcaster 的 isDestroyed 守卫静默丢掉，用户永远不知道历史去哪了。
-    // ★ 三分支：恢复成功是好消息（'info'），只留了档才用 'warn'，都没发生就不发。
-    if ((restoredFromDb || recoveredFromDb) && !SMOKE) {
+    // ★ 迁移失败（T-M7）复用这同一条现成的 toast 出口，把 describeMigrationFailure 的文案
+    //   带到首屏；它排最前 —— 升级失败是用户此刻最需要知道的事。
+    if ((restoredFromDb || recoveredFromDb || dbMigrationHint) && !SMOKE) {
       const restored = restoredFromDb;
       const quarantined = recoveredFromDb;
+      const migrationHint = dbMigrationHint;
       rt.win.webContents.once('did-finish-load', () => {
         const broadcast = makeBroadcaster(() => rt.win);
-        if (restored) broadcast.toast('历史库损坏，已从备份 ' + restored + ' 自动恢复', 'info');
+        if (migrationHint) broadcast.toast(migrationHint, 'warn');
+        else if (restored) broadcast.toast('历史库损坏，已从备份 ' + restored + ' 自动恢复', 'info');
         else if (quarantined) broadcast.toast('历史库损坏，已备份为 ' + quarantined + '，已新建空库', 'warn');
       });
     }
