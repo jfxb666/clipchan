@@ -1339,15 +1339,16 @@ export function openDb(file: string): Db {
    * better-sqlite3@13.0.3 单次 prepare 约 21–43µs，复用同一 statement 约 5µs），而
    * dedup 查询 / INSERT / 淘汰 / 回收站清理挂在**每一次复制**上，2000 行库实测整条
    * 写路径可省约 130–220µs/次 —— 固定开销，量不随记录数涨。
-   * 只收静态语句：按 where 子句拼出来的那几条（list / count / scan）天然无法预编译，
-   * 硬凑缓存会引入"SQL 变了但 statement 没变"的错。
+   * 只收"静态且挂在每次复制上"的语句：按 where 子句拼出来的那几条（list / count / scan）天然无法
+   * 预编译，硬凑缓存会引入"SQL 变了但 statement 没变"的错；图片相似查询这类**低频**静态语句
+   * 也不收 —— 它的代价被 200 行扫描支配，省一次 prepare 没有意义，收进来只会放大这块的体积。
    * 各条 SQL 与被替换处的原文逐字符一致 —— 字段顺序以调用点的实参为准，抄错列序比少省
    * 一次 prepare 严重得多。statement 生命周期 = 本连接生命周期，close 由 better-sqlite3
    * 随连接统一处理，无需逐个 finalize。
    */
   const stmt = {
     dedupText: raw.prepare('SELECT id, rich_html FROM items WHERE content_hash = ? AND deleted_at IS NULL'),
-    dedupId: raw.prepare('SELECT id FROM items WHERE content_hash = ? AND deleted_at IS NULL'),
+    dedupList: raw.prepare('SELECT id FROM items WHERE content_hash = ? AND deleted_at IS NULL'),
     dedupImage: raw.prepare('SELECT id FROM items WHERE image_hash = ? AND deleted_at IS NULL'),
     richHtml: raw.prepare('UPDATE items SET rich_html = ? WHERE id = ?'),
     insertText: raw.prepare(
@@ -1482,7 +1483,7 @@ export function openDb(file: string): Db {
       if (list.length === 0) return { id: '', touched: false };
 
       const hash = hashText(list.join('\n'));
-      const hit = stmt.dedupId.get(hash) as
+      const hit = stmt.dedupList.get(hash) as
         | { id: string }
         | undefined;
       if (hit) {
