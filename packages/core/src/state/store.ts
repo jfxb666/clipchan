@@ -279,8 +279,19 @@ function sortItems(items: ClipItemDTO[]): ClipItemDTO[] {
   });
 }
 
-function errorText(err: unknown): string {
-  if (err instanceof Error) return err.message;
+/** ipcRenderer.invoke 的拒绝被 Electron 用 toString() 拼成 "Error invoking remote method 'channel': Error: 正文"。 */
+const IPC_WRAPPER = /^(?:Error invoking remote method '[^']+': )?(?:Error: )?/;
+
+/**
+ * 把抛出来的东西变成 toast 文案。
+ *
+ * ★ IPC 拒绝顶着上面那截样板前缀（数据库的中文报错如「同级已有同名文件夹…」
+ *   会被顶到看不见），展示前剥掉 —— 正则与 ui/aiProviderForm.ts 的 IPC_WRAPPER
+ *   保持同一份（那边先落地，此处不重复另一个写法）；剥完为空就退回原文，toast 不留白。
+ *   非 Error 的值维持 String() 原样。
+ */
+export function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message.replace(IPC_WRAPPER, '') || err.message;
   return String(err);
 }
 

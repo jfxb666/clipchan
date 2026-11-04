@@ -20,6 +20,7 @@ import {
   QUERY_DEBOUNCE_MS,
   TOAST_TTL_MS,
   bindClipStore,
+  errorText,
   resetClipStore,
   useClipStore,
 } from './store';
@@ -1734,5 +1735,33 @@ describe('suggestTagsByAi（v1.0.0 ⑥ 可选项）', () => {
     await useClipStore.getState().loadAiProviders();
     await expect(useClipStore.getState().suggestTagsByAi('i1')).resolves.toEqual([]);
     expect(fake.aiAssistCalls).toHaveLength(0);
+  });
+});
+
+describe('errorText：剥掉 Electron IPC 拒绝的样板前缀', () => {
+  it('IPC 包装过的 Error：剥掉 "Error invoking remote method…: Error: " 双重前缀只留中文正文', () => {
+    // Electron 用 toString() 拼接（name 也进 message），数据库的报错经 folders:create
+    // 传回就顶着这截前缀，进 toast 会把中文正文顶到看不见。
+    expect(
+      errorText(
+        new Error(
+          "Error invoking remote method 'folders:create': Error: 同级已有同名文件夹「工作」，换个名字或建到别的文件夹下",
+        ),
+      ),
+    ).toBe('同级已有同名文件夹「工作」，换个名字或建到别的文件夹下');
+  });
+
+  it('普通 Error 的 message 原样展示，不受前缀剥离影响', () => {
+    expect(errorText(new Error('自定义错误'))).toBe('自定义错误');
+  });
+
+  it('字符串原样返回（既有行为不变）', () => {
+    expect(errorText('普通字符串错误')).toBe('普通字符串错误');
+  });
+
+  it('整条 message 只剩空壳包装时退回原文（toast 不留白）', () => {
+    expect(errorText(new Error("Error invoking remote method 'x': Error: "))).toBe(
+      "Error invoking remote method 'x': Error: ",
+    );
   });
 });
