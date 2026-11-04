@@ -565,10 +565,6 @@ export function buildSearchIndex(text: string): string {
   }
 }
 
-function nextSeqOf(raw: Database.Database): number {
-  return (raw.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM items').get() as { m: number }).m + 1;
-}
-
 function sourceToDb(s: 'capture' | 'merge' | undefined): DbSource {
   return s === 'merge' ? 'merge' : 'clip';
 }
@@ -1154,8 +1150,13 @@ export function openDb(file: string): Db {
 
   const settingsCache: Settings = loadSettings(raw);
 
+  /**
+   * ★ T-M8：与原模块级 nextSeqOf 完全同一语义（MAX(seq) + 1），只是改用下面 stmt.nextSeq
+   *   的预编译 statement —— MAX(seq) 挂在每次写入与每次去重命中刷新上，不值得每次重新 parse。
+   *   外部如需同一口径，自己 prepare 这句 SQL 即可（本函数不导出，无外部调用方）。
+   */
   function nextSeq(): number {
-    return nextSeqOf(raw);
+    return (stmt.nextSeq.get() as { m: number }).m + 1;
   }
 
   /**
@@ -1215,7 +1216,7 @@ export function openDb(file: string): Db {
   /** 命中去重：同时刷新 created_at 与 seq（spec §7.4 的 ★）。 */
   function touchRow(id: string, now?: number): void {
     const at = typeof now === 'number' ? now : Date.now();
-    raw.prepare('UPDATE items SET created_at = ?, seq = ? WHERE id = ?').run(at, nextSeq(), id);
+    stmt.touch.run(at, nextSeq(), id);
     evictOverLimit();
   }
 
@@ -1235,15 +1236,7 @@ export function openDb(file: string): Db {
     // ★ 边界取「第 N 新那条」为界并**严格小于**它（OFFSET 是 N-1，不是 N）：
     //   seq 由 nextSeq 全库唯一，(created_at, seq) 因此是全序，删掉的集合与旧写法逐行等价，
     //   留着 N 条就是 N 条 —— 早先用 OFFSET N 时实测多留了一行。
-    raw.prepare(
-      `UPDATE items SET deleted_at = ?
-        WHERE deleted_at IS NULL
-          AND pinned = 0
-          AND (created_at, seq) < (
-            SELECT created_at, seq FROM items WHERE deleted_at IS NULL AND pinned = 0
-            ORDER BY created_at DESC, seq DESC LIMIT 1 OFFSET ?
-          )`,
-    ).run(Date.now(), Math.max(0, Math.floor(limit) - 1));
+    stmt.evict.run(Date.now(), Math.max(0, Math.floor(limit) - 1));
     purgeTrashOverLimit();
   }
 
@@ -1256,9 +1249,10 @@ export function openDb(file: string): Db {
    *   恢复是用户点的"撤销"，不该因为内容重复就报错崩界面。跳过它、由调用方
    *   回报"实际恢复了几条"更合适。
    */
-  function restoreOne(conn: Database.Database, id: string): number {
+  function restoreOne(id: string): number {
     try {
-      return conn.prepare('UPDATE items SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL').run(id).changes;
+      // ★ T-M8：restoreMany 逐条循环调用这里，statement 必须复用（原先是循环体内每次 prepare）。
+      return stmt.restoreOne.run(id).changes;
     } catch (err) {
       const code = (err as { code?: string }).code;
       if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return 0;
@@ -1275,18 +1269,11 @@ export function openDb(file: string): Db {
   function purgeTrashOverLimit(): string[] {
     const limit = settingsCache.trashLimit;
     if (!Number.isFinite(limit) || limit <= 0) return [];
-    const rows = raw
-      .prepare(
-        `SELECT id FROM items
-          WHERE deleted_at IS NOT NULL
-          ORDER BY deleted_at DESC, seq DESC LIMIT -1 OFFSET ?`,
-      )
-      .all(Math.floor(limit)) as { id: string }[];
+    const rows = stmt.purgeSel.all(Math.floor(limit)) as { id: string }[];
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.id);
-    const del = raw.prepare('DELETE FROM items WHERE id = ?');
     const tx = raw.transaction((list: string[]) => {
-      for (const id of list) del.run(id);
+      for (const id of list) stmt.purgeDel.run(id);
     });
     tx(ids);
     return ids;
@@ -1346,6 +1333,58 @@ export function openDb(file: string): Db {
     }));
   }
 
+  /**
+   * ★ T-M8：静态 SQL 的 statement 在 openDb 作用域里预编译一次。
+   * 判据不是"看起来快"：better-sqlite3 不内部缓存 statement（2026-11 实测：本仓库的
+   * better-sqlite3@13.0.3 单次 prepare 约 21–43µs，复用同一 statement 约 5µs），而
+   * dedup 查询 / INSERT / 淘汰 / 回收站清理挂在**每一次复制**上，2000 行库实测整条
+   * 写路径可省约 130–220µs/次 —— 固定开销，量不随记录数涨。
+   * 只收静态语句：按 where 子句拼出来的那几条（list / count / scan）天然无法预编译，
+   * 硬凑缓存会引入"SQL 变了但 statement 没变"的错。
+   * 各条 SQL 与被替换处的原文逐字符一致 —— 字段顺序以调用点的实参为准，抄错列序比少省
+   * 一次 prepare 严重得多。statement 生命周期 = 本连接生命周期，close 由 better-sqlite3
+   * 随连接统一处理，无需逐个 finalize。
+   */
+  const stmt = {
+    dedupText: raw.prepare('SELECT id, rich_html FROM items WHERE content_hash = ? AND deleted_at IS NULL'),
+    dedupId: raw.prepare('SELECT id FROM items WHERE content_hash = ? AND deleted_at IS NULL'),
+    dedupImage: raw.prepare('SELECT id FROM items WHERE image_hash = ? AND deleted_at IS NULL'),
+    richHtml: raw.prepare('UPDATE items SET rich_html = ? WHERE id = ?'),
+    insertText: raw.prepare(
+      `INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq, source_app,
+                            rich_html, search_index)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ),
+    insertImage: raw.prepare(
+      `INSERT INTO items (id, kind, content, content_hash, image_path, image_hash, thumb_path,
+                            width, height, bytes, source, pinned, truncated, created_at, seq, source_app, phash)
+         VALUES (?, 'image', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+    ),
+    insertFiles: raw.prepare(
+      `INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq, source_app,
+                            file_paths, search_index)
+         VALUES (?, 'files', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+    ),
+    touch: raw.prepare('UPDATE items SET created_at = ?, seq = ? WHERE id = ?'),
+    nextSeq: raw.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM items'),
+    evict: raw.prepare(
+      `UPDATE items SET deleted_at = ?
+        WHERE deleted_at IS NULL
+          AND pinned = 0
+          AND (created_at, seq) < (
+            SELECT created_at, seq FROM items WHERE deleted_at IS NULL AND pinned = 0
+            ORDER BY created_at DESC, seq DESC LIMIT 1 OFFSET ?
+          )`,
+    ),
+    purgeSel: raw.prepare(
+      `SELECT id FROM items
+          WHERE deleted_at IS NOT NULL
+          ORDER BY deleted_at DESC, seq DESC LIMIT -1 OFFSET ?`,
+    ),
+    purgeDel: raw.prepare('DELETE FROM items WHERE id = ?'),
+    restoreOne: raw.prepare('UPDATE items SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL'),
+  };
+
   const api: Db = {
     raw,
 
@@ -1367,14 +1406,14 @@ export function openDb(file: string): Db {
 
       const hash = hashText(content);
       // ★ 去重只认活跃行：命中回收站里的行会刷新一条已删记录的排序，用户复制完什么都不出现。
-      const hit = raw.prepare('SELECT id, rich_html FROM items WHERE content_hash = ? AND deleted_at IS NULL').get(hash) as
+      const hit = stmt.dedupText.get(hash) as
         | { id: string; rich_html: string | null }
         | undefined;
       if (hit) {
         // ★ 旧行没有富文本、这次有：补写。否则同一段文字先从纯文本来源复制过、
         //   再从网页复制，就永远拿不到 text/html —— 用户看到的加粗/表格全丢了。
         if (richHtml !== null && (hit.rich_html === null || hit.rich_html.length === 0)) {
-          raw.prepare('UPDATE items SET rich_html = ? WHERE id = ?').run(richHtml, hit.id);
+          stmt.richHtml.run(richHtml, hit.id);
         }
         touchRow(hit.id, typeof opts.now === 'number' ? opts.now : undefined);
         return { id: hit.id, touched: true };
@@ -1386,11 +1425,7 @@ export function openDb(file: string): Db {
         : Date.now();
       const seq = typeof opts.seq === 'number' ? opts.seq : nextSeq();
       const kind = opts.kind ?? classify(content);
-      raw.prepare(
-        `INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq, source_app,
-                            rich_html, search_index)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+      stmt.insertText.run(
         id, kind, content, hash, sourceToDb(opts.source), opts.pinned ? 1 : 0, truncated ? 1 : 0, createdAt, seq,
         sourceAppToDb(opts.sourceApp), richHtml, buildSearchIndex(content),
       );
@@ -1402,7 +1437,7 @@ export function openDb(file: string): Db {
       if (!meta || typeof meta.hash !== 'string' || meta.hash.length === 0) {
         throw new Error('insertImage: 缺少 hash');
       }
-      const hit = raw.prepare('SELECT id FROM items WHERE image_hash = ? AND deleted_at IS NULL').get(meta.hash) as
+      const hit = stmt.dedupImage.get(meta.hash) as
         | { id: string }
         | undefined;
       if (hit) {
@@ -1423,11 +1458,7 @@ export function openDb(file: string): Db {
       // ★ 相似判定必须在插入**之前**做（新行还没进库，扫不到自己）；只在有 phash 时才扫，
       //   没有 phash 的图片连一次查询都不该多付。
       const similarTo = phash === null ? undefined : findSimilarImage(id, phash);
-      raw.prepare(
-        `INSERT INTO items (id, kind, content, content_hash, image_path, image_hash, thumb_path,
-                            width, height, bytes, source, pinned, truncated, created_at, seq, source_app, phash)
-         VALUES (?, 'image', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
-      ).run(
+      stmt.insertImage.run(
         id, meta.imagePath, meta.hash, meta.thumbPath,
         Math.max(0, Math.round(meta.width)), Math.max(0, Math.round(meta.height)), Math.max(0, Math.round(meta.bytes)),
         source, pinned ? 1 : 0, createdAt, seq, sourceAppToDb(opts.sourceApp), phash,
@@ -1451,7 +1482,7 @@ export function openDb(file: string): Db {
       if (list.length === 0) return { id: '', touched: false };
 
       const hash = hashText(list.join('\n'));
-      const hit = raw.prepare('SELECT id FROM items WHERE content_hash = ? AND deleted_at IS NULL').get(hash) as
+      const hit = stmt.dedupId.get(hash) as
         | { id: string }
         | undefined;
       if (hit) {
@@ -1465,11 +1496,7 @@ export function openDb(file: string): Db {
         : typeof opts.createdAt === 'number' ? opts.createdAt
         : Date.now();
       const seq = typeof opts.seq === 'number' ? opts.seq : nextSeq();
-      raw.prepare(
-        `INSERT INTO items (id, kind, content, content_hash, source, pinned, truncated, created_at, seq, source_app,
-                            file_paths, search_index)
-         VALUES (?, 'files', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
-      ).run(
+      stmt.insertFiles.run(
         id, content, hash, sourceToDb(opts.source), opts.pinned ? 1 : 0, createdAt, seq,
         sourceAppToDb(opts.sourceApp), JSON.stringify(list), buildSearchIndex(content),
       );
@@ -1615,14 +1642,14 @@ export function openDb(file: string): Db {
     },
 
     restore(id: string): boolean {
-      return restoreOne(raw, id) > 0;
+      return restoreOne(id) > 0;
     },
 
     restoreMany(ids: string[]): number {
       if (!ids || ids.length === 0) return 0;
       const tx = raw.transaction((list: string[]) => {
         let n = 0;
-        for (const id of list) n += restoreOne(raw, id);
+        for (const id of list) n += restoreOne(id);
         return n;
       });
       return tx(ids);
@@ -1630,10 +1657,9 @@ export function openDb(file: string): Db {
 
     purge(ids: string[]): number {
       if (!ids || ids.length === 0) return 0;
-      const del = raw.prepare('DELETE FROM items WHERE id = ?');
       const tx = raw.transaction((list: string[]) => {
         let n = 0;
-        for (const id of list) n += del.run(id).changes;
+        for (const id of list) n += stmt.purgeDel.run(id).changes;
         return n;
       });
       return tx(ids);

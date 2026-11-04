@@ -2696,3 +2696,23 @@ describe('url_previews 淘汰（T-M6）', () => {
     expect(db.getUrlPreviews(['https://a.com/x'])[0]!.fetchedAt).toBe(1_700_000_000_000);
   });
 });
+
+describe('prepare 上移不改语义（T-M8）', () => {
+  it('★ restoreMany 里每一条都各自成功/失败，计数与逐条 restore 一致', () => {
+    const db = mem();
+    const ids = ['x', 'y', 'z'].map((t, i) => db.insertText('批量恢复' + t, { now: 1700000000000 + i }).id);
+    for (const id of ids) db.remove(id);
+    // 掺一个不存在的 id：statement 复用后，这条必须仍然返回 0 而不是把整批带崩
+    expect(db.restoreMany([...ids.slice(0, 2), '不存在'])).toBe(2);
+    expect(db.count()).toBe(2);
+  });
+
+  it('同一张表连续 insert 仍然走去重语义（statement 复用不能把参数粘住）', () => {
+    const db = mem();
+    const a = db.insertText('同一段', { now: 1700000000000 });
+    const b = db.insertText('同一段', { now: 1700000001000 });
+    expect(b.touched).toBe(true);
+    expect(b.id).toBe(a.id);
+    expect(db.count()).toBe(1);
+  });
+});
