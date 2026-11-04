@@ -591,7 +591,20 @@ export class ClipboardWatcher {
 
   private handleText(fmts: string[], suppressed: boolean): void {
     const seen = this.recorder.lastSeen;
+    // ★ T-N1 观测面 + 实测结论（2026-11-05 真机 dev）：文本分支没有图片那样的粗判，每
+    //   300ms 都要把整串 readText() 出来才能判重，这里把每次读取耗时记进观测器（「读纯文本」）。
+    //   剪贴板躺 10 万字（'a'×100000）内容不变空跑 60 秒：200 跳（300ms 节奏分毫不差），
+    //   单次平均 0.545ms、p95 0.71ms、最慢 1.36ms，60 秒累计 109ms（≈1.8ms/秒，一核的 0.18%）。
+    //   累计门槛（60ms/60s）虽碰到，粗判却加不上去：Electron 的 clipboard 没有便宜拿长度的
+    //   口子——availableFormats() 只报格式名，readBuffer('text/plain').length 本身就是全量读；
+    //   原生助手也没有文本能力（指令只有 PASTE/BLUR/FG/FGEXE/FILES/FILESET 与 PING/QUIT 两个
+    //   生命周期指令），要加 TEXTLEN 就得每 300ms 打一次助手 IPC，比 0.545ms 的进程内读取更贵，
+    //   还往热路径上添了个故障面。上面亚毫秒数字来自同一 electron.exe 的独立 performance.now
+    //   探针（应用内 Date.now() 只能取整到 0/1ms，[perf] 汇总里看到的会是 0）。
+    //   维持现状：宁可每跳多读这半毫秒，绝不冒"粗判漏记用户复制"的险。
+    const readStartedAt = Date.now();
     const text = this.clip.readText() ?? '';
+    this.perf?.observe('读纯文本', Date.now() - readStartedAt);
     // ★ 判重必须排在读富文本**之前**：Office 的 'HTML Format' 有几十 KB
     //   （实测 Word 复制两段文字 + 一张表 = 40KB），每 300ms 读一次纯属浪费。
     //   纯文本非空且没变 = 这一跳就是重复内容，直接返回；
