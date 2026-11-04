@@ -492,11 +492,26 @@ export const useClipStore = create<ClipStore>((set, get) => ({
       const platform = getPlatform();
       const query = listQuery(get(), 0);
       // 列表与总数必须同一套条件：分开算会出现「共 3 条」但列表有 5 张卡片。
-      const [items, counted] = await Promise.all([
-        platform.items.list(query),
-        // 取不到总数就退回已加载条数（宁可少一个准确数字，也不让整页加载失败）。
-        platform.items.count(query).catch(() => -1),
-      ]);
+      // ★ 带表达式的查询一次拿回"页 + 总数"（T-M1）：expr 求值要在应用层逐行做，
+      //   list 与 count 分发就是让主进程把候选各扫一遍；searchPage 出自同一个候选集。
+      // 普通查询仍走 list + count 两条（SQL 侧本来就便宜，且 count 失败要能单独兜 -1）。
+      const [items, counted] = query.expr !== undefined
+        ? await platform.items
+            .searchPage(query)
+            .then((r) => [r.items, r.total] as const)
+            .catch(() =>
+              // searchPage 拿不到（老 preload / 非 Electron 平台）→ 原样退回旧的两条调用，
+              // 不让"少一条新通道"把整页搜索拖垮。
+              Promise.all([
+                platform.items.list(query),
+                platform.items.count(query).catch(() => -1),
+              ])
+            )
+        : await Promise.all([
+            platform.items.list(query),
+            // 取不到总数就退回已加载条数（宁可少一个准确数字，也不让整页加载失败）。
+            platform.items.count(query).catch(() => -1),
+          ]);
       if (seq !== loadSeq) return;
       const ids = new Set(items.map((it) => it.id));
       const kept = get().selectedIds.filter((id) => ids.has(id));

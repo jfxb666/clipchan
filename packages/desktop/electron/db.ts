@@ -410,6 +410,26 @@ export interface Db {
   list(q?: ListQuery): ClipItemDTO[];
   /** 与 list 同条件的总条数（分页时界面显示"共 N 条"）。 */
   count(q?: ListQuery): number;
+  /**
+   * 带表达式的搜索：一次返回"这一页 + 总数"（T-M1）。
+   * ★ list 与 count 是同一轮用户操作里的两次调用，分开发就会把候选各扫一遍（20000 行 × 2）；
+   *   searchPage 共用同一个候选缓存，total 与 list/count 的命中集合天然一致。
+   * 无表达式时等价于 { items: list(q), total: count(q) }（SQL 侧本就能直接算分页与总数）。
+   */
+  searchPage(q?: ListQuery): { items: ClipItemDTO[]; total: number };
+  /**
+   * 按 id 批量取整行 DTO。
+   * ★ 返回顺序 === 入参顺序：分页顺序由候选集决定，不能被 SQL 的返回顺序打乱
+   *   （IN 查询不保证顺序，这里按入参重排）。空数组直接回 []。
+   */
+  rowsByIds(ids: string[]): ClipItemDTO[];
+  /**
+   * 手动作废候选缓存（T-M1）。
+   * ★ 只给绕过 api 写出口、直接拿 raw 写 items 表的路径用（importAll 在 export-import.ts
+   *   里整包 INSERT，不经任何 api 出口，缓存必须由调用方手动作废，否则导入的新记录
+   *   在同一个搜索词下是隐身的）。正常写路径不要调它：各出口已统一挂 bumpGen。
+   */
+  invalidateSearchCache(): void;
   remove(id: string): ItemRow | null;
   removeMany(ids: string[]): ItemRow[];
   togglePin(id: string): boolean;
@@ -865,23 +885,45 @@ function buildListSql(q: ListQuery): { sql: string; params: unknown[] } {
 const SEARCH_SCAN_LIMIT = 20000;
 
 /**
+ * 候选扫描只需要判定要用的列 + 分页要用的 id，不再 SELECT *。
+ * ★ 原实现把 23 列全搬回 JS（含图片行永远读不到的 rich_html / file_paths），
+ *   20000 行时那是纯白付的内存与反序列化 —— 审计 T-M1 的另一半。
+ * （清单 = matchSearch 实际读取的字段：content / search_index，图片行还要 kind+width+height+bytes
+ *   现场拼描述；加上分页切片要用的 id。排序键 pinned/created_at/seq 只出现在 ORDER BY 里，
+ *   引用的是表列，不必进投影。db.spec 的扫描计数钉在这个列清单开头，改列清单要同步改它。）
+ */
+const SCAN_COLUMNS = 'id, kind, content, search_index, width, height, bytes';
+
+/**
+ * 候选扫描行的类型：只有判定要用的列 + 分页要用的 id（与 SCAN_COLUMNS 逐列对应）。
+ * ★ 用 Pick 收窄而不是拿 ItemRow 硬撑：让"候选行不够 rowToDto 投影"这件事变成
+ *   编译错误而不是一行注释——谁想在扫描行上直接 rowToDto，tsc 先拦下。
+ */
+type ScanCandidate = Pick<
+  ItemRow,
+  'id' | 'kind' | 'content' | 'search_index' | 'width' | 'height' | 'bytes'
+>;
+
+/**
  * 结构化搜索（q.expr）的候选扫描：SQL 只做 buildWhere 里那些能用索引表达的条件，
  * 剩下的交给 core 的 matchSearch 逐行判定。
  *
  * ★ 不带 LIMIT/OFFSET：分页必须发生在**命中之后**，否则"第 2 页"会变成
  *   "候选第 201~400 行里恰好命中的那几条"，条数和排序都会错。
- *   list 与 count 共用它，这样「共 N 条」与列表永远不会分叉。
+ * ★ 返回的是**裁剪过的候选行**（ScanCandidate，只有 SCAN_COLUMNS 那几列）：够 matchSearch
+ *   判定与取 id，**类型上就不够** rowToDto 投影——展示字段由调用方（list / searchPage）
+ *   按页内 id 批量回取。缓存与"只扫一遍"的口径在 openDb 作用域的 scanCandidates 里，这里保持纯函数。
  */
 function scanByExpr(
   raw: Database.Database,
   q: ListQuery,
   where: string,
   params: unknown[],
-): ItemRow[] {
+): ScanCandidate[] {
   const sql =
-    'SELECT * FROM items WHERE ' + where +
+    'SELECT ' + SCAN_COLUMNS + ' FROM items WHERE ' + where +
     ' ORDER BY pinned DESC, created_at DESC, seq DESC LIMIT ' + SEARCH_SCAN_LIMIT;
-  const rows = raw.prepare(sql).all(...params) as ItemRow[];
+  const rows = raw.prepare(sql).all(...params) as ScanCandidate[];
   const expr = q.expr as SearchNode;
   return rows.filter((row) => {
     // 图片行 content 是 NULL，搜索靠的是现场拼出来的尺寸/体积描述——必须与
@@ -1151,6 +1193,60 @@ export function openDb(file: string): Db {
   const settingsCache: Settings = loadSettings(raw);
 
   /**
+   * ★ 候选缓存（T-M1）：带表达式的查询原本 list 与 count 各自调一遍扫描（store 曾用
+   *   Promise.all 同发两条，候选要扫两遍）；现在 searchPage 一次返回页与总数，
+   *   list/count 也共用这份缓存——命中后同一 expr+筛选的重复调用不再重扫。
+   * ★ 作废条件必须是全部写路径：generation 由所有改 items 表的出口统一自增（见 bumpGen），
+   *   漏一个就是"搜不到刚复制的东西"。
+   *   只留 1 条缓存，不做 LRU —— 搜索是连续打字，1 条就够；多条缓存会放大作废遗漏的爆炸半径。
+   */
+  let generation = 0;
+  let scanCache: { key: string; gen: number; hits: ScanCandidate[] } | null = null;
+  const bumpGen = (): void => {
+    generation += 1;
+    scanCache = null;
+  };
+
+  /**
+   * 候选缓存键：只序列化**会影响候选集**的字段——buildWhere 消费的 kind / time / tags /
+   * folderId，加上 scanByExpr 逐行判定用的 expr。
+   * ★ limit / offset 刻意不进键：分页发生在命中之后，同一个候选集要服务所有页；
+   *   q.q 也不进键：expr 查询里它被 base 显式丢掉（expr 与 q 同时给时以 expr 为准）。
+   * ★ folderId 的 undefined（不限）与 null（未归类）语义不同，键里必须可区分。
+   */
+  function scanCacheKey(q: ListQuery): string {
+    return JSON.stringify([
+      q.expr ?? null,
+      q.kind ?? 'all',
+      q.time ?? null,
+      q.tags ?? null,
+      q.folderId === undefined ? '(any)' : q.folderId,
+    ]);
+  }
+
+  /**
+   * 带缓存的候选扫描：list / count / searchPage 的 expr 分支都从这里拿候选。
+   * 同一轮查询（同 gen 同 key）只扫一次库，「共 N 条」与列表/分页天然是同一套命中集合。
+   *
+   * ★ 有意接受的时滞：写入使代数作废后，候选集再生成时分页边界可能出现重复/跳过
+   *   —— 这是既有 offset 分页的固有行为，缓存只是把它的频率降低（原来每次翻页都重扫
+   *   一样会漂），属有意接受，不为它加任何跨写一致性机制。
+   */
+  function scanCandidates(q: ListQuery): ScanCandidate[] {
+    const key = scanCacheKey(q);
+    // ★ gen 校验必须放在命中判定里（不是取出后再补查）：写发生在两次读之间时，
+    //   旧缓存必须当场作废，而不是被取出去再用一次。
+    if (scanCache !== null && scanCache.gen === generation && scanCache.key === key) {
+      return scanCache.hits;
+    }
+    const base: ListQuery = { ...q, q: undefined };
+    const { where, params } = buildWhere(base);
+    const hits = scanByExpr(raw, q, where, params);
+    scanCache = { key, gen: generation, hits };
+    return hits;
+  }
+
+  /**
    * ★ T-M8：与原模块级 nextSeqOf 完全同一语义（MAX(seq) + 1），只是改用下面 stmt.nextSeq
    *   的预编译 statement —— MAX(seq) 挂在每次写入与每次去重命中刷新上，不值得每次重新 parse。
    *   外部如需同一口径，自己 prepare 这句 SQL 即可（本函数不导出，无外部调用方）。
@@ -1213,11 +1309,34 @@ export function openDb(file: string): Db {
     return dtos;
   }
 
+  /**
+   * 按 id 批量取整行（rowsByIds / list 与 searchPage 的 expr 分页共用）。
+   *
+   * ★ 动态 IN 是这里唯一合理形态（长度可变），与 list / count / scanByExpr 这三条
+   *   "按 where 拼出来、刻意不预编译"的动态 SQL 同一口径。
+   * ★ 长度天然有界：调用方只喂"一页"的 id（clampPage 上限 MAX_LIMIT=500，
+   *   远在 SQLite 变量上限之内），不存在 20000 个占位符的调用形态。
+   * ★ 保持传入顺序：SQL 的 IN 返回顺序不可靠，按入参重排——分页顺序由候选集决定，
+   *   不能被 SQL 排序打乱。找不到的 id（并发被删等）直接缺席，不占位。
+   */
+  function fetchRowsByIds(ids: string[]): ItemRow[] {
+    if (ids.length === 0) return [];
+    const marks = ids.map(() => '?').join(', ');
+    const rows = raw
+      .prepare(`SELECT * FROM items WHERE id IN (${marks})`)
+      .all(...ids) as ItemRow[];
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    return ids.map((id) => byId.get(id)).filter((r): r is ItemRow => r !== undefined);
+  }
+
   /** 命中去重：同时刷新 created_at 与 seq（spec §7.4 的 ★）。 */
   function touchRow(id: string, now?: number): void {
     const at = typeof now === 'number' ? now : Date.now();
     stmt.touch.run(at, nextSeq(), id);
     evictOverLimit();
+    // ★ 写出口统一作废候选缓存（T-M1）：insertText/insertImage/insertFiles 的去重命中
+    //   与 touch() 全走这里，一处挂上就全盖住。
+    bumpGen();
   }
 
   /**
@@ -1252,7 +1371,11 @@ export function openDb(file: string): Db {
   function restoreOne(id: string): number {
     try {
       // ★ T-M8：restoreMany 逐条循环调用这里，statement 必须复用（原先是循环体内每次 prepare）。
-      return stmt.restoreOne.run(id).changes;
+      const changed = stmt.restoreOne.run(id).changes;
+      // ★ 恢复也是 items 写路径（T-M1）：restore 与 restoreMany 都汇在这里，一处挂上全盖住
+      //   （restoreMany 循环里多 bump 几次无害，作废缓存本来就是幂等操作）。
+      if (changed > 0) bumpGen();
+      return changed;
     } catch (err) {
       const code = (err as { code?: string }).code;
       if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return 0;
@@ -1276,6 +1399,9 @@ export function openDb(file: string): Db {
       for (const id of list) stmt.purgeDel.run(id);
     });
     tx(ids);
+    // ★ 硬删也是 items 写路径（T-M1）：evictOverLimit / remove / clearUnpinned / clearAll
+    //   都可能经由这里删行，一处挂上全部覆盖。
+    bumpGen();
     return ids;
   }
 
@@ -1431,6 +1557,7 @@ export function openDb(file: string): Db {
         sourceAppToDb(opts.sourceApp), richHtml, buildSearchIndex(content),
       );
       evictOverLimit();
+      bumpGen(); // ★ 写出口统一作废候选缓存（T-M1），否则搜索看不到刚复制的内容
       return { id, touched: false };
     },
 
@@ -1465,6 +1592,7 @@ export function openDb(file: string): Db {
         source, pinned ? 1 : 0, createdAt, seq, sourceAppToDb(opts.sourceApp), phash,
       );
       evictOverLimit();
+      bumpGen(); // ★ 写出口统一作废候选缓存（T-M1），否则搜索看不到刚复制的图
       // ★ 相似不等于相同：记录**照样入库**（剪贴板是用户的数据，静默丢弃比留一条重复更糟），
       //   这里只是把"库里已有一条很像的"告诉调用方，由它决定要不要提示一句。
       return similarTo === undefined ? { id, touched: false } : { id, touched: false, similarTo };
@@ -1502,6 +1630,7 @@ export function openDb(file: string): Db {
         sourceAppToDb(opts.sourceApp), JSON.stringify(list), buildSearchIndex(content),
       );
       evictOverLimit();
+      bumpGen(); // ★ 写出口统一作废候选缓存（T-M1），否则搜索看不到刚复制的文件
       return { id, touched: false };
     },
 
@@ -1521,10 +1650,13 @@ export function openDb(file: string): Db {
     },
 
     /**
-     * 列表。没有 q.expr 时完全走 SQL 分页（零行为变化）；有 expr 时先扫候选再切片。
+     * 列表。没有 q.expr 时完全走 SQL 分页（零行为变化）；有 expr 时走候选缓存的命中集再切片。
      *
      * ★ expr 与 q 同时给时以 expr 为准：parseSearch 已经把自由文本收进 text 叶子，
      *   再叠一层 q 的 LIKE 只会把结果收窄成"两套规则的交集"，用户看到的命中会莫名变少。
+     * ★ expr 分支的候选来自 scanCandidates（T-M1）：与 count / searchPage 共用同一份
+     *   缓存命中集，"共 N 条"和列表不会再各扫一遍；候选行只有判定列，展示字段按
+     *   页内 id 批量回取（rowsByIds）。
      */
     list(q: ListQuery = {}): ClipItemDTO[] {
       if (!q.expr) {
@@ -1532,11 +1664,9 @@ export function openDb(file: string): Db {
         const rows = raw.prepare(sql).all(...params) as ItemRow[];
         return attachUrlPreviews(rows);
       }
-      const base: ListQuery = { ...q, q: undefined };
-      const { where, params } = buildWhere(base);
-      const hits = scanByExpr(raw, q, where, params);
+      const hits = scanCandidates(q);
       const { limit, offset } = clampPage(q);
-      return attachUrlPreviews(hits.slice(offset, offset + limit));
+      return api.rowsByIds(hits.slice(offset, offset + limit).map((r) => r.id));
     },
 
     count(q: ListQuery = {}): number {
@@ -1547,10 +1677,33 @@ export function openDb(file: string): Db {
           | undefined;
         return row ? row.n : 0;
       }
-      // ★ 与 list 共用 scanByExpr：命中集合必须完全相同，否则「共 N 条」和列表打架。
-      const base: ListQuery = { ...q, q: undefined };
-      const { where, params } = buildWhere(base);
-      return scanByExpr(raw, q, where, params).length;
+      // ★ 与 list 共用同一个候选缓存（T-M1）：命中集合必须完全相同，否则「共 N 条」和列表打架。
+      return scanCandidates(q).length;
+    },
+
+    /**
+     * 带表达式的搜索：一次返回"这一页 + 总数"（T-M1）。
+     * store 的 load() 原本用 Promise.all 同时发 list 与 count，带 expr 时就是两轮
+     * 20000 行候选扫描；这条让渲染层一次拿回两样，且两样出自同一个候选缓存。
+     */
+    searchPage(q: ListQuery = {}): { items: ClipItemDTO[]; total: number } {
+      if (!q.expr) {
+        // 无表达式：SQL 直接能算分页与总数，走原路径，别把缓存机制硬套进来
+        return { items: api.list(q), total: api.count(q) };
+      }
+      const hits = scanCandidates(q);
+      const { limit, offset } = clampPage(q);
+      const pageIds = hits.slice(offset, offset + limit).map((r) => r.id);
+      // 命中集只有判定列 + id；展示字段按 id 一次批量取回（最多 limit 行，不是 20000 行）
+      return { items: api.rowsByIds(pageIds), total: hits.length };
+    },
+
+    rowsByIds(ids: string[]): ClipItemDTO[] {
+      return attachUrlPreviews(fetchRowsByIds(ids));
+    },
+
+    invalidateSearchCache(): void {
+      bumpGen();
     },
 
     /**
@@ -1564,6 +1717,7 @@ export function openDb(file: string): Db {
       if (!row) return null;
       raw.prepare('UPDATE items SET deleted_at = ? WHERE id = ?').run(Date.now(), id);
       purgeTrashOverLimit();
+      bumpGen(); // ★ 软删是 items 写路径（T-M1）
       return row;
     },
 
@@ -1584,11 +1738,14 @@ export function openDb(file: string): Db {
       });
       tx(ids);
       purgeTrashOverLimit();
+      bumpGen(); // ★ 批量软删是 items 写路径（T-M1）
       return out;
     },
 
     togglePin(id: string): boolean {
       const info = raw.prepare('UPDATE items SET pinned = CASE pinned WHEN 1 THEN 0 ELSE 1 END WHERE id = ?').run(id);
+      // ★ pin 改的是排序键（pinned DESC 排最前），候选缓存的命中顺序会跟着变（T-M1）。
+      if (info.changes > 0) bumpGen();
       return info.changes > 0;
     },
 
@@ -1600,6 +1757,8 @@ export function openDb(file: string): Db {
       const info = raw
         .prepare(`UPDATE items SET pinned = ? WHERE id IN (${marks}) AND deleted_at IS NULL`)
         .run(pinned ? 1 : 0, ...list);
+      // ★ 与 togglePin 同理：pinned 参与候选排序，真改了行才作废（T-M1）。
+      if (info.changes > 0) bumpGen();
       return info.changes;
     },
 
@@ -1607,6 +1766,7 @@ export function openDb(file: string): Db {
       const rows = raw.prepare('SELECT * FROM items WHERE pinned = 0 AND deleted_at IS NULL').all() as ItemRow[];
       raw.prepare('UPDATE items SET deleted_at = ? WHERE pinned = 0 AND deleted_at IS NULL').run(Date.now());
       purgeTrashOverLimit();
+      bumpGen(); // ★ 批量软删是 items 写路径（T-M1）
       return rows;
     },
 
@@ -1617,6 +1777,7 @@ export function openDb(file: string): Db {
         .prepare('UPDATE items SET deleted_at = ? WHERE deleted_at IS NULL')
         .run(Date.now()).changes;
       purgeTrashOverLimit();
+      bumpGen(); // ★ 批量软删是 items 写路径（T-M1）
       return n;
     },
 
@@ -1663,7 +1824,10 @@ export function openDb(file: string): Db {
         for (const id of list) n += stmt.purgeDel.run(id).changes;
         return n;
       });
-      return tx(ids);
+      const removed = tx(ids);
+      // ★ 硬删是 items 写路径（T-M1）：emptyTrash / 拖删等出口都汇到这里。
+      if (removed > 0) bumpGen();
+      return removed;
     },
 
     purgeTrashOverLimit(): string[] {
@@ -1984,12 +2148,15 @@ export function openDb(file: string): Db {
         raw.prepare('DELETE FROM folders WHERE id = ?').run(id);
       });
       tx();
+      // ★ 里面的记录被放回未归类（items.folder_id 改写），是 items 写路径（T-M1）。
+      bumpGen();
       return api.listFolders();
     },
 
     /** 整体替换标签；归一化后为空就存 NULL（`tags IS NULL` 即"无标签"）。 */
     setTags(id: string, tags: string[]): void {
       raw.prepare('UPDATE items SET tags = ? WHERE id = ?').run(encodeTags(normalizeTags(tags)), id);
+      bumpGen(); // ★ tags 参与 buildWhere 的筛选，是候选集的一部分（T-M1）
     },
 
     getTags(id: string): string[] {
@@ -2039,6 +2206,7 @@ export function openDb(file: string): Db {
         ? false
         : raw.prepare('SELECT 1 AS ok FROM folders WHERE id = ?').get(wanted) !== undefined;
       raw.prepare('UPDATE items SET folder_id = ? WHERE id = ?').run(exists ? wanted : null, id);
+      bumpGen(); // ★ folderId 参与 buildWhere 的筛选，是候选集的一部分（T-M1）
     },
 
     /**

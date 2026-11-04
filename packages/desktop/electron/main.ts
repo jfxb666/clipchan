@@ -894,6 +894,13 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       return imageUrlFor(row.image_path) ?? '';
     },
     [CH.items.count]: (_e, q: ListQuery) => needDb().count(q ?? {}),
+    // ★ 带表达式的搜索一次返回"页 + 总数"（T-M1）：渲染层不再用 Promise.all 发
+    //   list + count 两条，主进程候选扫描也就不用做两遍。与 list 同一条缩略图出口：
+    //   搜索结果里的图片行同样要拿到协议 URL。
+    [CH.items.searchPage]: (_e, q: ListQuery) => {
+      const page = needDb().searchPage(q ?? {});
+      return { items: page.items.map(mapThumbUrl), total: page.total };
+    },
     // ★ 导出（v0.3.0 起是 zip 备份包）：含原图，路径由用户在保存对话框里选。
     //   实现在 export-import.ts（不 import electron，可单测）；这里只负责把 dialog 注入进去。
     //   用户取消 → { ok:false, cancelled:true }，界面据此静默返回，不弹「导出失败」。
@@ -933,6 +940,9 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
         },
       });
       if (result.ok) {
+        // ★ 导入在 export-import.ts 里直连 db.raw 写 items，不经任何 api 写出口；
+        //   候选缓存必须手动作废，否则导入的新记录在同一个搜索词下是隐身的（T-M1）。
+        if ((result.imported ?? 0) > 0) needDb().invalidateSearchCache();
         broadcast.itemsChanged();
         broadcast.toast(importSummaryText(result), 'info');
       } else if (!result.cancelled) {

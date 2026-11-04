@@ -55,6 +55,8 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
   const ghostCalls: number[] = [];
   const settingCalls: Partial<Settings>[] = [];
   const countCalls: ListQuery[] = [];
+  /** T-M1：带表达式的查询改走 searchPage（一次拿回"页 + 总数"）的调用记录。 */
+  const searchPageCalls: ListQuery[] = [];
   const exportCalls: number[] = [];
   const importCalls: number[] = [];
   /** v0.3.0 回收站 / 撤销相关的调用记录。 */
@@ -136,6 +138,12 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
         countCalls.push(q);
         if (countThrows) throw new Error('count 失败');
         return countResult === null ? seed.length : countResult;
+      },
+      searchPage: async (q: ListQuery) => {
+        searchPageCalls.push(q);
+        const offset = q.offset ?? 0;
+        const limit = q.limit ?? PAGE_SIZE;
+        return { items: seed.slice(offset, offset + limit), total: seed.length };
       },
       exportAll: async () => {
         exportCalls.push(1);
@@ -356,6 +364,7 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
     ghostCalls,
     settingCalls,
     countCalls,
+    searchPageCalls,
     exportCalls,
     importCalls,
     restoreCalls,
@@ -1184,9 +1193,10 @@ describe('搜索升级：q 解析成结构化查询（v1.0.0 ⑧）', () => {
     setPlatform(fake.adapter);
 
     useClipStore.getState().setQuery('foo bar');
-    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+    // T-M1：带 expr 的查询改走 searchPage（一次拿回页与总数），不再落在 list 上
+    await vi.waitFor(() => expect(fake.searchPageCalls).toHaveLength(1));
 
-    const call = fake.listCalls[0]!;
+    const call = fake.searchPageCalls[0]!;
     // 两个词是 and 节点 → 不是单个 text 叶子 → 走 expr
     expect(call.expr).toBeDefined();
     expect(call.q).toBeUndefined();
@@ -1197,9 +1207,10 @@ describe('搜索升级：q 解析成结构化查询（v1.0.0 ⑧）', () => {
     setPlatform(fake.adapter);
 
     useClipStore.getState().setQuery('/^ab/');
-    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+    // T-M1：带 expr 的查询改走 searchPage（一次拿回页与总数），不再落在 list 上
+    await vi.waitFor(() => expect(fake.searchPageCalls).toHaveLength(1));
 
-    const call = fake.listCalls[0]!;
+    const call = fake.searchPageCalls[0]!;
     expect(call.q).toBeUndefined();
     expect(call.expr).toEqual({ op: 'leaf', kind: 'regex', value: '^ab', flags: '' });
   });
@@ -1209,9 +1220,10 @@ describe('搜索升级：q 解析成结构化查询（v1.0.0 ⑧）', () => {
     setPlatform(fake.adapter);
 
     useClipStore.getState().setQuery('foo AND bar');
-    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+    // T-M1：带 expr 的查询改走 searchPage（一次拿回页与总数），不再落在 list 上
+    await vi.waitFor(() => expect(fake.searchPageCalls).toHaveLength(1));
 
-    const call = fake.listCalls[0]!;
+    const call = fake.searchPageCalls[0]!;
     expect(call.q).toBeUndefined();
     expect(call.expr).toEqual({
       op: 'and',
@@ -1272,6 +1284,46 @@ describe('搜索升级：q 解析成结构化查询（v1.0.0 ⑧）', () => {
 
     useClipStore.getState().setQuery('hello');
     expect(useClipStore.getState().searchErrors).toEqual([]);
+  });
+});
+
+describe('★ T-M1：带表达式的查询一次拿回页与总数', () => {
+  it('★ 带表达式的查询只发一次 searchPage，不再 list+count 各发一次（T-M1）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('合同 AND 第3份');
+    await vi.waitFor(() => expect(fake.searchPageCalls).toHaveLength(1));
+
+    // 走的是结构化搜索通道（expr 进 searchPage），且 total 来自同一个候选集
+    expect(fake.searchPageCalls[0]!.expr).toBeDefined();
+    expect(fake.searchPageCalls[0]!.q).toBeUndefined();
+    // ★ expr 查询绝不能再发 items.list：主进程候选扫描只许一遍（items.count 同理不发）
+    expect(fake.listCalls).toHaveLength(0);
+    expect(fake.countCalls).toHaveLength(0);
+    // 页与总数都落进状态（假平台的 total = 种子条数）
+    expect(useClipStore.getState().items.map((it) => it.id)).toEqual(['a']);
+    expect(useClipStore.getState().total).toBe(1);
+    expect(useClipStore.getState().loading).toBe(false);
+  });
+
+  it('★ searchPage 不可用时退回 list+count 两条（老 preload / 非 Electron 平台不炸）', async () => {
+    const fake = makeFakeAdapter([item('a')]);
+    // 模拟老 preload：通道不存在（先记录这次尝试，再按 adapter 缺省语义拒绝）
+    fake.adapter.items.searchPage = (q: ListQuery) => {
+      fake.searchPageCalls.push(q);
+      return Promise.reject(new Error('当前环境没有实现 items.searchPage'));
+    };
+    setPlatform(fake.adapter);
+
+    useClipStore.getState().setQuery('foo AND bar');
+    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(1));
+
+    expect(fake.searchPageCalls).toHaveLength(1);
+    expect(useClipStore.getState().items.map((it) => it.id)).toEqual(['a']);
+    // 退回路径里 count 照常参与，total 不是 -1 兜底值
+    expect(useClipStore.getState().total).toBe(1);
+    expect(useClipStore.getState().loading).toBe(false);
   });
 });
 
@@ -1368,12 +1420,14 @@ describe('标签 / 文件夹筛选（v1.0.0 ⑥）', () => {
     useClipStore.getState().setFolderFilter('f1');
     await vi.waitFor(() => expect(fake.listCalls).toHaveLength(2));
     useClipStore.getState().setQuery('/^ab/');
-    await vi.waitFor(() => expect(fake.listCalls).toHaveLength(3));
+    // T-M1：带 expr 的 load 走 searchPage；loadMore 仍然走 list，下面比对两者的条件
+    await vi.waitFor(() => expect(fake.searchPageCalls).toHaveLength(1));
 
     expect(useClipStore.getState().hasMore).toBe(true);
     await useClipStore.getState().loadMore();
 
-    const first = fake.listCalls.at(-2)!;
+    // T-M1 后：带 expr 的 load 落在 searchPage 通道上，loadMore 仍走 list——两者的条件必须一致
+    const first = fake.searchPageCalls[0]!;
     const second = fake.listCalls.at(-1)!;
     expect(second.offset).toBe(PAGE_SIZE);
     expect(second.kind).toBe(first.kind);

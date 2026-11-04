@@ -288,6 +288,12 @@ export function createMobileAdapter(): PlatformAdapter {
         return pickRecords(q).length;
       },
 
+      // 手机端是内存数据，list 本来就便宜，没有"候选扫两遍"的问题（T-M1 是桌面 SQLite 的病灶）；
+      // 走缺省拒绝语义，store 的 load() 会自动退回 list + count 两条。
+      searchPage(): Promise<{ items: ClipItemDTO[]; total: number }> {
+        return Promise.reject(new Error('当前环境没有实现 items.searchPage'));
+      },
+
       async exportAll(): Promise<ExportResult> {
         // 手机端没有文件系统落盘能力，如实报失败（不假装导出成功）。
         return { ok: false, reason: '手机端没有文件系统落盘能力' };

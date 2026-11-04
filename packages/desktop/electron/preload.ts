@@ -69,6 +69,9 @@ const api = {
     copy: (id: string): Promise<PasteResult> => ipcRenderer.invoke(CH.items.copy, id),
     getFullImage: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getFullImage, id),
     count: (q: ListQuery): Promise<number> => ipcRenderer.invoke(CH.items.count, q),
+    // 带表达式的搜索一次拿回"页 + 总数"（T-M1）；主进程没有这条通道时 store 会回退 list + count。
+    searchPage: (q: ListQuery): Promise<{ items: ClipItemDTO[]; total: number }> =>
+      ipcRenderer.invoke(CH.items.searchPage, q),
     exportAll: (): Promise<ExportResult> => ipcRenderer.invoke(CH.items.exportAll),
     importAll: (): Promise<ImportResult> => ipcRenderer.invoke(CH.items.importAll),
     getText: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getText, id),

@@ -2716,3 +2716,74 @@ describe('prepare 上移不改语义（T-M8）', () => {
     expect(db.count()).toBe(1);
   });
 });
+
+/**
+ * 候选扫描那条 SELECT 的特征串：列裁剪后的列清单开头。
+ * ★ 必须够特异——rowsByIds 的 IN 查询、count 的 COUNT(*)、无表达式 list 的 SELECT *
+ *   都以别的形态出现，绝不能拿宽泛的 /FROM items WHERE/ 来数（那会把回取也算进扫描数）。
+ */
+const SCAN_SQL_SIGNATURE = 'SELECT id, kind, content, search_index, width, height, bytes FROM items';
+
+describe('★ T-M1：带表达式的搜索只扫一遍候选', () => {
+  it('searchPage 的 total 与 list/count 同一套命中集合（不能一边 3 条一边 5 张卡）', () => {
+    const db = mem();
+    for (let i = 0; i < 12; i += 1) db.insertText('合同 第' + i + '份', { now: 1700000000000 + i });
+    db.insertText('完全无关的内容', { now: 1700000099000 });
+    const expr = parseSearch('合同 AND 第3份').expr!;
+    const page = db.searchPage({ expr, limit: 10, offset: 0 });
+    expect(page.items).toHaveLength(1);
+    expect(page.total).toBe(1);
+    // 三者必须永远一致：这是仓库写在注释里的既有契约，改实现不能改契约
+    expect(db.list({ expr, limit: 10 })).toHaveLength(1);
+    expect(db.count({ expr })).toBe(1);
+  });
+
+  it('★ 扫过的候选只扫一次：第二次 searchPage 不再触发候选扫描', () => {
+    const db = mem();
+    for (let i = 0; i < 50; i += 1) db.insertText('发票' + i, { now: 1700000000000 + i });
+    const expr = parseSearch('发票').expr!;
+    let scans = 0;
+    const orig = db.raw.prepare.bind(db.raw);
+    (db.raw as unknown as { prepare: unknown }).prepare = ((sql: string, ...rest: unknown[]) => {
+      if (sql.includes(SCAN_SQL_SIGNATURE)) scans += 1;
+      return (orig as (s: string, ...r: unknown[]) => unknown)(sql, ...rest);
+    }) as unknown;
+    const q = { expr, limit: 10, offset: 0 };
+    try {
+      db.searchPage(q);
+      db.searchPage(q);
+    } finally {
+      // monkey-patch 必须无条件还原：searchPage 半路抛错也不能把桩留给后面的用例
+      (db.raw as unknown as { prepare: unknown }).prepare = orig;
+    }
+    expect(scans).toBe(1); // 一次候选扫描；第二次命中缓存，绝不该是 2
+  });
+
+  it('★ 任何写入都会让上一轮候选缓存作废（缓存不能把新记录藏起来）', () => {
+    const db = mem();
+    const expr = parseSearch('新来的').expr!;
+    expect(db.searchPage({ expr }).total).toBe(0);
+    db.insertText('新来的记录', { now: 1700000999000 });
+    expect(db.searchPage({ expr }).total).toBe(1);
+  });
+
+  it('★ pin 之后候选里的 pinned 排序必须刷新（写出口挂代数作废的回归钉）', () => {
+    const db = mem();
+    const id = db.insertText('置顶目标', { now: 1700000000000 }).id;
+    db.insertText('别的内容', { now: 1700000001000 });
+    // 匹配两条的 expr（searchPage 只管 expr 分支）
+    const expr = parseSearch('目标 OR 内容').expr!;
+    const before = db.searchPage({ expr, limit: 10 }).items.map((x) => x.id);
+    db.togglePin(id);
+    const after = db.searchPage({ expr, limit: 10 }).items.map((x) => x.id);
+    expect(after[0]).toBe(id); // pinned 排最前
+    expect(after).toContain(before.find((x) => x !== id));
+  });
+
+  it('rowsByIds 返回顺序 === 入参顺序（分页顺序由候选集决定）', () => {
+    const db = mem();
+    const a = db.insertText('甲', { now: 1700000000000 }).id;
+    const b = db.insertText('乙', { now: 1700000001000 }).id;
+    expect(db.rowsByIds([b, a]).map((x) => x.id)).toEqual([b, a]);
+  });
+});

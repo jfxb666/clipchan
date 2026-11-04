@@ -28,6 +28,7 @@ const stub: PlatformAdapter = {
     copy: () => Promise.reject(new Error('当前环境没有实现 items.copy')),
     getFullImage: () => Promise.reject(new Error('当前环境没有实现 items.getFullImage')),
     count: () => Promise.reject(new Error('当前环境没有实现 items.count')),
+    searchPage: () => Promise.reject(new Error('当前环境没有实现 items.searchPage')),
     exportAll: () => Promise.reject(new Error('当前环境没有实现 items.exportAll')),
     importAll: () => Promise.reject(new Error('当前环境没有实现 items.importAll')),
     getText: () => Promise.reject(new Error('当前环境没有实现 items.getText')),

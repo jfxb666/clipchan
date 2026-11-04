@@ -21,6 +21,8 @@ export const CH = {
     copy: 'items:copy',
     getFullImage: 'items:getFullImage',
     count: 'items:count',
+    /** 带表达式的搜索：一次返回"这一页 + 总数"，避免 list 与 count 各扫一遍候选（T-M1）。 */
+    searchPage: 'items:searchPage',
     exportAll: 'items:exportAll',
     importAll: 'items:importAll',
     getText: 'items:getText',

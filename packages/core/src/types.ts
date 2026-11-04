@@ -486,6 +486,12 @@ export interface ClipchanApi {
     /** 与 list 同条件的总条数（分页时界面要显示"共 N 条"而不是"已加载 N 条"）。 */
     count(q: ListQuery): Promise<number>;
     /**
+     * 带表达式的搜索一次返回"这一页 + 总数"（T-M1）：list 与 count 是同一轮操作里的
+     * 两次调用，分开发就会让主进程把候选各扫一遍。渲染层拿不到这条时（老 preload /
+     * 非 Electron 平台）回退 list + count 两条。
+     */
+    searchPage(q: ListQuery): Promise<{ items: ClipItemDTO[]; total: number }>;
+    /**
      * 导出全部活跃记录为 zip 备份包（含原图），落盘路径由用户在保存对话框里选。
      * 用户取消 → { ok:false, cancelled:true }；失败回 ok:false + reason（不假装成功）。
      */
