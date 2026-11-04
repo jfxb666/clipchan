@@ -437,9 +437,11 @@ export interface Db {
   pinMany(ids: string[], pinned: boolean): number;
   clearUnpinned(): ItemRow[];
   clearAll(): number;
-  /** 回收站列表（按删除时间倒序）。谓词与 buildWhere 相反，所以不复用它。 */
+  /** 回收站列表（按删除时间倒序）。谓词与 buildWhere 相反，所以不复用它；分页夹取与 list 共用 clampPage。 */
   listTrash(q?: { limit?: number; offset?: number }): ClipItemDTO[];
   countTrash(): number;
+  /** 回收站全量 id（一次取完，供"清空回收站"用；分页循环取会把 offset 越跳越贵）。 */
+  allTrashIds(): string[];
   /** 从回收站恢复一条：created_at 与 seq 原样保留，记录回到原本的时间位置。 */
   restore(id: string): boolean;
   restoreMany(ids: string[]): number;
@@ -1783,10 +1785,8 @@ export function openDb(file: string): Db {
 
     listTrash(q: { limit?: number; offset?: number } = {}): ClipItemDTO[] {
       // 谓词与 buildWhere 相反（只取已删），所以不复用它——复用只会让两边一起改坏。
-      const rawLimit = typeof q.limit === 'number' && Number.isFinite(q.limit) ? Math.floor(q.limit) : DEFAULT_LIMIT;
-      const limit = Math.min(MAX_LIMIT, Math.max(1, rawLimit));
-      const rawOffset = typeof q.offset === 'number' && Number.isFinite(q.offset) ? Math.floor(q.offset) : 0;
-      const offset = Math.max(0, rawOffset);
+      // ★ 但分页夹取必须复用 clampPage（T-M2）：抄第二遍的结果是两处上界规则各改各的。
+      const { limit, offset } = clampPage(q);
       const rows = raw
         .prepare(
           `SELECT * FROM items WHERE deleted_at IS NOT NULL
@@ -1794,6 +1794,19 @@ export function openDb(file: string): Db {
         )
         .all(limit, offset) as ItemRow[];
       return rows.map(rowToDto);
+    },
+
+    /**
+     * 回收站全量 id（一次取完，供"清空回收站"用；分页循环取会把 offset 越跳越贵）。
+     * ★ 排序与旧循环（listTrash 分页：deleted_at DESC, seq DESC）一致 ——
+     *   清空时被删除的先后顺序不变，别让"换了取法"顺手改掉删除语义。
+     */
+    allTrashIds(): string[] {
+      return (
+        raw
+          .prepare('SELECT id FROM items WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, seq DESC')
+          .all() as { id: string }[]
+      ).map((r) => r.id);
     },
 
     countTrash(): number {

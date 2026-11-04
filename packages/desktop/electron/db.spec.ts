@@ -2787,3 +2787,51 @@ describe('★ T-M1：带表达式的搜索只扫一遍候选', () => {
     expect(db.rowsByIds([b, a]).map((x) => x.id)).toEqual([b, a]);
   });
 });
+
+describe('回收站夹取与全量取 id（T-M2）', () => {
+  const seedTrash = (db: Db, n: number) => {
+    // remove 每次都会触发 trashLimit 收敛（默认 200，超出即硬删最旧），
+    // 600+ 条的全量测试必须先放宽上限，否则种完只剩 200 条。
+    db.setSettings({ trashLimit: 1000 });
+    for (let i = 0; i < n; i++) {
+      const id = db.insertText('回收站候选' + i, { now: 1700000000000 + i }).id;
+      db.remove(id);
+    }
+  };
+
+  it('★ offset 有上界：负数与超界 offset 不能把 SQL 打成非法值', () => {
+    const db = mem();
+    seedTrash(db, 3);
+    expect(db.listTrash({ offset: -5 })).toHaveLength(3); // 夹到 0
+    expect(db.listTrash({ offset: Number.NaN })).toHaveLength(3); // 非法值走默认
+    expect(db.listTrash({ offset: 999999 })).toHaveLength(0); // 超界返回空，不抛
+    expect(db.listTrash({ limit: 99999 })).toHaveLength(3); // 上限仍受 MAX_LIMIT 保护
+  });
+
+  it('allTrashIds 一次取全，不受 MAX_LIMIT=500 限制（旧实现要循环 500 条一轮）', () => {
+    const db = mem();
+    seedTrash(db, 620);
+    expect(db.countTrash()).toBe(620);
+    expect(db.allTrashIds()).toHaveLength(620);
+    expect(new Set(db.allTrashIds()).size).toBe(620); // 不能重复（旧循环靠 offset 前进，重复一次就多删一轮）
+    // 顺序与旧循环（listTrash 分页）逐页拼接完全一致 —— 清空的删除顺序语义不变
+    const byOldLoop: string[] = [];
+    let offset = 0;
+    for (;;) {
+      const page = db.listTrash({ limit: 500, offset });
+      if (page.length === 0) break;
+      for (const r of page) byOldLoop.push(r.id);
+      offset += page.length;
+    }
+    expect(db.allTrashIds()).toEqual(byOldLoop);
+  });
+
+  it('listTrash 与活跃列表互不污染（谓词相反，绝不能共用 buildWhere）', () => {
+    const db = mem();
+    db.insertText('还在列表里', { now: 1700000000000 });
+    const gone = db.insertText('已进回收站', { now: 1700000001000 }).id;
+    db.remove(gone);
+    expect(db.listTrash({})).toHaveLength(1);
+    expect(db.count()).toBe(1);
+  });
+});

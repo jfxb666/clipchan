@@ -868,16 +868,10 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
     },
     [CH.items.emptyTrash]: () => {
       const db = needDb();
-      // ★ 分页取全部回收站 id：listTrash 单次上限 500（db 的 MAX_LIMIT），
-      //   一次取 500 条循环到取空为止，避免回收站里超过 500 条时只清掉一半。
-      const ids: string[] = [];
-      const PAGE = 500;
-      for (;;) {
-        const page = db.listTrash({ limit: PAGE, offset: ids.length });
-        if (page.length === 0) break;
-        for (const r of page) ids.push(r.id);
-        if (page.length < PAGE) break;
-      }
+      // ★ 一次取全（T-M2）：原来用 listTrash({limit:500, offset: ids.length}) 循环，
+      //   每轮都要把前面已取过的行再跳过一遍，回收站越大越慢。allTrashIds 一条 SQL 取完，
+      //   排序与旧循环一致，删除顺序语义不变。
+      const ids = db.allTrashIds();
       if (ids.length === 0) return { removed: 0 };
       const { removed, log } = purgeItemsWithFiles(db, rt.dataDir, ids, (m) => logWarn('[images] ' + m));
       if (log.failures.length > 0) broadcast.toast('回收站已清空，但有 ' + log.failures.length + ' 个图片文件未能删除', 'warn');
