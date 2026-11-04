@@ -10,6 +10,8 @@ import {
   SNIPPET_LIMIT,
   MAINTAIN_MIN_FREE_PAGES,
   MAINTAIN_TRIM_PAGES,
+  URL_PREVIEW_MAX_ROWS,
+  URL_PREVIEW_TTL_MS,
   SchemaMigrationError,
   buildSearchIndex,
   describeMigrationFailure,
@@ -2621,5 +2623,76 @@ describe('迁移失败兜底', () => {
     expect(left).toHaveLength(2);
     // 最近一次失败给出的备份必须是留下来的两份之一（最新那份绝不能被自己裁掉）
     expect(existsSync(backups[2]!)).toBe(true);
+  });
+});
+
+/**
+ * url_previews 的淘汰（T-M6）。
+ *
+ * ★ 这张表此前只有 upsert、没有删：TTL 只在读取时判（main.ts 比较 fetchedAt），
+ *   过期行既不删也不限量 —— 每复制一个链接就永久长一行。这里钉住三件事：
+ *   过期按 TTL 删、超量留最新、upsert 语义不因淘汰逻辑退化成堆积。
+ */
+describe('url_previews 淘汰（T-M6）', () => {
+  const put = (db: Db, url: string, fetchedAt: number) =>
+    db.upsertUrlPreview({ url, title: 't', domain: 'd.com', iconUrl: '', fetchedAt });
+
+  // ★ TTL / 行数上限两条用例用 raw INSERT 直接种子（绕开 upsert 的写侧顺手剪）：
+  //   这样 pruneUrlPreviews(now) 的返回计数才是"这一轮剪掉了多少"，而不是被写入
+  //   路径提前剪过之后的残差；顺带把"单独调用 prune"这条路径本身也测到了。
+  const seed = (db: Db, url: string, fetchedAt: number) => {
+    db.raw.prepare(
+      'INSERT INTO url_previews (url, title, domain, icon_url, fetched_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(url, 't', 'd.com', '', fetchedAt);
+  };
+
+  it('★ 过期行按 TTL 删掉，未过期留着', () => {
+    const db = mem();
+    const now = 1_700_000_000_000;
+    seed(db, 'https://a.com/1', now - URL_PREVIEW_TTL_MS - 1); // 比新鲜期早 1ms → 过期
+    seed(db, 'https://a.com/2', now - 1000);                   // 新鲜
+    expect(db.getUrlPreviews(['https://a.com/1', 'https://a.com/2'])).toHaveLength(2);
+
+    const res = db.pruneUrlPreviews(now);
+    expect(res.expired).toBe(1);
+    expect(db.getUrlPreviews(['https://a.com/1'])).toHaveLength(0);
+    expect(db.getUrlPreviews(['https://a.com/2'])).toHaveLength(1);
+  });
+
+  it('边界：fetched_at 恰好等于 now - TTL 的行保留（淘汰 SQL 是严格 <）', () => {
+    const db = mem();
+    const now = 1_700_000_000_000;
+    seed(db, 'https://a.com/edge', now - URL_PREVIEW_TTL_MS);
+
+    expect(db.pruneUrlPreviews(now)).toEqual({ expired: 0, overflow: 0 });
+    expect(db.getUrlPreviews(['https://a.com/edge'])).toHaveLength(1);
+    // 读侧（main.ts）把 age == TTL 判成过期：读是权威，过期读触发重抓、重抓会刷新这行，剪枝只是空间回收，松一格无所谓。
+  });
+
+  it('★ 超出行数上限时留最新的那些', () => {
+    const db = mem();
+    const now = 1_700_000_000_000;
+    // i 越大 fetched_at 越早：i=0 最新，i=MAX+19 最旧
+    for (let i = 0; i < URL_PREVIEW_MAX_ROWS + 20; i += 1) seed(db, 'https://a.com/' + i, now - i);
+
+    const res = db.pruneUrlPreviews(now);
+    expect(res.overflow).toBe(20);
+    const rows = db.raw.prepare('SELECT COUNT(*) AS n FROM url_previews').get() as { n: number };
+    expect(rows.n).toBe(URL_PREVIEW_MAX_ROWS);
+    // 淘汰的必须是最旧的 20 行（i = MAX..MAX+19），最新的照旧都在
+    expect(db.getUrlPreviews([
+      'https://a.com/' + URL_PREVIEW_MAX_ROWS,
+      'https://a.com/' + (URL_PREVIEW_MAX_ROWS + 19),
+    ])).toHaveLength(0);
+    expect(db.getUrlPreviews(['https://a.com/0', 'https://a.com/' + (URL_PREVIEW_MAX_ROWS - 1)]))
+      .toHaveLength(2);
+  });
+
+  it('同 URL 再写只更新一行（upsert 语义不退化成堆积）', () => {
+    const db = mem();
+    put(db, 'https://a.com/x', 1_600_000_000_000);
+    put(db, 'https://a.com/x', 1_700_000_000_000);
+    expect(db.getUrlPreviews(['https://a.com/x'])).toHaveLength(1);
+    expect(db.getUrlPreviews(['https://a.com/x'])[0]!.fetchedAt).toBe(1_700_000_000_000);
   });
 });

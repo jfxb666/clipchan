@@ -53,6 +53,18 @@ const MAX_LIMIT = 500;
 /** 优化历史的保留条数（计划 Ruling 6：上限 100 条，超出淘汰最旧）。 */
 export const OPTIMIZE_HISTORY_LIMIT = 100;
 
+/**
+ * 链接预览缓存的新鲜期：超过就没必要再显示旧标题。
+ * ★ 与 main.ts 读时判定必须同一个数 —— 这里是唯一定义，main.ts 从这里 import，别再两处写 7 天。
+ */
+export const URL_PREVIEW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * 缓存行数上限：一条 URL 一行，5000 行足够覆盖日常复制，超出就丢最旧的（缓存而已，可重建）。
+ * ★ 别轻易放大这个数：限量一步的 NOT IN 子查询随行数线性变慢（5000 行时约 10ms），
+ *   要放大 10 倍以上的话，先考虑给 fetched_at 建索引或改成每 N 次写剪一次。
+ */
+export const URL_PREVIEW_MAX_ROWS = 5000;
+
 /** 库里的来源标记（spec §9.2 用的是 'clip'，core 的 DTO 用的是 'capture'）。 */
 type DbSource = 'clip' | 'merge';
 
@@ -487,6 +499,11 @@ export interface Db {
    * 只返回库里**确实存在**的记录（未命中的 url 不占位、不返回 undefined 项）。
    */
   getUrlPreviews(urls: string[]): UrlPreviewDTO[];
+  /**
+   * v1.1.0 删过期 + 限量淘汰 url_previews 缓存；返回两类删除计数。
+   * ★ nowMs 可注入（测试用假时钟）；缺省 Date.now()。空表两步都删 0 行。
+   */
+  pruneUrlPreviews(nowMs?: number): { expired: number; overflow: number };
   close(): void;
 }
 
@@ -2006,6 +2023,7 @@ export function openDb(file: string): Db {
       const url = typeof p?.url === 'string' ? p.url : '';
       // 空 url 不落行：它既查不回来，也会让"缓存里有什么"这件事失真。
       if (url.length === 0) return;
+      const fetchedAt = typeof p.fetchedAt === 'number' ? p.fetchedAt : 0;
       raw.prepare(
         `INSERT INTO url_previews (url, title, domain, icon_url, fetched_at)
          VALUES (?, ?, ?, ?, ?)
@@ -2019,8 +2037,31 @@ export function openDb(file: string): Db {
         typeof p.title === 'string' ? p.title : '',
         typeof p.domain === 'string' ? p.domain : '',
         typeof p.iconUrl === 'string' ? p.iconUrl : '',
-        typeof p.fetchedAt === 'number' ? p.fetchedAt : 0,
+        fetchedAt,
       );
+      // ★ 写侧顺手剪：这张表只有 upsert、读侧又只判新鲜度不删行，没人收口就永远只增（T-M6）。
+      //   放在这里而不是每次列表查询里，因为它只在"确实新写了一条预览"时被触发。
+      //   ★ 时钟用刚写入的 fetchedAt 而不是 Date.now()：生产里两者等价（fetchedAt 就是抓取
+      //     时刻），用写入值则淘汰随数据确定 —— 刚写的这行不会被 TTL 这一步剪掉
+      //     （行数上限那步除外，生产时钟下不会发生），旧时间戳的数据也不会被真实时钟误删。
+      api.pruneUrlPreviews(fetchedAt);
+    },
+
+    /**
+     * 删过期 + 限量淘汰 url_previews 缓存（T-M6）。
+     * ★ 分两步删（先 TTL 后限量）而不是一条 SQL 写两套谓词：两个数字各自可测，读起来也直白。
+     *   限量只看 fetched_at DESC 的先后（url 是主键、不为 NULL，NOT IN 子查询没有空值坑）。
+     */
+    pruneUrlPreviews(nowMs?: number): { expired: number; overflow: number } {
+      const now = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Date.now();
+      const expired = raw.prepare('DELETE FROM url_previews WHERE fetched_at < ?').run(now - URL_PREVIEW_TTL_MS).changes;
+      const overflow = raw
+        .prepare(
+          `DELETE FROM url_previews
+            WHERE url NOT IN (SELECT url FROM url_previews ORDER BY fetched_at DESC LIMIT ?)`,
+        )
+        .run(URL_PREVIEW_MAX_ROWS).changes;
+      return { expired, overflow };
     },
 
     /**

@@ -38,7 +38,7 @@ import { maybeBackup, recoverCorruptDb } from './storage-guard';
 import { createDeltaThrottle } from './deltaThrottle';
 import type { AiApi } from './ai';
 import Database from 'better-sqlite3';
-import { describeMigrationFailure, openDb } from './db';
+import { URL_PREVIEW_TTL_MS, describeMigrationFailure, openDb } from './db';
 import type { Db, InsertResult } from './db';
 import { runLegacyMigration } from './migrate-runner';
 import { createLogSink, installCrashHooks } from './logs';
@@ -1526,9 +1526,6 @@ function needUrlMeta(): UrlMetaApi {
   urlMeta = createUrlMeta({ fetchImpl: (u, init) => fetch(u, init) });
   return urlMeta;
 }
-
-/** 链接预览缓存有效期：7 天。过期就当没缓存，重新抓一次。 */
-const URL_PREVIEW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * 后台抓一次链接预览（不阻塞录制管线）。
