@@ -2850,3 +2850,45 @@ describe('回收站夹取与全量取 id（T-M2）', () => {
     expect(db.count()).toBe(1);
   });
 });
+
+describe('一键整理向导（v1.2 C1）', () => {
+  it('★ untagged 查询只取 tags 为空的活跃条目（带标签/已删不算）', () => {
+    const db = mem();
+    const a = db.insertText('无标签', { now: 1700000000000 }).id;
+    const b = db.insertText('有标签', { now: 1700000001000 }).id;
+    db.setTags(b, ['代码']);
+    const gone = db.insertText('已删无标签', { now: 1700000002000 }).id;
+    db.remove(gone);
+    const ids = db.list({ untagged: true, limit: 100 }).map((x) => x.id);
+    expect(ids).toEqual([a]);
+    // ★ 入口按钮的「整理未归类（N）」用的是 count：必须与 list 走同一 buildWhere，否则数字打架
+    expect(db.count({ untagged: true })).toBe(1);
+  });
+
+  it('★ applyTagsBulk 批量设标签：逐条生效、返回条数、未列入的条目不动', () => {
+    const db = mem();
+    const a = db.insertText('甲', { now: 1700000000000 }).id;
+    const b = db.insertText('乙', { now: 1700000001000 }).id;
+    expect(db.applyTagsBulk([{ id: a, tags: ['链接'] }])).toBe(1);
+    // 未列入本批的条目一个字段都不动
+    expect(db.list({}).find((x) => x.id === a)!.tags).toEqual(['链接']);
+    expect(db.list({}).find((x) => x.id === b)!.tags).toBeUndefined();
+    // 不存在的 id：changes 0、不抛（与 restoreMany 的跳过语义一致——
+    // 拉取与应用之间记录可能被删，少应用一条不该把整批炸掉）
+    expect(() => db.applyTagsBulk([{ id: '不存在的记录', tags: ['x'] }])).not.toThrow();
+    expect(db.applyTagsBulk([{ id: '不存在的记录', tags: ['x'] }])).toBe(0);
+    expect(db.applyTagsBulk([])).toBe(0);
+  });
+
+  it('applyTagsBulk 覆盖旧标签（与 setTags 同语义：整体替换），空数组回到未归类', () => {
+    const db = mem();
+    const a = db.insertText('丙', { now: 1700000000000 }).id;
+    db.setTags(a, ['旧']);
+    db.applyTagsBulk([{ id: a, tags: ['新1', '新2'] }]);
+    expect(db.list({}).find((x) => x.id === a)!.tags).toEqual(['新1', '新2']);
+    // ★ 撤销靠它回到打标前：旧标签为空时批量写回空数组 → 存 NULL → 重新算未归类
+    db.applyTagsBulk([{ id: a, tags: [] }]);
+    expect(db.list({ untagged: true }).map((x) => x.id)).toEqual([a]);
+    expect(db.list({}).find((x) => x.id === a)!.tags).toBeUndefined();
+  });
+});

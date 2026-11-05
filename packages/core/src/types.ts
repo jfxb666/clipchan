@@ -34,6 +34,11 @@ export interface ListQuery {
   tags?: string[];
   /** v1.0.0 ⑥：文件夹过滤。字符串=该文件夹下的记录；null=只看未归类；undefined=不限。 */
   folderId?: string | null;
+  /**
+   * v1.2 C1 一键整理：只看**没有标签**的活跃记录（筛选语义，不是标签匹配）。
+   * ★ 省略 = 不限；给 true 才生效。list 与 count 共用同一条件（SQL 走 tags IS NULL）。
+   */
+  untagged?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -558,6 +563,11 @@ export interface ClipchanApi {
     startDrag(id: string): Promise<void>;
     /** v1.0.0 ⑥：整体替换一条记录的标签（传入已 sanitize 的标签串）。 */
     setTags(id: string, tags: string[]): Promise<void>;
+    /**
+     * v1.2 C1 一键整理：批量整体替换标签（与 setTags 同语义：整体替换，空数组=清空）。
+     * 返回实际改动条数；id 不存在的条目跳过、不抛（拉取与应用之间记录可能被删）。
+     */
+    applyTagsBulk(entries: { id: string; tags: string[] }[]): Promise<number>;
     /** v1.0.0 ⑥：把一条记录放进文件夹；folderId=null 表示移出到未归类。 */
     setFolder(id: string, folderId: string | null): Promise<void>;
     /** v1.0.0 ⑥：全部活跃记录的标签及其条数（count 降序、tag 升序），供筛选面板枚举。 */

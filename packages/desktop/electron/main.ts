@@ -1016,6 +1016,13 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       needDb().setFolder(String(id), folderId === undefined ? null : folderId);
       broadcast.itemsChanged();
     },
+    // ★ v1.2 C1 一键整理：批量整体替换标签。与 setTags 同一范式（落库 + 广播刷新），
+    //   但回实际改动条数：向导要拿它算「已整理 N 条」并按应用条数推进下一批。
+    [CH.items.applyTagsBulk]: (_e, entries: { id: string; tags: string[] }[]) => {
+      const applied = needDb().applyTagsBulk(Array.isArray(entries) ? entries : []);
+      broadcast.itemsChanged();
+      return applied;
+    },
     // 只读统计：和上面两条写通道相反，回数据、不广播（否则界面拉完统计又触发一次重拉）。
     [CH.items.listTags]: () => needDb().listTags(),
     // ★ 片段库（v0.6.0）：四个通道都回整表，界面拿返回值直接 setSnippets，不用再查一次。

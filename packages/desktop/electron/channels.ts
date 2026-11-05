@@ -49,6 +49,9 @@ export const CH = {
     // 返回 void 而不是整表：界面只需要知道改成功了，列表由 items:changed 拉。
     setTags: 'items:setTags',
     setFolder: 'items:setFolder',
+    // v1.2 C1 一键整理：批量整体替换标签。写操作（落库 + 广播刷新），返回实际改动条数
+    // ——向导要拿它算「已整理 N 条」并按应用条数推进下一批。
+    applyTagsBulk: 'items:applyTagsBulk',
     // 标签筛选面板要枚举"有哪些标签、各多少条"：只读，回统计表，不广播。
     listTags: 'items:listTags',
   },

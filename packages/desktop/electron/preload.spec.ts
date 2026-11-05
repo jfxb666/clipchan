@@ -307,3 +307,25 @@ describe('v1.2 D1：自定义 AI 动作通道', () => {
     }
   });
 });
+
+describe('v1.2 C1：一键整理通道', () => {
+  /** 与前面几组同样的四重同步：通道键 → ALL_INVOKE_CHANNELS → preload 方法 → 不手写字符串。 */
+  const C1: [string, string, string][] = [
+    ['applyTagsBulk', 'items:applyTagsBulk', 'applyTagsBulk'],
+  ];
+
+  it('① 通道名逐条对齐，② 全部进了 ALL_INVOKE_CHANNELS（items 整组展平）', () => {
+    for (const [key, channel] of C1) {
+      expect(CH.items[key as keyof typeof CH.items], '缺少通道键 ' + key).toBe(channel);
+      expect(ALL_INVOKE_CHANNELS, channel + ' 没进 ALL_INVOKE_CHANNELS').toContain(channel);
+    }
+  });
+
+  it('③ preload 里新方法 invoke 到对应常量（不是手写字符串）', () => {
+    for (const [key, channel, method] of C1) {
+      const re = new RegExp(method + ':[^\\n]*ipcRenderer\\.invoke\\(CH\\.items\\.' + key);
+      expect(PRELOAD_SRC, 'preload 缺少 ' + method + ' 或没走 CH.items.' + key).toMatch(re);
+      expect(PRELOAD_SRC, '手写了通道字符串 ' + channel).not.toContain("'" + channel + "'");
+    }
+  });
+});

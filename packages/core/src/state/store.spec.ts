@@ -95,6 +95,10 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
   const folderCalls: { op: string; args: unknown[] }[] = [];
   const setTagsCalls: { id: string; tags: string[] }[] = [];
   const setFolderCalls: { id: string; folderId: string | null }[] = [];
+  /** v1.2 C1：applyTagsBulk 的调用记录（撤销/批量打标签的断言用）。 */
+  const applyTagsBulkCalls: { id: string; tags: string[] }[][] = [];
+  /** v1.2 C1：count({untagged:true}) 的返回值；null = 让它走 seed.length。 */
+  let untaggedCountResult: number | null = null;
   /** 文件夹写操作返回的整表；由用例替换。 */
   let folderTable: FolderDTO[] = [];
   /** 让文件夹写操作抛错，验证「失败时状态不变 + toast」。 */
@@ -137,6 +141,8 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       count: async (q: ListQuery) => {
         countCalls.push(q);
         if (countThrows) throw new Error('count 失败');
+        // v1.2 C1：untagged 计数单独可调（整理页入口按钮的 N 用）。
+        if (q.untagged === true) return untaggedCountResult === null ? seed.length : untaggedCountResult;
         return countResult === null ? seed.length : countResult;
       },
       searchPage: async (q: ListQuery) => {
@@ -169,6 +175,12 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       setTags: async (id: string, tags: string[]) => {
         setTagsCalls.push({ id, tags });
         if (itemWriteThrows) throw new Error('写标签失败');
+      },
+      // v1.2 C1 一键整理：记录整批调用 + 可让它抛错（复用 itemWriteThrows 验证回滚）。
+      applyTagsBulk: async (entries: { id: string; tags: string[] }[]) => {
+        applyTagsBulkCalls.push(entries);
+        if (itemWriteThrows) throw new Error('批量写标签失败');
+        return entries.length;
       },
       setFolder: async (id: string, folderId: string | null) => {
         setFolderCalls.push({ id, folderId });
@@ -407,6 +419,10 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
     folderCalls,
     setTagsCalls,
     setFolderCalls,
+    applyTagsBulkCalls,
+    setUntaggedCount: (n: number | null) => {
+      untaggedCountResult = n;
+    },
     setFolderTable: (t: FolderDTO[]) => {
       folderTable = t;
     },
@@ -1637,6 +1653,68 @@ describe('条目的标签 / 文件夹（乐观更新）', () => {
     // 行还在（本地不摘），只是 folderId 变了
     expect(useClipStore.getState().items.map((it) => it.id)).toContain('a');
     expect(useClipStore.getState().items.find((it) => it.id === 'a')?.folderId).toBe('f2');
+  });
+});
+
+describe('一键整理（v1.2 C1）', () => {
+  it('applyTagsBulk 乐观替换各条 tags；空数组按 DTO 语义写成无标签', async () => {
+    const fake = makeFakeAdapter([item('a', { tags: ['旧'] }), item('b'), item('c')]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+
+    const applied = await useClipStore.getState().applyTagsBulk([
+      { id: 'a', tags: ['新1', '新2'] },
+      { id: 'b', tags: ['链接'] },
+    ]);
+
+    expect(applied).toBe(2);
+    expect(fake.applyTagsBulkCalls).toEqual([[{ id: 'a', tags: ['新1', '新2'] }, { id: 'b', tags: ['链接'] }]]);
+    expect(useClipStore.getState().items.find((it) => it.id === 'a')?.tags).toEqual(['新1', '新2']);
+    expect(useClipStore.getState().items.find((it) => it.id === 'b')?.tags).toEqual(['链接']);
+    // 未列入的条目不动
+    expect(useClipStore.getState().items.find((it) => it.id === 'c')?.tags).toBeUndefined();
+  });
+
+  it('★ applyTagsBulk 失败时回滚（重拉列表）+ error toast + 返回 0', async () => {
+    const fake = makeFakeAdapter([item('a', { tags: ['旧'] })]);
+    setPlatform(fake.adapter);
+    await useClipStore.getState().load();
+
+    fake.setItemWriteThrows(true);
+    const applied = await useClipStore.getState().applyTagsBulk([{ id: 'a', tags: ['新'] }]);
+
+    expect(applied).toBe(0);
+    // 回滚走重拉：假平台的 list 仍回旧数据，tags 保持「旧」
+    expect(useClipStore.getState().items.find((it) => it.id === 'a')?.tags).toEqual(['旧']);
+    expect(useClipStore.getState().toasts.at(-1)?.text).toContain('批量写标签失败');
+    expect(useClipStore.getState().toasts.at(-1)?.tone).toBe('error');
+  });
+
+  it('loadUntaggedCount 拉 count({untagged:true})；拉不到保持现值不报错', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b')]);
+    setPlatform(fake.adapter);
+    fake.setUntaggedCount(7);
+
+    await useClipStore.getState().loadUntaggedCount();
+    expect(useClipStore.getState().untaggedCount).toBe(7);
+
+    // 假平台返回 0（没设时回 seed.length——这里设 0 显式验证透传）
+    fake.setUntaggedCount(0);
+    await useClipStore.getState().loadUntaggedCount();
+    expect(useClipStore.getState().untaggedCount).toBe(0);
+  });
+
+  it('listUntagged 直通 items.list 的 untagged 查询；失败原样抛（向导要区分失败与空）', async () => {
+    const fake = makeFakeAdapter([item('a'), item('b')]);
+    setPlatform(fake.adapter);
+    fake.setUntaggedCount(2);
+
+    const items = await useClipStore.getState().listUntagged({ limit: 200, offset: 0 });
+    expect(items).toHaveLength(2);
+    // untagged 必须一路传到 ListQuery（漏了就是「全部条目」而不是「未归类」）
+    const lastListCall = fake.listCalls.at(-1)!;
+    expect(lastListCall.untagged).toBe(true);
+    expect(lastListCall.limit).toBe(200);
   });
 });
 

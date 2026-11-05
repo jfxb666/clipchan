@@ -137,6 +137,12 @@ export interface ClipStoreState {
    *   标签弹窗退化成「只能手输」，绝不能因为没配模型就报错或挡住整理。
    */
   aiProviders: AiProvider[];
+  /**
+   * 未归类（没有标签）条目数（v1.2 C1 整理页入口按钮「整理未归类（N）」用）。
+   * ★ 拉不到（老主进程 / 非 Electron）保持 0：按钮照常显示，只是数字对不上；
+   *   它只是个入口提示，不值得为它挡住整理页。
+   */
+  untaggedCount: number;
 }
 
 export interface ClipStoreActions {
@@ -249,6 +255,24 @@ export interface ClipStoreActions {
   removeFolder(id: string): Promise<void>;
   setItemTags(id: string, tags: string[]): Promise<void>;
   setItemFolder(id: string, folderId: string | null): Promise<void>;
+  /**
+   * v1.2 C1 一键整理：批量整体替换标签。返回实际改动条数（失败回 0，错误 toast 在这里发）。
+   *
+   * ★ 乐观更新与 setItemTags 同一套：本地先把各条 tags 整体替换（空数组按 DTO 语义
+   *   写成 undefined=无标签），失败回滚走 load() 重拉——主进程的 normalizeTags 可能
+   *   已把个别标签改写，本地快照拼不出真值。
+   * ★ 成功的「已整理 N 条」提示由向导组件发：撤销快照在那里（组件态），toast 上的
+   *   「撤销」按钮要带着快照闭包，store 里发就会把撤销拆到两处。
+   */
+  applyTagsBulk(entries: { id: string; tags: string[] }[]): Promise<number>;
+  /** v1.2 C1：拉未归类计数（整理页挂载时刷新一次，应用/撤销一批后再刷）。 */
+  loadUntaggedCount(): Promise<void>;
+  /**
+   * v1.2 C1：给向导拉一批未归类条目（分页参数由调用方给）。
+   * ★ 失败原样抛给调用方：向导要区分「真的没有了」与「拉取失败」——
+   *   前者是完成态，后者必须停下来提示，绝不能把失败当成整理完毕。
+   */
+  listUntagged(q: { limit: number; offset: number }): Promise<ClipItemDTO[]>;
   /**
    * 让 AI 给这条记录起标签建议（v1.0.0 ⑥ 可选项）。返回空数组表示没有可用建议。
    *
@@ -412,6 +436,7 @@ function initialState(): ClipStoreState {
     folders: [],
     knownTags: [],
     aiProviders: [],
+    untaggedCount: 0,
   };
 }
 
@@ -690,6 +715,48 @@ export const useClipStore = create<ClipStore>((set, get) => ({
       set({ items: before });
       get().toast(errorText(err), 'error');
     }
+  },
+
+  applyTagsBulk: async (entries) => {
+    if (!Array.isArray(entries) || entries.length === 0) return 0;
+    const before = get().items;
+    const patch = new Map(entries.map((e) => [e.id, e.tags] as const));
+    // 乐观更新（与 setItemTags 同一套）：向导里点了「应用本批」就先把主列表里同 id 的
+    // 行改掉（tags 空数组按 DTO 语义写成 undefined=无标签）；主列表当前多半不在未归类
+    // 筛选下，patch 落不到任何行也无害。
+    set({
+      items: before.map((it) => {
+        const tags = patch.get(it.id);
+        if (tags === undefined) return it;
+        return tags.length > 0 ? { ...it, tags: [...tags] } : { ...it, tags: undefined };
+      }),
+    });
+    try {
+      const applied = await getPlatform().items.applyTagsBulk(entries);
+      // 未归类计数变了（打上标签的行离开了未归类集合），入口按钮的 N 要跟着走。
+      void get().loadUntaggedCount();
+      return applied;
+    } catch (err) {
+      // 回滚走重拉而不是本地快照：主进程 normalizeTags 可能已改写个别标签，
+      // 本地快照拼不出真值（成功路径上主进程也会广播 itemsChanged 触发 load，同样收敛）。
+      await get().load();
+      get().toast(errorText(err), 'error');
+      return 0;
+    }
+  },
+
+  loadUntaggedCount: async () => {
+    try {
+      set({ untaggedCount: await getPlatform().items.count({ untagged: true }) });
+    } catch {
+      // ★ 与 loadFolders 同一考虑：计数只是入口按钮的提示，拉不到就保持现值，
+      //   绝不能因为一个数字挡住整理页。
+    }
+  },
+
+  listUntagged: (q) => {
+    // ★ 直通不兜错：向导要区分「真的没有了」与「拉取失败」，吞掉异常会把失败当完成态。
+    return getPlatform().items.list({ untagged: true, limit: q.limit, offset: q.offset });
   },
 
   suggestTagsByAi: async (itemId) => {

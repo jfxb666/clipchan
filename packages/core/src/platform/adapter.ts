@@ -45,6 +45,8 @@ const stub: PlatformAdapter = {
     purge: () => Promise.reject(new Error('当前环境没有实现 items.purge')),
     emptyTrash: () => Promise.reject(new Error('当前环境没有实现 items.emptyTrash')),
     setTags: () => Promise.reject(new Error('当前环境没有实现 items.setTags')),
+    // v1.2 C1 一键整理：与其余 items 方法同款——没实现就如实拒绝。
+    applyTagsBulk: () => Promise.reject(new Error('当前环境没有实现 items.applyTagsBulk')),
     setFolder: () => Promise.reject(new Error('当前环境没有实现 items.setFolder')),
     listTags: () => Promise.reject(new Error('当前环境没有实现 items.listTags')),
     onChanged: () => unsubscribe(),

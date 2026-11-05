@@ -505,6 +505,11 @@ export interface Db {
   removeFolder(id: string): FolderDTO[];
   /** 整体替换一条记录的标签（内部会 sanitize）；id 不存在时静默无操作。 */
   setTags(id: string, tags: string[]): void;
+  /**
+   * v1.2 C1 一键整理：批量整体替换标签（与 setTags 同语义：整体替换，空数组=清空）。
+   * 返回实际改动条数；id 不存在的条目跳过、changes 计 0、不抛（与 restoreMany 语义一致）。
+   */
+  applyTagsBulk(entries: { id: string; tags: string[] }[]): number;
   /** 把一条记录放进文件夹（folderId=null 表示移出到未归类）；id 不存在时静默无操作。 */
   setFolder(id: string, folderId: string | null): void;
   /** 读一条记录的标签；无标签 / id 不存在 / 坏数据 → []。 */
@@ -853,6 +858,13 @@ function buildWhere(q: ListQuery): { where: string; params: unknown[] } {
   } else if (typeof q.folderId === 'string') {
     where.push('folder_id = ?');
     params.push(q.folderId);
+  }
+
+  // v1.2 C1 一键整理：untagged === true → 只取没有标签的活跃行。
+  // ★ 筛选语义不是标签匹配，走 IS NULL；与 folderId 三态处理风格一致
+  //   （没传 = 不限，只有显式 true 才收窄）。list 与 count 共用本函数，数字天然对得上。
+  if (q.untagged === true) {
+    where.push('tags IS NULL');
   }
 
   return { where: where.join(' AND '), params };
@@ -1213,7 +1225,7 @@ export function openDb(file: string): Db {
 
   /**
    * 候选缓存键：只序列化**会影响候选集**的字段——buildWhere 消费的 kind / time / tags /
-   * folderId，加上 scanByExpr 逐行判定用的 expr。
+   * folderId / untagged，加上 scanByExpr 逐行判定用的 expr。
    * ★ limit / offset 刻意不进键：分页发生在命中之后，同一个候选集要服务所有页；
    *   q.q 也不进键：expr 查询里它被 base 显式丢掉（expr 与 q 同时给时以 expr 为准）。
    * ★ folderId 的 undefined（不限）与 null（未归类）语义不同，键里必须可区分。
@@ -1225,6 +1237,7 @@ export function openDb(file: string): Db {
       q.time ?? null,
       q.tags ?? null,
       q.folderId === undefined ? '(any)' : q.folderId,
+      q.untagged === true,
     ]);
   }
 
@@ -2172,6 +2185,34 @@ export function openDb(file: string): Db {
     setTags(id: string, tags: string[]): void {
       raw.prepare('UPDATE items SET tags = ? WHERE id = ?').run(encodeTags(normalizeTags(tags)), id);
       bumpGen(); // ★ tags 参与 buildWhere 的筛选，是候选集的一部分（T-M1）
+    },
+
+    /**
+     * v1.2 C1 一键整理：批量整体替换标签。
+     *
+     * ★ 整批一个事务 + 事务后 bumpGen() 一次：逐条调 setTags 结果等价，但每条都作废一次
+     *   候选缓存是纯浪费 —— 整批一次作废足矣（作废本身幂等）。
+     * ★ id 不存在的条目 changes 计 0、不抛（与 restoreMany 的跳过语义一致）：
+     *   向导拉取与应用之间记录可能被删，少应用一条不该把整批炸掉。
+     * ★ 归一化与 setTags 走同一 normalizeTags/encodeTags：去 # / 截长 / 空数组存 NULL，
+     *   「批量清空=回到未归类」才与单条语义完全一致。
+     */
+    applyTagsBulk(entries: { id: string; tags: string[] }[]): number {
+      const list = Array.isArray(entries) ? entries : [];
+      if (list.length === 0) return 0;
+      const upd = raw.prepare('UPDATE items SET tags = ? WHERE id = ?');
+      const tx = raw.transaction((rows: { id: string; tags: string[] }[]) => {
+        let n = 0;
+        for (const e of rows) {
+          if (!e || typeof e.id !== 'string' || e.id.length === 0) continue;
+          n += upd.run(encodeTags(normalizeTags(e.tags)), e.id).changes;
+        }
+        return n;
+      });
+      const changed = tx(list);
+      // ★ 整批一次作废候选缓存（T-M1）：tags 参与 buildWhere 的筛选，逐条 bump 等价但浪费。
+      bumpGen();
+      return changed;
     },
 
     getTags(id: string): string[] {

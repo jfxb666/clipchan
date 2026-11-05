@@ -463,6 +463,12 @@ export function createMobileAdapter(): PlatformAdapter {
         throw new Error('手机端暂不支持标签');
       },
 
+      // v1.2 C1 一键整理：与 setTags 同款——手机端没有 items.tags 这一列，批量打标签
+      // 无处落库，如实 reject（向导入口在手机端不可用，但向导 UI 只在桌面整理页挂载）。
+      async applyTagsBulk(_entries: { id: string; tags: string[] }[]): Promise<number> {
+        throw new Error('手机端暂不支持标签');
+      },
+
       async setFolder(_id: string, _folderId: string | null): Promise<void> {
         throw new Error('手机端暂不支持文件夹归类');
       },

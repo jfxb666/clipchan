@@ -90,6 +90,8 @@ const api = {
     setTags: (id: string, tags: string[]): Promise<void> => ipcRenderer.invoke(CH.items.setTags, id, tags),
     setFolder: (id: string, folderId: string | null): Promise<void> =>
       ipcRenderer.invoke(CH.items.setFolder, id, folderId),
+    // v1.2 C1 一键整理：批量整体替换标签，回实际改动条数（列表刷新靠 itemsChanged 广播）。
+    applyTagsBulk: (entries: { id: string; tags: string[] }[]): Promise<number> => ipcRenderer.invoke(CH.items.applyTagsBulk, entries),
     listTags: (): Promise<TagCountDTO[]> => ipcRenderer.invoke(CH.items.listTags),
     // ★ 回收站五方法：与 channels.ts 的五个键一一对应（preload.spec 断言不遗漏）。
     trashList: (q: TrashQuery): Promise<ClipItemDTO[]> => ipcRenderer.invoke(CH.items.trashList, q),
