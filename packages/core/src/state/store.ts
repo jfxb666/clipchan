@@ -903,7 +903,8 @@ export const useClipStore = create<ClipStore>((set, get) => ({
       return;
     }
     try {
-      const result = await getPlatform().items.mergeSelected(eligible.map((it) => it.id));
+      // 分隔符从 settings 读（v1.2 A3）：settings 里永远是过闸后的字符串，缺省也是 '\r\n'。
+      const result = await getPlatform().items.mergeSelected(eligible.map((it) => it.id), get().settings.mergeSeparator);
       const { text, tone } = mergeToast(result, eligible.length, skippedImages);
       get().toast(text, tone);
       if (result.ok && result.id) {

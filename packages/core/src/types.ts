@@ -197,6 +197,11 @@ export interface Settings {
    * 命中就整条丢弃 —— 密码管理器 / 银行网页这类不该留痕的来源靠它挡住。
    */
   excludeApps: string[];
+  /**
+   * 拼接选中项时的连接符（v1.2 A3）。默认 CRLF 与旧版一致；
+   * 设置页可换成逗号/空格或 ≤8 字符的自定义值，落库前过 sanitizeSettings 白名单。
+   */
+  mergeSeparator: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -213,6 +218,7 @@ export const DEFAULT_SETTINGS: Settings = {
   trashLimit: 200,
   listLayout: 'list',
   excludeApps: [],
+  mergeSeparator: '\r\n',
 };
 
 export interface HotkeyStatus {
@@ -475,7 +481,8 @@ export interface ClipchanApi {
     togglePin(id: string): Promise<void>;
     clearUnpinned(): Promise<void>;
     clearAll(): Promise<void>;
-    mergeSelected(ids: string[]): Promise<{ ok: boolean; id?: string; reason?: string }>;
+    /** sep 为拼接分隔符（v1.2 A3），省略时主进程按 CRLF 处理；载荷在主进程先过闸再进库。 */
+    mergeSelected(ids: string[], sep?: string): Promise<{ ok: boolean; id?: string; reason?: string }>;
     /** 只复制到剪贴板，不贴回原窗口、不消耗目标窗口（右键「复制到剪贴板」）。 */
     copy(id: string): Promise<PasteResult>;
     /**

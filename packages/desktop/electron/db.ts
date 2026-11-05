@@ -994,6 +994,8 @@ function sanitizeSettings(input: Partial<Settings>): Settings {
     trashLimit: input.trashLimit === undefined ? d.trashLimit : clampInt(input.trashLimit, 1, 9999, d.trashLimit),
     listLayout: input.listLayout === undefined ? d.listLayout : normalizeLayout(input.listLayout),
     excludeApps: Array.isArray(input.excludeApps) ? normalizeExcludeApps(input.excludeApps) : d.excludeApps,
+    // ★ 只信字符串且最长 8 字符（\r\n 长度 2 合法）：旧库被手改也不至于把任意长串带进拼接结果。
+    mergeSeparator: typeof input.mergeSeparator === 'string' ? input.mergeSeparator.slice(0, 8) : d.mergeSeparator,
   };
 }
 

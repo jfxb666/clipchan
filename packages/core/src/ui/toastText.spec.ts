@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { UNDO_LABEL, appToastTone, copyToast, pasteToast, removeToast, undoToast } from './toastText';
+import { UNDO_LABEL, appToastTone, copyToast, mergeSeparatorLabel, pasteToast, removeToast, undoToast } from './toastText';
 
 /**
  * 主进程的 toast kind 只有 info/warn/error，界面只有 ok/warn/error 三档颜色。
@@ -97,5 +97,16 @@ describe('undoToast', () => {
 
     expect(text.indexOf('3')).toBeLessThan(text.indexOf('4'));
     expect(text).toContain('已恢复');
+  });
+});
+
+describe('mergeSeparatorLabel（v1.2 T4：拼接分隔符可读化）', () => {
+  it('★ 三个预设映射为中文词，自定义分隔符原样显示加引号', () => {
+    expect(mergeSeparatorLabel('\r\n')).toBe('换行');
+    expect(mergeSeparatorLabel(', ')).toBe('逗号');
+    expect(mergeSeparatorLabel(' ')).toBe('空格');
+    // 自定义值用户自己认识，原样摆出来加个引号就够了
+    expect(mergeSeparatorLabel(' - ')).toBe('「 - 」');
+    expect(mergeSeparatorLabel('')).toBe('「」');
   });
 });

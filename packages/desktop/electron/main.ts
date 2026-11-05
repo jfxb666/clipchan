@@ -1160,12 +1160,15 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
     //   —— 现在每次启动打一次 GitHub API 没收益，等真实用户量起来再加。
     [CH.app.checkUpdate]: () => (updater ? updater.check() : { state: 'none', message: '更新器未就绪' }),
     [CH.app.applyUpdate]: () => (updater ? updater.apply() : Promise.resolve()),
-    // 拼接选中项（spec §7.5：跳过收藏项，源条目被新记录取代）。
-    [CH.items.mergeSelected]: (_e, ids: string[]) => {
+    // 拼接选中项（spec §7.5：跳过收藏项，源条目被新记录取代）。sep 为分隔符（v1.2 A3）。
+    [CH.items.mergeSelected]: (_e, ids: string[], sep?: string) => {
       const svc2 = mergeSvc;
       if (!svc2) return { ok: false, reason: 'not-enough' };
       const list = Array.isArray(ids) ? ids.map((id) => String(id)) : [];
-      const result = svc2.mergeSelected(list);
+      // ★ 载荷先过闸，防任意长串进库：非字符串回默认换行，超 8 字符截断
+      //   （与 db.ts sanitizeSettings 对 mergeSeparator 同一规则，两处别各改各的）。
+      const cleanSep = typeof sep === 'string' ? sep.slice(0, 8) : '\r\n';
+      const result = svc2.mergeSelected(list, cleanSep);
       if (result.ok) {
         // 合并成功即这一串连续复制已经落地成一条，提示条与预选一起收掉。
         burstDetector?.clear();

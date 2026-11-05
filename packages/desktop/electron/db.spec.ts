@@ -373,6 +373,21 @@ describe('settings 持久化', () => {
     expect(db.setSettings({ listLayout: 'bogus' as never }).listLayout).toBe('list');
   });
 
+  it('★ mergeSeparator 走 sanitizeSettings 白名单：缺省换行、合法透传、超长截断、非法类型回默认（v1.2 T4）', () => {
+    // 默认值必须在 DEFAULT_SETTINGS 里：否则下面两条断言断言的就是同一个"错值"
+    expect(DEFAULT_SETTINGS.mergeSeparator).toBe('\r\n');
+    const db = mem();
+    expect(db.getSettings().mergeSeparator).toBe('\r\n');
+    // 合法字符串原样透传（\r\n 长度 2，是合法预设不是异常值）
+    expect(db.setSettings({ mergeSeparator: ', ' }).mergeSeparator).toBe(', ');
+    expect(db.setSettings({ mergeSeparator: ' | ' }).mergeSeparator).toBe(' | ');
+    expect(db.setSettings({ mergeSeparator: '\r\n' }).mergeSeparator).toBe('\r\n');
+    // 超过 8 字符截断到 8（旧库被手塞了任意长串也不至于把拼接提示撑爆）
+    expect(db.setSettings({ mergeSeparator: 'x'.repeat(20) }).mergeSeparator).toHaveLength(8);
+    // 非字符串回落默认值，不是变成 '42'
+    expect(db.setSettings({ mergeSeparator: 42 as unknown as string }).mergeSeparator).toBe('\r\n');
+  });
+
   it('图片 DTO 带原始 width/height（瀑布流算列高用）', () => {
     const db = mem();
     db.insertImage(

@@ -74,6 +74,17 @@ export function mergeToast(
 /** 「撤销」按钮的文案（删除后 3 秒窗口内出现）。 */
 export const UNDO_LABEL = '撤销';
 
+/**
+ * 拼接分隔符 → 人话（v1.2 A3）：提示条尾部要用它说明这次拼接用什么连。
+ * 三个预设给中文词；自定义值用户自己认识，原样摆出来加「」就行。
+ */
+export function mergeSeparatorLabel(sep: string): string {
+  if (sep === '\r\n') return '换行';
+  if (sep === ', ') return '逗号';
+  if (sep === ' ') return '空格';
+  return '「' + sep + '」';
+}
+
 /** 删除后的提示文案：条数 + 3 秒内可撤销的提示。 */
 export function removeToast(count: number): { text: string; tone: ToastTone } {
   return { text: '已删除 ' + count + ' 条（进回收站）', tone: 'ok' };

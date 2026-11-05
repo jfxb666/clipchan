@@ -64,8 +64,8 @@ const api = {
     togglePin: (id: string): Promise<void> => ipcRenderer.invoke(CH.items.togglePin, id),
     clearUnpinned: (): Promise<void> => ipcRenderer.invoke(CH.items.clearUnpinned),
     clearAll: (): Promise<void> => ipcRenderer.invoke(CH.items.clearAll),
-    mergeSelected: (ids: string[]): Promise<{ ok: boolean; id?: string; reason?: string }> =>
-      ipcRenderer.invoke(CH.items.mergeSelected, ids),
+    mergeSelected: (ids: string[], sep?: string): Promise<{ ok: boolean; id?: string; reason?: string }> =>
+      ipcRenderer.invoke(CH.items.mergeSelected, ids, sep),
     copy: (id: string): Promise<PasteResult> => ipcRenderer.invoke(CH.items.copy, id),
     getFullImage: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getFullImage, id),
     count: (q: ListQuery): Promise<number> => ipcRenderer.invoke(CH.items.count, q),

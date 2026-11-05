@@ -138,6 +138,21 @@ describe('MergeService.mergeSelected', () => {
     expect(svc.mergeSelected(['nope-1', 'nope-2'])).toEqual({ ok: false, reason: MERGE_REASON.notEnough });
   });
 
+  it('★ mergeSelected 透传分隔符：逗号拼接不再强制换行（v1.2 T4）', () => {
+    const db = mem();
+    const a = db.insertText('a', { now: 1000 }).id;
+    const b = db.insertText('b', { now: 2000 }).id;
+    const svc = new MergeService({ db });
+    const res = svc.mergeSelected([a, b], ', ');
+    expect(res.ok).toBe(true);
+    expect(row(db, res.id!).content).toBe('a, b');
+    // 不传 sep 仍是缺省换行：老调用点（main handler 之外的）不用跟着改
+    const c = db.insertText('甲', { now: 3000 }).id;
+    const d = db.insertText('乙', { now: 4000 }).id;
+    const res2 = svc.mergeSelected([c, d]);
+    expect(row(db, res2.id!).content).toBe('甲\r\n乙');
+  });
+
   it('拼接结果排在列表最前（seq 最新）', () => {
     const db = mem();
     const a = db.insertText('甲', { now: 1000 }).id;

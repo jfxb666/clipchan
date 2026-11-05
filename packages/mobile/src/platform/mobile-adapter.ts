@@ -304,7 +304,7 @@ export function createMobileAdapter(): PlatformAdapter {
         throw new Error('手机端暂不支持导入备份包');
       },
 
-      async mergeSelected(ids: string[]): Promise<{ ok: boolean; id?: string; reason?: string }> {
+      async mergeSelected(ids: string[], sep?: string): Promise<{ ok: boolean; id?: string; reason?: string }> {
         // 语义与桌面端 MergeService 一致：收藏项与图片项**不参与**，
         // 且**必须原样保留不删**；剩下不足 2 条就什么都不做。
         if (!Array.isArray(ids) || ids.length < 2) return { ok: false, reason: 'not-enough' };
@@ -327,7 +327,10 @@ export function createMobileAdapter(): PlatformAdapter {
           return { ok: false, reason: 'not-enough' };
         }
 
-        const text = parts.map((r) => r.content).join(CRLF);
+        // ★ 分隔符与桌面端同一规则过闸（非字符串回默认、超 8 截断），再透传给 join
+        //   —— 桌面能换逗号/空格，手机端不一致会让人以为是坏了。
+        const cleanSep = typeof sep === 'string' ? sep.slice(0, 8) : CRLF;
+        const text = parts.map((r) => r.content).join(cleanSep);
         const merged: MobileRecord = {
           id: nextId(),
           // 拼接结果可能是多行代码块，kind 一律按 classify 重算（与桌面端一致）。

@@ -53,6 +53,12 @@ export const TRASH_LIMIT_MAX = 9999;
 /** 小组件宽度范围（spec §6.6）。 */
 export const WIDGET_SIZE_MIN = 240;
 export const WIDGET_SIZE_MAX = 400;
+/**
+ * 拼接分隔符的三个预设值（v1.2 A3）。
+ * 输入框只在当前值不是预设时才显示内容——预设里 \r\n 是看不见的控制字符，
+ * 摆进输入框里像是个空框，不如让它留空显示占位符「自定义」。
+ */
+export const MERGE_SEPARATOR_PRESETS: readonly string[] = ['\r\n', ', ', ' '];
 /** 幽灵模式上限 720 分钟（spec §6.8）。 */
 export const GHOST_MAX_MINUTES = 720;
 export const GHOST_PRESETS = [5, 10, 30, 60] as const;
@@ -595,6 +601,33 @@ export function SettingsView({
         {ocrProgress !== null ? (
           <p className="text-[11px] leading-[1.6] text-ink-3">{ocrProgressText(ocrProgress)}</p>
         ) : null}
+      </Section>
+
+      <Section title="拼接">
+        <Row
+          label="拼接分隔符"
+          hint="多选几条按 Ctrl+M 拼接时的连接符；选「自定义」后在右边输入（最多 8 个字符）"
+        >
+          <div className="flex shrink-0 items-center gap-tight">
+            <Segmented
+              value={settings.mergeSeparator}
+              options={[
+                { value: '\r\n', label: '换行' },
+                { value: ', ', label: '逗号' },
+                { value: ' ', label: '空格' },
+              ]}
+              onChange={(sep) => onUpdate({ mergeSeparator: sep })}
+            />
+            <input
+              type="text"
+              maxLength={8}
+              value={MERGE_SEPARATOR_PRESETS.includes(settings.mergeSeparator) ? '' : settings.mergeSeparator}
+              placeholder="自定义"
+              onChange={(event) => onUpdate({ mergeSeparator: event.target.value.slice(0, 8) })}
+              className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]"
+            />
+          </div>
+        </Row>
       </Section>
 
       <Section title="数据">

@@ -34,7 +34,7 @@ import { SearchBar } from './SearchBar';
 import { Sidebar } from './Sidebar';
 import { TitleBar } from './TitleBar';
 import { ToastStack } from './Toast';
-import { appToastTone, copyToast, pasteToast, type ToastTone } from './toastText';
+import { appToastTone, copyToast, mergeSeparatorLabel, pasteToast, type ToastTone } from './toastText';
 import { ContextMenu } from './ContextMenuView';
 import { menuItemsFor, type MenuAction } from './contextMenu';
 import { TextViewer } from './TextViewer';
@@ -1154,7 +1154,7 @@ export function App() {
               {mergeHint ? (
                 <div className="cc-no-drag mx-base mb-snug flex shrink-0 items-center gap-tight rounded-button border border-line bg-surface-2 px-snug py-[6px] text-[11px] text-ink-2">
                   <Sparkles size={12} aria-hidden />
-                  <span>连续复制了 {mergeHint.count} 条，按 Ctrl+M 拼接</span>
+                  <span>连续复制了 {mergeHint.count} 条，按 Ctrl+M 拼接（{mergeSeparatorLabel(settings.mergeSeparator)}分隔）</span>
                   <div className="flex-1" />
                   <button
                     type="button"

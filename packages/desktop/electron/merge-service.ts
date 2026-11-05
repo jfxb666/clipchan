@@ -37,8 +37,10 @@ export class MergeService {
   /**
    * 把选中的若干条拼接成一条。**永不抛**，失败一律返回 {ok:false, reason}。
    * ids 的顺序即拼接顺序（调用方传的是列表顺序）。
+   * sep 为连接符（v1.2 A3）：由调用方（main handler）先过闸再传进来，这里原样透传；
+   * 省略时仍是 CRLF，与旧版语义一致。
    */
-  mergeSelected(ids: string[]): MergeResult {
+  mergeSelected(ids: string[], sep = '\r\n'): MergeResult {
     if (!Array.isArray(ids) || ids.length < 2) {
       return { ok: false, reason: MERGE_REASON.notEnough };
     }
@@ -54,7 +56,7 @@ export class MergeService {
     const images = rows.filter((r) => kindOf(r) === 'image' || r.content === null).length;
     const merged = mergeTexts(
       rows.map((r) => ({ content: r.content, pinned: r.pinned === 1, kind: kindOf(r) })),
-      '\r\n',
+      sep,
     );
     if (!merged) {
       if (images > 0 && rows.length - images < 2) return { ok: false, reason: MERGE_REASON.imagesSkipped };
