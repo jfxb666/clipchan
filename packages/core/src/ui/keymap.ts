@@ -8,7 +8,7 @@
  * 判定顺序与旧版 / 早前 App.tsx 内联实现逐条一致（顺序本身是行为的一部分）：
  *   Esc 隐藏 -> Ctrl+F 聚焦搜索 -> Ctrl+M 拼接 -> Ctrl+D 收藏 -> Delete 删除
  *   -> 搜索框内 ↑/↓ 跳出到列表（其余按键不拦）-> Ctrl+Z 撤销 -> Ctrl+C 复制
- *   -> ↑/↓ 移动 -> Ctrl+Shift+V 纯文本粘贴 -> Enter 粘贴。
+ *   -> ↑/↓ 移动 -> Ctrl+Shift+V 纯文本粘贴 -> 数字 1-9 速贴 -> Enter 粘贴。
  *
  * ★ Esc 是全局表里唯一需要"让路"的判定：浮层与整理页各有自己的关闭语义，
  *   所有权由 KeyContext 的两个开关告诉这里，App.tsx 负责如实填。
@@ -48,6 +48,7 @@ export type KeyAction =
   | { type: 'copy' }
   | { type: 'paste' }
   | { type: 'paste-plain' }
+  | { type: 'paste-index'; index: number }
   | { type: 'undo' }
   | { type: 'none' };
 
@@ -102,6 +103,21 @@ export function resolveKey(event: KeyEventLike, ctx: KeyContext): KeyAction {
   //   Ctrl+Shift+V 仍是输入框自己的粘贴（与 Ctrl+Z 同一条"输入框优先"约定）。
   if (mod && event.shiftKey === true && (key === 'v' || key === 'V')) return { type: 'paste-plain' };
   if (mod && event.shiftKey === true && key === 'Enter') return { type: 'paste-plain' };
+  // ★ 数字键速贴：只吃主键盘不带修饰键的 1-9，直接贴主列表第 N 条。
+  //   放在 inSearch 早退之后，天然不会抢搜索框的输入（那里是打字）；
+  //   浮层/整理页开着时也让路（与 Esc 同一条所有权约定，BL-1）：浮层自己的
+  //   交互可能用到数字键，全局表这时候不能抢。越界（列表不足 N 条）由 App 端静默忽略。
+  if (
+    !ctx.overlayOpen &&
+    !ctx.organizeOpen &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !event.shiftKey &&
+    /^[1-9]$/.test(event.key)
+  ) {
+    return { type: 'paste-index', index: Number(event.key) };
+  }
   if (key === 'Enter') return { type: 'paste' };
   return { type: 'none' };
 }

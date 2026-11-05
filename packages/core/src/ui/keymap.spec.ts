@@ -169,6 +169,20 @@ describe('resolveKey', () => {
   });
 });
 
+describe('数字键速贴（v1.2 A1）', () => {
+  it('★ 非搜索态按 1-9 → paste-index（面板主列表第 N 条）', () => {
+    expect(resolveKey(key('1'), ctx(false, ['a']))).toEqual({ type: 'paste-index', index: 1 });
+    expect(resolveKey(key('9'), ctx(false, ['a']))).toEqual({ type: 'paste-index', index: 9 });
+  });
+  it('搜索态/浮层开时数字不触发（在输入框打数字不能被抢走）', () => {
+    expect(resolveKey(key('1'), ctx(true, ['a']))).toEqual({ type: 'none' });
+    expect(resolveKey(key('5'), { inSearch: false, selectedIds: [], overlayOpen: true, organizeOpen: false })).toEqual({ type: 'none' });
+  });
+  it('数字键在 shouldPreventDefault 覆盖内', () => {
+    expect(shouldPreventDefault({ type: 'paste-index', index: 1 })).toBe(true);
+  });
+});
+
 describe('shouldPreventDefault', () => {
   it('除 none 外都要拦默认行为', () => {
     const actions: KeyAction[] = [

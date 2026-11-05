@@ -393,6 +393,15 @@ export function App() {
         case 'paste':
           void store.pasteSelected();
           return;
+        case 'paste-index': {
+          // ★ 数字键速贴（v1.2 A1）：贴主列表第 N 条，与双击同一个 paste 路径（选中+粘贴）。
+          //   ★ 这里必须用事件时刻的 store 快照取列表 —— 这个 effect 依赖是 []，
+          //     组件作用域的 items 会停在挂载那一刻（与 escapeCtx 走 ref 同一条教训）。
+          //   越界（列表不足 N 条）静默忽略，不响也不报。
+          const item = store.items[action.index - 1];
+          if (item) paste(item.id);
+          return;
+        }
         case 'paste-plain': {
           // 键盘路径与右键菜单同一个动作：只贴当前选中项，失败静默（主进程会自己 toast）。
           const id = store.selectedIds[0];
