@@ -155,6 +155,14 @@ export {
   protocolLabel,
   validateProvider,
 } from './aiProviderForm';
+export {
+  CUSTOM_ACTIONS_MAX,
+  CUSTOM_NAME_MAX_CODEPOINTS,
+  CUSTOM_PROMPT_MAX_CODEPOINTS,
+  customActionsRemaining,
+  customPromptSummary,
+  validateCustomAction,
+} from './customActions';
 export { badgeOf, filterKindOf, emptyHintOf, type Badge, type BadgeIcon } from './badges';
 export { highlightSegments, type HighlightSegment } from './highlight';
 export {

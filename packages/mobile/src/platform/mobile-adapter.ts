@@ -733,6 +733,17 @@ export function createMobileAdapter(): PlatformAdapter {
       async historyClear(): Promise<never> {
         throw new Error('手机端暂不支持 AI 提示词优化');
       },
+      // v1.2 D1：自定义动作同样不接——如实拒绝（与其他 ai 方法同一口径），
+      // 助手面板读不到列表会降级为空态提示，不会把面板拖崩。
+      async listCustomActions(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 自定义动作');
+      },
+      async saveCustomAction(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 自定义动作');
+      },
+      async removeCustomAction(): Promise<never> {
+        throw new Error('手机端暂不支持 AI 自定义动作');
+      },
       onChanged: (): Unsub => () => {},
       onOptimizeDelta: (): Unsub => () => {},
     },

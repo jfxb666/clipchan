@@ -402,14 +402,16 @@ export interface OptimizeResult {
 export interface AssistRequest {
   /** 用哪个 AI provider；id 必须已配置且有 Key。 */
   providerId: string;
-  /** 六个动作之一；非法值由主进程拒绝。 */
-  action: 'translate' | 'summarize' | 'rewrite' | 'explain' | 'extract' | 'tags';
+  /** 动作 id；内置六动作之外还有 'custom'（v1.2 D1，用户固化的提示词）。非法值由主进程拒绝。 */
+  action: 'translate' | 'summarize' | 'rewrite' | 'explain' | 'extract' | 'tags' | 'custom';
   /** 原文。空串由主进程拒绝（没有素材可处理）。 */
   text: string;
   /** 只有 action === 'translate' 时有意义：目标语言 id（如 'en'）。其余动作忽略。 */
   targetLang?: string;
   /** 用户的额外要求，可为空。 */
   extra?: string;
+  /** 只有 action === 'custom' 时有意义：自定义动作的展示名与提示词。缺提示词由主进程拒绝。 */
+  custom?: { name: string; prompt: string };
 }
 
 /** 一次剪贴板 AI 助手的结果（v1.0.0 第 ⑤ 项）。 */
@@ -418,6 +420,28 @@ export interface AssistResult {
   text: string;
   /** true = 模型没按 <result> 契约输出，正文是整段回复的兜底（界面要提示）。 */
   degraded: boolean;
+}
+
+/**
+ * 用户固化的自定义 AI 动作（v1.2 D1）。
+ *
+ * ★ 持久化走 KV（键 'aiCustomActions'，与 aiProviders 同款 getSettingValue/setSettingValue），
+ *   **不能加进 Settings 类型**——sanitizeSettings 只认 Settings 里声明过的键，
+ *   进了那里反而会在落库时被剥掉。
+ */
+export interface CustomAction {
+  id: string;
+  /** 按钮文案；trim 后非空且 ≤12 字。 */
+  name: string;
+  /** 发给模型的提示词（system）；trim 后非空且 ≤2000 字符。 */
+  prompt: string;
+}
+
+/** 保存自定义动作的入参：id 缺省 = 新增（主进程分配 id）；带了就覆盖那条（upsert）。 */
+export interface CustomActionInput {
+  id?: string;
+  name: string;
+  prompt: string;
 }
 
 /**
@@ -640,8 +664,14 @@ export interface ClipchanApi {
     optimize(req: OptimizeRequest): Promise<OptimizeResult>;
     /** 中断一次在途的优化请求（按 requestId）；没有在途请求时静默返回。 */
     cancel(requestId: string): Promise<void>;
-    /** 剪贴板 AI 助手：翻译/总结/改写/解释/提取要点（v1.0.0 第 ⑤ 项）。 */
+    /** 剪贴板 AI 助手：翻译/总结/改写/解释/提取要点 + 自定义动作（v1.0.0 第 ⑤ 项 / v1.2 D1）。 */
     assist(req: AssistRequest): Promise<AssistResult>;
+    /** 自定义 AI 动作（v1.2 D1）：列表存在 KV 里（键 'aiCustomActions'），与 snippets 同范式。 */
+    listCustomActions(): Promise<CustomAction[]>;
+    /** 新增或覆盖一条；返回变更后的整表（上限 12 条，name ≤12 字、prompt ≤2000 字符）。 */
+    saveCustomAction(input: CustomActionInput): Promise<CustomAction[]>;
+    /** 按 id 删除一条；返回变更后的整表。 */
+    removeCustomAction(id: string): Promise<CustomAction[]>;
     /** 只投影 id/name/description（rules 不出主进程）。 */
     scenes(): Promise<{ id: string; name: string; description: string }[]>;
     /** 把优化结果写进剪贴板并贴回目标窗口（不进历史、不刷新排序）。 */

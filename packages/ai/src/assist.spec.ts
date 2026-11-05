@@ -4,10 +4,12 @@ import {
   ASSIST_LANGS,
   assist,
   assistActionById,
+  buildAssistMessages,
   buildAssistPrompt,
   parseAssist,
   parseTagSuggestions,
   type AssistActionId,
+  type AssistInput,
 } from './assist';
 import { DEFAULT_TIMEOUT_MS } from './optimize';
 import type { ChatMessage, ProviderAdapter, ProviderConfig } from './types';
@@ -140,6 +142,57 @@ describe('buildAssistPrompt', () => {
     expect(close).toBeGreaterThan(open);
     expect(at).toBeGreaterThan(open);
     expect(at).toBeLessThan(close);
+  });
+});
+
+describe('自定义 AI 动作（v1.2 D1）', () => {
+  it('★ custom 动作用用户提示词组织请求（不复用内置 taskLines）', () => {
+    const messages = buildAssistMessages({
+      action: 'custom',
+      text: '正文',
+      custom: { name: '周报', prompt: '把正文整理成周报' },
+    });
+    expect(messages[0]?.content).toContain('把正文整理成周报');
+    // user 就是原文本身：任务说明全在 system（用户提示词）里，user 不再套模板。
+    expect(messages[1]?.content).toBe('正文');
+  });
+
+  it('★ custom 缺 prompt 时请求被拒（防手滑发空指令）', () => {
+    expect(() =>
+      buildAssistMessages({ action: 'custom', text: 'x', custom: { name: '', prompt: '  ' } }),
+    ).toThrow();
+    // custom 字段整个没传同样拒绝。
+    expect(() => buildAssistMessages({ action: 'custom', text: 'x' })).toThrow();
+  });
+
+  it('custom 提示词超过 2000 码点被拒，正好 2000 放行', () => {
+    expect(() =>
+      buildAssistMessages({ action: 'custom', text: 'x', custom: { name: '长', prompt: '好'.repeat(2001) } }),
+    ).toThrow(/2000/);
+    expect(() =>
+      buildAssistMessages({ action: 'custom', text: 'x', custom: { name: '正好', prompt: '好'.repeat(2000) } }),
+    ).not.toThrow();
+  });
+
+  it('custom 提示词两端的空白被 trim 后再用', () => {
+    const messages = buildAssistMessages({
+      action: 'custom',
+      text: '正文',
+      custom: { name: '周报', prompt: '  把正文整理成周报  ' },
+    });
+    expect(messages[0]?.content.startsWith('把正文整理成周报')).toBe(true);
+  });
+
+  it('内置六动作与 buildAssistPrompt 逐字一致（抽取不改变行为）', () => {
+    for (const action of EXPECTED_IDS) {
+      const input: AssistInput = {
+        action,
+        text: TEXT,
+        ...(action === 'translate' ? { targetLang: 'en' } : {}),
+        ...(action === 'summarize' ? { extra: '控制在 50 字内' } : {}),
+      };
+      expect(buildAssistMessages(input)).toEqual(buildAssistPrompt(input));
+    }
   });
 });
 

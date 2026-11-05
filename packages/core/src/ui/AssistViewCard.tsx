@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Copy, Play, Save, Square, X } from 'lucide-react';
-import type { AiProvider, AssistRequest, AssistResult } from '../types';
+import type { AiProvider, AssistRequest, AssistResult, CustomAction } from '../types';
+import { getPlatform } from '../platform/adapter';
 import { aiErrorMessage } from './aiProviderForm';
 import {
   ASSIST_ACTION_OPTIONS,
@@ -11,18 +12,21 @@ import {
   degradedHint,
   truncateSource,
 } from './assistView';
+import { customPromptSummary } from './customActions';
 import { cn } from './util';
 
 /**
  * 剪贴板 AI 助手面板（v1.0.0 第 ⑤ 项）。
- * 把原来的「提示词优化」扩成右键通用 AI 操作：翻译 / 总结 / 改写 / 解释 / 提取要点。
+ * 把原来的「提示词优化」扩成右键通用 AI 操作：翻译 / 总结 / 改写 / 解释 / 提取要点，
+ * 外加设置里固化的自定义动作（v1.2 D1）。
  *
  * ★ 文件名带 ViewCard 后缀（与 OptimizeViewCard.tsx 同一处理）：纯逻辑模块
  *   assistView.ts 与 "AssistView.tsx" 只差大小写，大小写不敏感的文件系统上 TS 会把
  *   两个名字解析成同一个文件（TS1149）。
  *
- * 与 SettingsView / OptimizeView 同风格：provider 列表与全部平台动作由 App 注入，
- * 组件自己不 getPlatform()，便于静态检查与移动端复用。
+ * 与 SettingsView / OptimizeView 同风格：provider 列表与执行动作由 App 注入。
+ * ★ 唯一例外（v1.2 D1）：自定义动作列表在挂载时自己经 getPlatform() 读一次——
+ *   它是只读快照（面板每次打开都重新挂载），不需要走 App 的全局状态，App.tsx 不必为此接线。
  */
 export interface AssistViewProps {
   /** 原文（打开面板时由调用方从记录里取全文本）。 */
@@ -54,6 +58,9 @@ function initialProviderId(providers: AiProvider[]): string {
   return withKey?.id ?? providers[0]?.id ?? '';
 }
 
+/** 空列表兜底：读不到（非 Electron / 手机端）就显示空态提示，不打扰用户。 */
+const EMPTY_CUSTOM_ACTIONS: CustomAction[] = [];
+
 export function AssistView({
   source,
   providers,
@@ -66,17 +73,41 @@ export function AssistView({
 }: AssistViewProps) {
   const [providerId, setProviderId] = useState(() => initialProviderId(providers));
   const [action, setAction] = useState<AssistRequest['action']>('translate');
+  /** 自定义动作的选中 id；null = 选中的是内置动作（与 action 互斥，两态只活一个）。 */
+  const [customId, setCustomId] = useState<string | null>(null);
   /** 目标语言：只在翻译时渲染，切换动作时保留原值（用户切回来还在）。 */
   const [targetLang, setTargetLang] = useState(() => defaultTargetLang(source));
   const [extra, setExtra] = useState('');
   const [result, setResult] = useState<AssistResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  /**
+   * 自定义动作列表：null = 还没读到（不渲染那一组，避免闪「空态提示」），
+   * [] = 读到了但用户还没配（显示静默提示），有值 = 渲染按钮。
+   */
+  const [customActions, setCustomActions] = useState<CustomAction[] | null>(null);
 
   // provider 列表由 App 维护：删掉当前选中的那个之后要落到还存在的第一个。
   useEffect(() => {
     setProviderId((prev) => (providers.some((p) => p.id === prev) ? prev : initialProviderId(providers)));
   }, [providers]);
+
+  // 自定义动作（v1.2 D1）：面板每次打开都重新挂载，挂载时读一次就够。
+  // 读不到（浏览器预览 / 手机端如实 reject）就当空列表，走空态提示而不是报错。
+  useEffect(() => {
+    let alive = true;
+    getPlatform()
+      .ai.listCustomActions()
+      .then((list) => {
+        if (alive) setCustomActions(list);
+      })
+      .catch(() => {
+        if (alive) setCustomActions(EMPTY_CUSTOM_ACTIONS);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // 换一条记录重新打开面板：原文变了就把上一次的结果与语言猜测一起换掉。
   useEffect(() => {
@@ -112,11 +143,18 @@ export function AssistView({
     setError(null);
     setRunning(true);
     try {
-      const req: AssistRequest = { providerId, action, text: source };
-      // 只有翻译带目标语言；其余动作主进程会忽略，传了反而容易让人以为它生效了。
-      if (assistNeedsLang(action)) req.targetLang = targetLang;
-      const trimmedExtra = extra.trim();
-      if (trimmedExtra !== '') req.extra = trimmedExtra;
+      const custom = customId !== null ? (customActions?.find((c) => c.id === customId) ?? null) : null;
+      // v1.2 D1：自定义动作与内置动作走同一条 runAssist 流水线（错误路径共用），
+      // 只是请求里 action='custom' 且带上固化的提示词；targetLang / extra 都不往下传。
+      const req: AssistRequest = custom
+        ? { providerId, action: 'custom', text: source, custom: { name: custom.name, prompt: custom.prompt } }
+        : { providerId, action, text: source };
+      if (!custom) {
+        // 只有翻译带目标语言；其余动作主进程会忽略，传了反而容易让人以为它生效了。
+        if (assistNeedsLang(action)) req.targetLang = targetLang;
+        const trimmedExtra = extra.trim();
+        if (trimmedExtra !== '') req.extra = trimmedExtra;
+      }
       const res = await onAssist(req);
       setResult(res);
     } catch (err) {
@@ -180,17 +218,20 @@ export function AssistView({
               ))}
             </select>
 
-            {/* 五个动作：横向一排，选中态用 accent（与 Toast 的 warn 同一套配色）。 */}
+            {/* 五个内置动作：横向一排，选中态用 accent（与 Toast 的 warn 同一套配色）。 */}
             <div className="flex shrink-0 items-center gap-[2px] rounded-button border border-line bg-surface-2 p-[2px]">
               {ASSIST_ACTION_OPTIONS.map((option) => (
                 <button
                   key={option.id}
                   type="button"
                   title={option.hint}
-                  onClick={() => setAction(option.id)}
+                  onClick={() => {
+                    setAction(option.id);
+                    setCustomId(null);
+                  }}
                   className={cn(
                     'rounded-[9px] px-snug py-[3px] text-[11px] transition-colors',
-                    action === option.id
+                    customId === null && action === option.id
                       ? 'bg-[var(--cc-accent-soft)] font-medium text-[var(--cc-accent)]'
                       : 'text-ink-2 hover:text-ink',
                   )}
@@ -200,8 +241,33 @@ export function AssistView({
               ))}
             </div>
 
-            {/* 只有翻译用得到目标语言；切到别的动作时这个 select 只是不渲染，值还留着。 */}
-            {assistNeedsLang(action) ? (
+            {/* 自定义动作（v1.2 D1）：单独一组，按钮文字就是动作名，没有目标语言。
+                列表还没读到时不渲染（避免闪空态）；读到但为空给一条静默提示。 */}
+            {customActions === null ? null : customActions.length === 0 ? (
+              <p className="shrink-0 text-[11px] text-ink-3">在设置 → AI 自定义动作里添加你的专属动作</p>
+            ) : (
+              <div className="flex shrink-0 items-center gap-[2px] rounded-button border border-line bg-surface-2 p-[2px]">
+                {customActions.map((custom) => (
+                  <button
+                    key={custom.id}
+                    type="button"
+                    title={customPromptSummary(custom.prompt)}
+                    onClick={() => setCustomId(custom.id)}
+                    className={cn(
+                      'rounded-[9px] px-snug py-[3px] text-[11px] transition-colors',
+                      customId === custom.id
+                        ? 'bg-[var(--cc-accent-soft)] font-medium text-[var(--cc-accent)]'
+                        : 'text-ink-2 hover:text-ink',
+                    )}
+                  >
+                    {custom.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* 只有内置的翻译用得到目标语言；切到别的动作时这个 select 只是不渲染，值还留着。 */}
+            {customId === null && assistNeedsLang(action) ? (
               <select
                 value={targetLang}
                 onChange={(event) => setTargetLang(event.target.value)}
@@ -218,13 +284,20 @@ export function AssistView({
           </div>
 
           <div className="flex shrink-0 items-center gap-snug px-base pt-tight">
-            <input
-              value={extra}
-              onChange={(event) => setExtra(event.target.value)}
-              placeholder="可选的额外要求（例如：更口语一点）"
-              className="min-w-0 flex-1 rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-border-strong)]"
-              aria-label="额外要求"
-            />
+            {customId === null ? (
+              <input
+                value={extra}
+                onChange={(event) => setExtra(event.target.value)}
+                placeholder="可选的额外要求（例如：更口语一点）"
+                className="min-w-0 flex-1 rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-border-strong)]"
+                aria-label="额外要求"
+              />
+            ) : (
+              // 自定义动作的提示词在设置里固化：额外要求框对它不生效，不如藏起来不误导。
+              <p className="min-w-0 flex-1 truncate text-[11px] text-ink-3">
+                提示词在设置 → AI 自定义动作里维护
+              </p>
+            )}
             {/* ★ 不做真取消：主进程这版没有 cancel 通道，所以运行中只置灰并写明正在处理，不骗用户。 */}
             <button
               type="button"

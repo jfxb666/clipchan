@@ -9,7 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import { BUILTIN_SCENES, DEFAULT_TIMEOUT_MS, assistActionById, sceneById, toAiError } from '@clipchan/ai';
 import type { AiProtocol, AssistInput, AssistResult, OptimizeInput, OptimizeResult, ProviderAdapter, ProviderConfig } from '@clipchan/ai';
-import type { AiError, AiProvider, AiProviderInput, AssistRequest, OptimizeRequest } from '@clipchan/core';
+import type { AiError, AiProvider, AiProviderInput, AssistRequest, CustomAction, CustomActionInput, OptimizeRequest } from '@clipchan/core';
 import { CH } from './channels';
 import { needsSealing } from './keyvault';
 import type { SecretBox } from './keyvault';
@@ -43,6 +43,46 @@ export interface AiDeps {
 /** provider 元数据在 KV 里的键；Key 拆成 aiKey:<providerId> 单独放。 */
 export const PROVIDERS_KEY = 'aiProviders';
 export const keyKey = (id: string): string => 'aiKey:' + id;
+
+/**
+ * 自定义 AI 动作（v1.2 D1）在 KV 里的键，与 aiProviders 同款 getSettingValue/setSettingValue 读写。
+ * ★ 注释（计划原文）：不能进 Settings 类型，否则 sanitizeSettings 会把它剥掉——
+ *   Settings 的清洗只认类型里声明过的键，KV 直存的键必须绕开那一层。
+ */
+export const CUSTOM_ACTIONS_KEY = 'aiCustomActions';
+
+/** 上限：12 条、name ≤12 字、prompt ≤2000 字符。与 ai 包 CUSTOM_PROMPT_MAX_CODEPOINTS、core 的 ui/customActions.ts 同一口径，三处别各改各的。 */
+export const CUSTOM_ACTIONS_MAX = 12;
+export const CUSTOM_NAME_MAX_CODEPOINTS = 12;
+export const CUSTOM_PROMPT_MAX_CODEPOINTS = 2000;
+
+/** 按码点数长度：中文与 emoji 都不会被数成半个（与 db 层的标签截断同一考虑）。 */
+function codepointLength(s: string): number {
+  return [...s].length;
+}
+
+/**
+ * 清洗自定义动作列表（读 KV 用）：单条损坏只丢这条，不让整个列表消失（与 readProviders 的降级路径同一考虑）。
+ * ★ 写入前 saveCustomAction 自己再做严格校验（超限抛中文错）；这里是「库里已经有的数据」的兜底，
+ *   坏行直接跳过而不是抛——列表读不出来会把设置页与助手面板一起拖崩。
+ */
+export function sanitizeCustomActions(raw: unknown): CustomAction[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CustomAction[] = [];
+  for (const row of raw) {
+    if (!isRecord(row)) continue;
+    const id = typeof row.id === 'string' ? row.id.trim() : '';
+    const name = typeof row.name === 'string' ? row.name.trim() : '';
+    const prompt = typeof row.prompt === 'string' ? row.prompt.trim() : '';
+    if (id === '' || name === '' || prompt === '') continue;
+    if (codepointLength(name) > CUSTOM_NAME_MAX_CODEPOINTS) continue;
+    if (codepointLength(prompt) > CUSTOM_PROMPT_MAX_CODEPOINTS) continue;
+    out.push({ id, name, prompt });
+    // 条数上限在这里也兜一次：库里被手工塞爆时只取前 12 条。
+    if (out.length >= CUSTOM_ACTIONS_MAX) break;
+  }
+  return out;
+}
 
 const PROTOCOLS: AiProtocol[] = ['openai-compat', 'anthropic', 'gemini'];
 const NO_PROVIDER = '请先在设置里添加 AI 模型';
@@ -152,6 +192,10 @@ export interface AiApi {
   test(id: string): Promise<{ ok: boolean; error?: AiError; model?: string }>;
   optimize(req: OptimizeRequest): Promise<OptimizeResult>;
   assist(req: AssistRequest): Promise<AssistResult>;
+  /** 自定义 AI 动作（v1.2 D1）：列表/新增或覆盖/删除，写操作回变更后的整表（与 snippets 同范式）。 */
+  listCustomActions(): Promise<CustomAction[]>;
+  saveCustomAction(input: CustomActionInput): Promise<CustomAction[]>;
+  removeCustomAction(id: string): Promise<CustomAction[]>;
   /** 中断在途请求（按 requestId）；没有在途请求时静默返回（重复点「停止」不该报错）。 */
   cancel(requestId: string): Promise<void>;
   scenes(): Promise<{ id: string; name: string; description: string }[]>;
@@ -188,6 +232,43 @@ export function createAi(deps: AiDeps): AiApi {
 
   const api: AiApi = {
     listProviders: async () => list(),
+
+    // ── 自定义 AI 动作（v1.2 D1）───────────────────────────────────────────────
+    // KV 直存（CUSTOM_ACTIONS_KEY），不走 Settings：见 CUSTOM_ACTIONS_KEY 处的 ★ 注释。
+
+    listCustomActions: async () => sanitizeCustomActions(kv.getSettingValue(CUSTOM_ACTIONS_KEY)),
+
+    saveCustomAction: async (incoming) => {
+      const input = incoming ?? ({} as CustomActionInput);
+      const name = typeof input.name === 'string' ? input.name.trim() : '';
+      const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
+      // ★ 超限抛中文错误而不是静默截断：设置页有同规则的客户端校验，走到这里的超限值
+      //   只可能是绕过界面直调 IPC 的，明确拒绝比悄悄改写更诚实。
+      if (name === '') throw err('动作名称不能为空');
+      if (codepointLength(name) > CUSTOM_NAME_MAX_CODEPOINTS) throw err('动作名称不能超过 12 个字');
+      if (prompt === '') throw err('提示词不能为空');
+      if (codepointLength(prompt) > CUSTOM_PROMPT_MAX_CODEPOINTS) throw err('提示词不能超过 2000 个字符');
+      const rows = sanitizeCustomActions(kv.getSettingValue(CUSTOM_ACTIONS_KEY));
+      // id 口径与 folders 一致：randomUUID 去横线。
+      const id = typeof input.id === 'string' && input.id.trim() !== '' ? input.id.trim() : randomUUID().replace(/-/g, '');
+      const next: CustomAction = { id, name, prompt };
+      const at = rows.findIndex((r) => r.id === id);
+      if (at >= 0) {
+        rows[at] = next;
+      } else {
+        if (rows.length >= CUSTOM_ACTIONS_MAX) throw err('自定义动作最多 ' + CUSTOM_ACTIONS_MAX + ' 条，请先删除一条再添加');
+        rows.push(next);
+      }
+      kv.setSettingValue(CUSTOM_ACTIONS_KEY, rows);
+      return rows;
+    },
+
+    removeCustomAction: async (id) => {
+      const target = String(id);
+      const rows = sanitizeCustomActions(kv.getSettingValue(CUSTOM_ACTIONS_KEY)).filter((r) => r.id !== target);
+      kv.setSettingValue(CUSTOM_ACTIONS_KEY, rows);
+      return rows;
+    },
 
     saveProvider: async (p) => {
       const incoming = p ?? ({} as AiProviderInput);
@@ -278,21 +359,37 @@ export function createAi(deps: AiDeps): AiApi {
     assist: async (req) => {
       const text = typeof req.text === 'string' ? req.text : '';
       if (text.trim() === '') throw err('没有可处理的文本');
-      // ★ 动作是白名单：界面按 ASSIST_ACTIONS 出菜单，认不出就是调用方传错了，别让它落到提示词里。
-      const action = assistActionById(String(req.action));
-      if (!action) throw err('不认识的 AI 动作：' + req.action);
-      const { cfg, key } = requireProvider(req.providerId);
       // ★ targetLang 只对 translate 有意义：其余动作即使 req 带了也不往下传，
       //   否则提示词里会冒出一句「翻译成 X」污染总结/改写。extra 同理，空白等于没传。
       const targetLang = typeof req.targetLang === 'string' ? req.targetLang.trim() : '';
       const extra = typeof req.extra === 'string' ? req.extra.trim() : '';
-      try {
-        const r = await assist(adapterFor(cfg.protocol), cfg, key, {
-          action: action.id,
+      const rawAction = String(req.action);
+      const builtin = assistActionById(rawAction);
+      let input: AssistInput;
+      if (rawAction === 'custom') {
+        // v1.2 D1：'custom' 是白名单之外唯一放行的动作——它是用户固化的提示词，
+        // 走同一条 assist 流水线；提示词缺失在这里先拦（渲染层拿到的是看得懂的中文错误），
+        // ai 包 buildAssistMessages 里还有同一规则的兜底。
+        const prompt = typeof req.custom?.prompt === 'string' ? req.custom.prompt.trim() : '';
+        if (prompt === '') throw err('自定义动作缺少提示词');
+        input = {
+          action: 'custom',
           text,
-          ...(action.needsTargetLang && targetLang !== '' ? { targetLang } : {}),
+          custom: { name: typeof req.custom?.name === 'string' ? req.custom.name.trim() : '', prompt },
+        };
+      } else {
+        // ★ 动作是白名单：界面按 ASSIST_ACTIONS 出菜单，认不出就是调用方传错了，别让它落到提示词里。
+        if (!builtin) throw err('不认识的 AI 动作：' + req.action);
+        input = {
+          action: builtin.id,
+          text,
+          ...(builtin.needsTargetLang && targetLang !== '' ? { targetLang } : {}),
           ...(extra !== '' ? { extra } : {}),
-        });
+        };
+      }
+      const { cfg, key } = requireProvider(req.providerId);
+      try {
+        const r = await assist(adapterFor(cfg.protocol), cfg, key, input);
         // ★ degraded 必须透传：界面要靠它提示"模型没按格式来，正文是兜底"。
         return { text: r.text, degraded: r.degraded };
       } catch (e) {
@@ -321,6 +418,9 @@ export function createAi(deps: AiDeps): AiApi {
         [CH.ai.test]: (_e: unknown, id: string) => api.test(String(id)),
         [CH.ai.optimize]: (_e: unknown, req: OptimizeRequest) => api.optimize(req),
         [CH.ai.assist]: (_e: unknown, req: AssistRequest) => api.assist(req),
+        [CH.ai.customActions]: () => api.listCustomActions(),
+        [CH.ai.saveCustomAction]: (_e: unknown, input: CustomActionInput) => api.saveCustomAction(input),
+        [CH.ai.removeCustomAction]: (_e: unknown, id: string) => api.removeCustomAction(String(id)),
         [CH.ai.cancel]: (_e: unknown, requestId: string) => api.cancel(String(requestId)),
         [CH.ai.scenes]: () => api.scenes(),
       };

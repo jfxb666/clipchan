@@ -78,6 +78,10 @@ const EXPECTED = {
     'history',
     'historyRemove',
     'historyClear',
+    // v1.2 D1：自定义 AI 动作
+    'customActions',
+    'saveCustomAction',
+    'removeCustomAction',
   ],
   // v0.5.0 T1：截图与 OCR 两组新通道
   capture: ['begin', 'target', 'finish', 'cancel'],
@@ -276,5 +280,30 @@ describe('v0.6.0：批量 / 纯文本 / 片段 / 自动更新通道', () => {
     }
     expect(PRELOAD_SRC).toMatch(/onUpdate:\s*\(cb:[^)]*\)[^\n]*on\(EV\.updateStatus, cb\)/);
     expect(PRELOAD_SRC).toMatch(/onChanged:\s*\(cb:[^)]*\)[^\n]*on\(EV\.snippetsChanged, cb\)/);
+  });
+});
+
+describe('v1.2 D1：自定义 AI 动作通道', () => {
+  /** 与前面几组同样的四重同步：通道键 → ALL_INVOKE_CHANNELS → preload 方法 → 不手写字符串。
+   *  ★ GET 的通道键是 customActions，preload 方法名是 listCustomActions（对齐 core 的 ClipchanApi）。 */
+  const D1: [string, string, string][] = [
+    ['customActions', 'ai:customActions', 'listCustomActions'],
+    ['saveCustomAction', 'ai:saveCustomAction', 'saveCustomAction'],
+    ['removeCustomAction', 'ai:removeCustomAction', 'removeCustomAction'],
+  ];
+
+  it('① 通道名逐条对齐，② 全部进了 ALL_INVOKE_CHANNELS（ai 整组展平）', () => {
+    for (const [key, channel] of D1) {
+      expect(CH.ai[key as keyof typeof CH.ai], '缺少通道键 ' + key).toBe(channel);
+      expect(ALL_INVOKE_CHANNELS, channel + ' 没进 ALL_INVOKE_CHANNELS').toContain(channel);
+    }
+  });
+
+  it('③ preload 里三个新方法各自 invoke 到对应常量（不是手写字符串）', () => {
+    for (const [key, channel, method] of D1) {
+      const re = new RegExp(method + ':[^\\n]*ipcRenderer\\.invoke\\(CH\\.ai\\.' + key);
+      expect(PRELOAD_SRC, 'preload 缺少 ' + method + ' 或没走 CH.ai.' + key).toMatch(re);
+      expect(PRELOAD_SRC, '手写了通道字符串 ' + channel).not.toContain("'" + channel + "'");
+    }
   });
 });

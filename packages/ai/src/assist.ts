@@ -1,8 +1,21 @@
 import { DEFAULT_TIMEOUT_MS } from './optimize';
 import type { ChatMessage, ProviderAdapter, ProviderConfig } from './types';
 
-/** 一次 AI 助手操作的定义。id 是稳定标识（历史记录与 IPC 都按它走），不要用中文当 id。 */
-export type AssistActionId = 'translate' | 'summarize' | 'rewrite' | 'explain' | 'extract' | 'tags';
+/**
+ * 一次 AI 助手操作的定义。id 是稳定标识（历史记录与 IPC 都按它走），不要用中文当 id。
+ * ★ 'custom'（v1.2 D1）不进 ASSIST_ACTIONS 白名单：它是用户在设置里固化的提示词，
+ *   没有内置的 taskLines，也不会自动出现在右键菜单里——菜单/面板按钮由调用方自己拼。
+ */
+export type AssistActionId = 'translate' | 'summarize' | 'rewrite' | 'explain' | 'extract' | 'tags' | 'custom';
+
+/** 内置动作（custom 之外）：内置的提示词模板只对这六个有意义。 */
+export type AssistBuiltinActionId = Exclude<AssistActionId, 'custom'>;
+
+/** 自定义动作携带的用户提示词（v1.2 D1）。name 只是展示用，真正进请求的是 prompt。 */
+export interface AssistCustomSpec {
+  name: string;
+  prompt: string;
+}
 
 export interface AssistAction {
   id: AssistActionId;
@@ -87,6 +100,8 @@ export interface AssistInput {
   targetLang?: string;
   /** 用户附加要求，拼在提示词末尾；空串/未传时不出现这一段 */
   extra?: string;
+  /** 仅 action === 'custom' 用：用户固化的提示词（v1.2 D1）。其余动作忽略。 */
+  custom?: AssistCustomSpec;
 }
 
 export interface AssistResult {
@@ -120,8 +135,9 @@ function langNameOf(id: string): string {
  * ★ 分开写而不是「一个模板 + 一个动词」：五种活儿的约束点完全不同
  *   （翻译管译法、总结管取舍、改写管不改事实、解释管受众、提取管格式），
  *   模板化的提示词会让模型把总结写成翻译，实测差异很大。
+ * ★ 参数是内置六动作（custom 没有内置模板，走 buildAssistMessages 的另一条路）。
  */
-function taskLines(action: AssistActionId, langName: string): string[] {
+function taskLines(action: AssistBuiltinActionId, langName: string): string[] {
   switch (action) {
     case 'translate':
       return [
@@ -170,12 +186,42 @@ function materialBlock(text: string): string[] {
   return ['原文：', '"""', text, '"""'];
 }
 
+/** 自定义动作提示词的上限（码点）：与主进程 sanitizeCustomActions 同一口径，两处别各改各的。 */
+export const CUSTOM_PROMPT_MAX_CODEPOINTS = 2000;
+
+/**
+ * 组消息（assist() 流水线的组消息入口，v1.2 D1 起内置与自定义动作都从这走）。
+ * ★ 内置动作原样转发给 buildAssistPrompt——抽取不改变行为，一个字节都不许漂。
+ * ★ 自定义动作：system = 用户提示词（trim 后非空，≤2000 码点，否则抛中文错误），
+ *   user = 纯原文。提示词是用户自己写的任务说明，不能再往 user 里套内置模板；
+ *   但输出契约（<result>）必须保留——解析层与界面都按它工作，否则每次运行都会降级。
+ */
+export function buildAssistMessages(input: AssistInput): ChatMessage[] {
+  if (input.action === 'custom') {
+    const prompt = typeof input.custom?.prompt === 'string' ? input.custom.prompt.trim() : '';
+    if (prompt === '') throw new Error('自定义动作缺少提示词：请在设置 → AI 自定义动作里补上');
+    if ([...prompt].length > CUSTOM_PROMPT_MAX_CODEPOINTS) {
+      throw new Error('自定义动作的提示词不能超过 2000 个字符，请精简后再试');
+    }
+    return [
+      { role: 'system', content: [prompt, ...FORMAT_CONTRACT].join('\n\n') },
+      { role: 'user', content: input.text },
+    ];
+  }
+  return buildAssistPrompt(input);
+}
+
 /**
  * 组提示词。返回两条消息：system 是「你是一个只做这一件事的助手」的角色约束，
  * user 是「任务说明 + 输出契约 + 原文」。
  * ★ 原文必须用 """ 围起来，避免原文里的指令被当成任务执行（与 meta-prompt.ts 的 materialBlock 同一考虑）。
+ * ★ 只接受内置动作：custom 没有内置模板，请走 buildAssistMessages（这里是防呆闸，
+ *   不让 custom 静默落进内置模板里组出一条空任务）。
  */
 export function buildAssistPrompt(input: AssistInput): ChatMessage[] {
+  if (input.action === 'custom') {
+    throw new Error('内置提示词模板不处理自定义动作：请改用 buildAssistMessages');
+  }
   const langName = langNameOf(input.targetLang ?? 'zh-CN');
 
   const userParts = [
@@ -293,7 +339,7 @@ export async function assist(
   input: AssistInput,
   opts?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<AssistResult> {
-  const messages: ChatMessage[] = buildAssistPrompt(input);
+  const messages: ChatMessage[] = buildAssistMessages(input);
 
   const raw = await adapter.chat(cfg, key, messages, {
     signal: opts?.signal,

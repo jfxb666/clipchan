@@ -7,9 +7,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import { optimize as runOptimize } from '@clipchan/ai';
 import type { AssistInput, AssistResult, ProviderAdapter, ProviderConfig } from '@clipchan/ai';
-import type { AiProvider, AiProviderInput } from '@clipchan/core';
+import type { AiProvider, AiProviderInput, CustomAction } from '@clipchan/core';
 import { ALL_INVOKE_CHANNELS, CH, EV } from './channels';
-import { PROVIDERS_KEY, createAi, keyKey, maskKey } from './ai';
+import {
+  CUSTOM_ACTIONS_KEY,
+  CUSTOM_ACTIONS_MAX,
+  CUSTOM_NAME_MAX_CODEPOINTS,
+  CUSTOM_PROMPT_MAX_CODEPOINTS,
+  PROVIDERS_KEY,
+  createAi,
+  keyKey,
+  maskKey,
+  sanitizeCustomActions,
+} from './ai';
 import type { AiDeps, AiKv } from './ai';
 import { ENC_PREFIX, createSecretBox } from './keyvault';
 import type { SecretCrypto } from './keyvault';
@@ -559,6 +569,143 @@ describe('ai.assist：剪贴板 AI 助手（v1.0.0 第 ⑤ 项）', () => {
     );
     // 没配 provider 时不该广播，也不该假装成功（与 optimize 的既有断言一致）。
     expect(onChanged).not.toHaveBeenCalled();
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('自定义 AI 动作：sanitizeCustomActions（v1.2 D1）', () => {
+  it('★ 坏行只丢自己：非对象 / 缺字段 / 空白字段都跳过，好行保留', () => {
+    const rows = sanitizeCustomActions([
+      { id: 'a', name: '周报', prompt: '把正文整理成周报' },
+      null,
+      '不是对象',
+      { name: '没有 id', prompt: 'p' },
+      { id: 'b', name: '   ', prompt: 'p' },
+      { id: 'c', name: '没有提示词' },
+      { id: 'd', name: '名称超限', prompt: 'x'.repeat(CUSTOM_PROMPT_MAX_CODEPOINTS + 1) },
+      { id: 'e', name: 'x'.repeat(CUSTOM_NAME_MAX_CODEPOINTS + 1), prompt: 'p' },
+    ]);
+    expect(rows).toEqual([{ id: 'a', name: '周报', prompt: '把正文整理成周报' }]);
+  });
+
+  it('★ 不是数组返回空列表，条数最多 12 条', () => {
+    expect(sanitizeCustomActions(undefined)).toEqual([]);
+    expect(sanitizeCustomActions('aiCustomActions')).toEqual([]);
+    const many: CustomAction[] = Array.from({ length: CUSTOM_ACTIONS_MAX + 5 }, (_, i) => ({
+      id: String(i),
+      name: '名' + i,
+      prompt: 'p',
+    }));
+    expect(sanitizeCustomActions(many)).toHaveLength(CUSTOM_ACTIONS_MAX);
+  });
+
+  it('name / prompt 两端空白被 trim', () => {
+    expect(sanitizeCustomActions([{ id: ' a ', name: ' 周报 ', prompt: ' 整理成周报 ' }])).toEqual([
+      { id: 'a', name: '周报', prompt: '整理成周报' },
+    ]);
+  });
+});
+
+describe('自定义 AI 动作：KV 读写（v1.2 D1）', () => {
+  it('★ 新增分配去横线 id 并落 KV；保存回变更后的整表', async () => {
+    const { api, kv } = makeAi();
+    const list = await api.saveCustomAction({ name: '周报', prompt: '把正文整理成周报' });
+    expect(list).toHaveLength(1);
+    expect(list[0]!.name).toBe('周报');
+    // 与 folders 同口径：randomUUID 去横线 = 32 位十六进制。
+    expect(list[0]!.id).toMatch(/^[0-9a-f]{32}$/);
+    expect(kv.getSettingValue(CUSTOM_ACTIONS_KEY)).toEqual(list);
+  });
+
+  it('★ upsert：同 id 原位覆盖（不换位置不新增），无 id 追加到末尾', async () => {
+    const { api } = makeAi();
+    const first = await api.saveCustomAction({ name: '甲', prompt: 'p1' });
+    await api.saveCustomAction({ name: '乙', prompt: 'p2' });
+    const edited = await api.saveCustomAction({ id: first[0]!.id, name: '甲改', prompt: 'p3' });
+    expect(edited.map((r) => r.name)).toEqual(['甲改', '乙']);
+    expect(edited).toHaveLength(2);
+  });
+
+  it('★ 上限 12 条：第 13 条新增被拒（中文错误），编辑既有条目不受影响', async () => {
+    const { api } = makeAi();
+    for (let i = 0; i < CUSTOM_ACTIONS_MAX; i++) {
+      await api.saveCustomAction({ name: '动作' + i, prompt: 'p' });
+    }
+    await expect(api.saveCustomAction({ name: '超额', prompt: 'p' })).rejects.toThrow('最多 12 条');
+    // 编辑第 1 条（仍是 12 条）不该被条数上限挡住。
+    const rows = await api.listCustomActions();
+    const edited = await api.saveCustomAction({ id: rows[0]!.id, name: '改名', prompt: 'p' });
+    expect(edited).toHaveLength(CUSTOM_ACTIONS_MAX);
+    expect(edited[0]!.name).toBe('改名');
+  });
+
+  it('name / prompt 校验：空白与超限都抛中文错误，且不写 KV', async () => {
+    const { api, kv } = makeAi();
+    await expect(api.saveCustomAction({ name: '  ', prompt: 'p' })).rejects.toThrow('名称不能为空');
+    await expect(api.saveCustomAction({ name: '长'.repeat(CUSTOM_NAME_MAX_CODEPOINTS + 1), prompt: 'p' })).rejects.toThrow(
+      '不能超过 12 个字',
+    );
+    await expect(api.saveCustomAction({ name: '名', prompt: '' })).rejects.toThrow('提示词不能为空');
+    await expect(
+      api.saveCustomAction({ name: '名', prompt: '长'.repeat(CUSTOM_PROMPT_MAX_CODEPOINTS + 1) }),
+    ).rejects.toThrow('不能超过 2000 个字符');
+    await expect(api.saveCustomAction(undefined as never)).rejects.toThrow();
+    // 全部被拒：KV 里不该留下任何东西。
+    expect(kv.getSettingValue(CUSTOM_ACTIONS_KEY)).toBeUndefined();
+  });
+
+  it('remove 按 id 删除并回整表；删不存在的 id 返回原表不抛', async () => {
+    const { api } = makeAi();
+    const a = await api.saveCustomAction({ name: '甲', prompt: 'p1' });
+    await api.saveCustomAction({ name: '乙', prompt: 'p2' });
+    const after = await api.removeCustomAction(a[0]!.id);
+    expect(after.map((r) => r.name)).toEqual(['乙']);
+    const again = await api.removeCustomAction('从来没有过的 id');
+    expect(again.map((r) => r.name)).toEqual(['乙']);
+  });
+
+  it('库里是坏数据时列表降级为干净子集，不把设置页拖崩', async () => {
+    const { api } = makeAi({
+      [CUSTOM_ACTIONS_KEY]: [{ id: 'ok', name: '好', prompt: 'p' }, '坏行', { id: '' }],
+    });
+    expect(await api.listCustomActions()).toEqual([{ id: 'ok', name: '好', prompt: 'p' }]);
+  });
+});
+
+describe('ai.assist：自定义动作（v1.2 D1）', () => {
+  it('★ custom 请求原样转发：注入函数收到 action=custom 与用户提示词', async () => {
+    const spy = vi.fn<AiDeps['assist']>(async () => ({ text: '周报内容', degraded: false }));
+    const { api } = makeAi({}, undefined, undefined, spy);
+    await api.saveProvider(row({ apiKey: FULL_KEY }));
+
+    const res = await api.assist({
+      providerId: 'p1',
+      action: 'custom',
+      text: '一段原文',
+      custom: { name: '周报', prompt: '把正文整理成周报' },
+    });
+
+    expect(res).toEqual({ text: '周报内容', degraded: false });
+    const input = spy.mock.calls[0]![3] as AssistInput;
+    expect(input.action).toBe('custom');
+    expect(input.text).toBe('一段原文');
+    expect(input.custom).toEqual({ name: '周报', prompt: '把正文整理成周报' });
+    // targetLang / extra 对 custom 无意义，不该往下传。
+    expect(Object.prototype.hasOwnProperty.call(input, 'targetLang')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(input, 'extra')).toBe(false);
+  });
+
+  it('★ custom 缺提示词被拒，注入函数不被调用', async () => {
+    const spy = vi.fn<AiDeps['assist']>(async () => ({ text: 'x', degraded: false }));
+    const { api } = makeAi({}, undefined, undefined, spy);
+    await api.saveProvider(row({ apiKey: FULL_KEY }));
+
+    await expect(
+      api.assist({ providerId: 'p1', action: 'custom', text: 'x', custom: { name: '周报', prompt: '   ' } }),
+    ).rejects.toThrow('自定义动作缺少提示词');
+    await expect(api.assist({ providerId: 'p1', action: 'custom', text: 'x' })).rejects.toThrow(
+      '自定义动作缺少提示词',
+    );
     expect(spy).not.toHaveBeenCalled();
   });
 });

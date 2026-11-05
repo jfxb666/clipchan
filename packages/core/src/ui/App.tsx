@@ -16,6 +16,8 @@ import type {
   AiProvider,
   AiProviderInput,
   AssistRequest,
+  CustomAction,
+  CustomActionInput,
   OcrProgress,
   OcrResult,
   OcrStatus,
@@ -156,6 +158,9 @@ export function App() {
    */
   const [aiProviders, setAiProviders] = useState<AiProvider[]>([]);
 
+  /** 自定义 AI 动作（v1.2 D1）：主进程是唯一事实来源；只有设置页直接用（助手面板自己拉）。 */
+  const [aiCustomActions, setAiCustomActions] = useState<CustomAction[]>([]);
+
   /** 右键菜单落点；null = 不显示。 */
   const [menu, setMenu] = useState<MenuAnchor | null>(null);
   /**
@@ -264,6 +269,24 @@ export function App() {
     return () => {
       alive = false;
       off();
+    };
+  }, []);
+
+  // 自定义 AI 动作（v1.2 D1）：与 aiProviders 同一套读法，读一次即可——
+  // 写操作直接拿主进程返回的整表更新 state（没有专门的广播事件，单窗口也不需要）。
+  useEffect(() => {
+    const platform = getPlatform();
+    let alive = true;
+    platform.ai
+      .listCustomActions()
+      .then((list) => {
+        if (alive) setAiCustomActions(list);
+      })
+      .catch(() => {
+        /* 没有实现（浏览器预览 / 手机端）就保持空列表 */
+      });
+    return () => {
+      alive = false;
     };
   }, []);
 
@@ -986,6 +1009,18 @@ export function App() {
     setAiProviders(next);
   }, []);
 
+  // 设置页「AI 自定义动作」区的两个动作（v1.2 D1）：与 saveAiProvider 同一范式，
+  // 失败往上抛（由表单显示中文错误），成功直接采用主进程返回的整表。
+  const saveCustomAction = useCallback(async (input: CustomActionInput) => {
+    const next = await getPlatform().ai.saveCustomAction(input);
+    setAiCustomActions(next);
+  }, []);
+
+  const removeCustomAction = useCallback(async (id: string) => {
+    const next = await getPlatform().ai.removeCustomAction(id);
+    setAiCustomActions(next);
+  }, []);
+
   const testAiProvider = useCallback(
     (id: string): Promise<{ ok: boolean; error?: AiError; model?: string }> =>
       getPlatform().ai.test(id),
@@ -1263,6 +1298,9 @@ export function App() {
               onAiRemove={removeAiProvider}
               onAiTest={testAiProvider}
               onAiListModels={listAiModels}
+              aiCustomActions={aiCustomActions}
+              onCustomActionSave={saveCustomAction}
+              onCustomActionRemove={removeCustomAction}
               ocrStatus={ocrStatus}
               ocrProgress={ocrProgress}
               onOcrDownload={() => void downloadOcr()}

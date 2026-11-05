@@ -85,6 +85,10 @@ export const CH = {
     history: 'ai:history',
     historyRemove: 'ai:historyRemove',
     historyClear: 'ai:historyClear',
+    // v1.2 D1：自定义 AI 动作（KV 持久化）。写操作回变更后的整表（与 snippets 同范式）。
+    customActions: 'ai:customActions',
+    saveCustomAction: 'ai:saveCustomAction',
+    removeCustomAction: 'ai:removeCustomAction',
   },
   // ★ 截图 overlay 是独立渲染页面（capture.html），所以这四条与主窗口的 items.* 分开：
   //   它们服务的是一次性的截图会话，不是列表数据。

@@ -5,6 +5,8 @@ import type {
   AiProvider,
   AiProviderInput,
   Capabilities,
+  CustomAction,
+  CustomActionInput,
   GhostState,
   HotkeyStatus,
   OcrProgress,
@@ -19,6 +21,12 @@ import { autoStartClick, autoStartSettle, initialAutoStartToggle } from './autoS
 import { HotkeyRecorder } from './HotkeyRecorder';
 import { AiProviderForm } from './AiProviderFormCard';
 import { aiErrorMessage, protocolLabel } from './aiProviderForm';
+import {
+  CUSTOM_ACTIONS_MAX,
+  customActionsRemaining,
+  customPromptSummary,
+  validateCustomAction,
+} from './customActions';
 import { ocrProgressText, ocrStatusText } from './ocrView';
 import { canClickUpdate, updateButtonLabel, updateStatusText } from './updateView';
 import {
@@ -144,6 +152,88 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void
   );
 }
 
+/**
+ * 单条自定义动作的编辑表单（v1.2 D1）。
+ * 以 AiProviderForm 为模板的极简版：两个字段（名称 + 提示词），校验在 customActions.ts 纯函数里，
+ * 保存失败（主进程是最后一道闸）把中文错误显示在表单里。
+ */
+const CUSTOM_INPUT_CLASS =
+  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-primary)]';
+const CUSTOM_GHOST_BUTTON_CLASS =
+  'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
+const CUSTOM_PRIMARY_BUTTON_CLASS =
+  'shrink-0 rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+
+function CustomActionForm({
+  action,
+  onSave,
+  onCancel,
+}: {
+  /** 有值 = 编辑既有动作；无值 = 新增。 */
+  action?: CustomAction;
+  onSave: (input: CustomActionInput) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(action?.name ?? '');
+  const [prompt, setPrompt] = useState(action?.prompt ?? '');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function submit() {
+    const found = validateCustomAction({ name, prompt });
+    if (!found.ok) {
+      setError(found.error);
+      return;
+    }
+    setError(null);
+    setSaving(true);
+    try {
+      await onSave({ ...(action ? { id: action.id } : {}), name: found.name, prompt: found.prompt });
+    } catch (err) {
+      setError(aiErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-snug rounded-card border border-line bg-surface-2 px-snug py-snug">
+      <p className="text-[12px] font-semibold text-ink">{action ? '编辑动作' : '添加动作'}</p>
+
+      <label className="flex flex-col gap-[4px]">
+        <span className="text-[12px] text-ink">名称（按钮上显示，最多 12 个字）</span>
+        <input
+          className={CUSTOM_INPUT_CLASS}
+          value={name}
+          placeholder="例如 周报"
+          onChange={(e) => setName(e.target.value)}
+        />
+      </label>
+
+      <label className="flex flex-col gap-[4px]">
+        <span className="text-[12px] text-ink">提示词（发给模型的任务说明，最多 2000 字符）</span>
+        <textarea
+          className={cn(CUSTOM_INPUT_CLASS, 'min-h-[72px] resize-y leading-[1.6]')}
+          value={prompt}
+          placeholder="例如：把正文整理成一封周报，按「进展 / 风险 / 下周计划」分三段"
+          onChange={(e) => setPrompt(e.target.value)}
+        />
+      </label>
+
+      {error !== null ? <p className="text-[11px] leading-[1.6] text-red-400">{error}</p> : null}
+
+      <div className="flex items-center gap-snug">
+        <button type="button" className={CUSTOM_PRIMARY_BUTTON_CLASS} disabled={saving} onClick={() => void submit()}>
+          {saving ? '保存中…' : '保存'}
+        </button>
+        <button type="button" className={CUSTOM_GHOST_BUTTON_CLASS} onClick={onCancel}>
+          取消
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsView({
   settings,
   ghost,
@@ -165,6 +255,9 @@ export function SettingsView({
   onAiRemove,
   onAiTest,
   onAiListModels,
+  aiCustomActions,
+  onCustomActionSave,
+  onCustomActionRemove,
   ocrStatus,
   ocrProgress,
   onOcrDownload,
@@ -200,6 +293,11 @@ export function SettingsView({
   onAiTest: (id: string) => Promise<{ ok: boolean; error?: AiError; model?: string }>;
   /** 拉取模型列表；返回空数组或抛错时降级为手输，不报错。 */
   onAiListModels: (id: string) => Promise<string[]>;
+  /** v1.2 D1：自定义 AI 动作列表（主进程是唯一事实来源，KV 持久化）。 */
+  aiCustomActions: CustomAction[];
+  /** 新增或覆盖一条（App 内部用主进程返回的整表更新状态，这里只关心成败）。 */
+  onCustomActionSave: (input: CustomActionInput) => Promise<void>;
+  onCustomActionRemove: (id: string) => Promise<void>;
   /** 语言包就绪状态；null = 还没问过主进程（面板关着时就是 null）。 */
   ocrStatus: OcrStatus | null;
   /** 下载 / 识别进度；没有在途任务时为 null。 */
@@ -245,6 +343,10 @@ export function SettingsView({
   const [aiTesting, setAiTesting] = useState<string | null>(null);
   const [aiTestText, setAiTestText] = useState<Record<string, string>>({});
 
+  // 「AI 自定义动作」区（v1.2 D1）：'new' = 新增中，字符串 = 正在编辑的动作 id，null = 都没展开。
+  const [customEditing, setCustomEditing] = useState<'new' | string | null>(null);
+  const customEditingAction = aiCustomActions.find((c) => c.id === customEditing) ?? null;
+
   const aiEditingProvider = aiProviders.find((p) => p.id === aiEditing) ?? null;
 
   async function testProvider(id: string) {
@@ -275,6 +377,11 @@ export function SettingsView({
   async function removeProvider(id: string) {
     await onAiRemove(id);
     setAiEditing((current) => (current === id ? null : current));
+  }
+
+  async function removeCustomAction(id: string) {
+    await onCustomActionRemove(id);
+    setCustomEditing((current) => (current === id ? null : current));
   }
 
   return (
@@ -577,6 +684,69 @@ export function SettingsView({
               className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
             >
               添加模型
+            </button>
+          </Row>
+        )}
+      </Section>
+
+      <Section title="AI 自定义动作">
+        {aiCustomActions.length === 0 ? (
+          <p className="text-[11px] leading-[1.6] text-ink-3">
+            还没有自定义动作。把常用的提示词固化下来，AI 助手面板上就会多一个专属按钮。
+          </p>
+        ) : null}
+
+        {aiCustomActions.map((custom) => (
+          <div
+            key={custom.id}
+            className="flex items-center gap-snug rounded-card border border-line bg-surface-2 px-snug py-tight"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[12px] text-ink">{custom.name}</p>
+              <p className="truncate text-[11px] text-ink-3">{customPromptSummary(custom.prompt)}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCustomEditing(custom.id)}
+              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
+            >
+              编辑
+            </button>
+            <button
+              type="button"
+              onClick={() => void removeCustomAction(custom.id)}
+              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-red-400 hover:bg-surface-2"
+            >
+              删除
+            </button>
+          </div>
+        ))}
+
+        {customEditing === 'new' || customEditingAction ? (
+          <CustomActionForm
+            {...(customEditingAction ? { action: customEditingAction } : {})}
+            onSave={async (input) => {
+              await onCustomActionSave(input);
+              setCustomEditing(null);
+            }}
+            onCancel={() => setCustomEditing(null)}
+          />
+        ) : (
+          <Row
+            label="添加自定义动作"
+            hint={
+              customActionsRemaining(aiCustomActions) === 0
+                ? '已达上限 ' + CUSTOM_ACTIONS_MAX + ' 条，先删一条再添加'
+                : '提示词会原样发给模型；面板上的自定义动作不附加「额外要求」'
+            }
+          >
+            <button
+              type="button"
+              disabled={customActionsRemaining(aiCustomActions) === 0}
+              onClick={() => setCustomEditing('new')}
+              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              添加
             </button>
           </Row>
         )}

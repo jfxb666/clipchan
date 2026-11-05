@@ -331,6 +331,10 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       history: async () => [],
       historyRemove: async () => {},
       historyClear: async () => {},
+      // v1.2 D1：自定义动作三个通道（假平台补齐 ClipchanApi 契约，store 本身不用它们）。
+      listCustomActions: async () => [],
+      saveCustomAction: async () => [],
+      removeCustomAction: async () => [],
       onChanged: () => () => {},
       onOptimizeDelta: () => () => {},
     },

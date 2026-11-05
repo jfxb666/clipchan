@@ -113,6 +113,10 @@ const stub: PlatformAdapter = {
     history: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     historyRemove: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     historyClear: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    // v1.2 D1：自定义动作与 ai 其余方法同款——没实现就如实拒绝，界面自己降级为空列表。
+    listCustomActions: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    saveCustomAction: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
+    removeCustomAction: () => Promise.reject(new Error(notAvailable('AI 提示词优化'))),
     onChanged: () => unsubscribe(),
     onOptimizeDelta: () => unsubscribe(),
   },
