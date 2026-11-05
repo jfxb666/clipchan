@@ -1370,6 +1370,9 @@ export function App() {
         text={viewer?.text}
         imageUrl={viewer?.imageUrl}
         loading={viewer?.loading}
+        // 搜索命中高亮（v1.2 C2）：与列表卡片同源取词——同一个 store 的 q 原文
+        // （ListPanel 的 term 也是它），语法查询不做二次加工，规则与卡片一字不差。
+        term={q}
         onCopy={(text) => void writeClipboard(text).then(() => toast('已复制到剪贴板', 'ok'))}
         onClose={() => setViewer(null)}
         onPasteText={(edited) => void pasteViewerText(edited)}

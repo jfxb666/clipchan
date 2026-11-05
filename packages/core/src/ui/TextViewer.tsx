@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { HIGHLIGHT_MAX_CHARS, guessLanguage, highlightToHtml } from './codeHighlight';
+import { highlightSegments } from './highlight';
 import { editTextActions } from './textEdit';
 import { cn } from './util';
+
+/** 搜索命中片段样式：与 ClipCard 的 HIT_CLASS 同一套（accent-soft 底衬），改要两处一起改。 */
+const HIT_CLASS = 'rounded-sm bg-[var(--cc-accent-soft)] px-0.5 text-[var(--cc-accent)]';
 
 export interface TextViewerProps {
   open: boolean;
@@ -13,6 +17,12 @@ export interface TextViewerProps {
   loading?: boolean;
   /** 指定语言；不传则按内容猜（猜不出回落 javascript）。 */
   language?: string;
+  /**
+   * v1.2 C2：当前搜索词（App 传 store 的 q 原文，与列表卡片同源同规则）。
+   * 非空时只读态走 highlightSegments 的命中高亮、hljs 分支整体让位（铁律二：
+   * 两套 HTML 叠在一起会互相转义破坏）；空串/不传 = 无搜索态，行为与旧版完全一致。
+   */
+  term?: string;
   onCopy?: (text: string) => void;
   /**
    * v1.2 A2：把编辑后的内容交给 App 走 pasteText 通道粘贴。
@@ -36,6 +46,7 @@ export function TextViewer({
   imageUrl,
   loading,
   language,
+  term = '',
   onCopy,
   onPasteText,
   onSaveAsSnippet,
@@ -68,15 +79,20 @@ export function TextViewer({
 
   const isImage = typeof imageUrl === 'string' && imageUrl.length > 0;
   const broken = isImage && failedUrl === imageUrl;
-  // 浮层里没有搜索态，所以这里不判 term（与卡片不同，不受铁律二影响）。
+  // v1.2 C2：浮层现在也有搜索态了。取词与卡片完全同源——App 直接传 store 的 q 原文，
+  // 不做二次加工：AND/OR/re: 这类带语法符号的查询同样把整串当 needle（highlightSegments
+  // 只去首尾空白、不拆词），字面匹配不到就整体不高亮，与 ClipCard 的表现一字不差。
   const body = text ?? '';
+  const searching = term.trim() !== '';
+  const segments = searching ? highlightSegments(body, term) : [];
+  // 铁律二：有搜索词时只做搜索词高亮，hljs 分支整体让位（两套 HTML 叠加会互相转义破坏）。
   const hlHtml =
-    !isImage && body.length > 0 && body.length <= HIGHLIGHT_MAX_CHARS
+    !searching && !isImage && body.length > 0 && body.length <= HIGHLIGHT_MAX_CHARS
       ? highlightToHtml(body, language ?? guessLanguage(body) ?? 'javascript')
       : null;
   // 编辑开关只对文本模式有意义；App 没接任何编辑动作时不出这个按钮（props 可选，别处用法不受影响）。
   const editable = !isImage && !loading && (onPasteText !== undefined || onSaveAsSnippet !== undefined);
-  // ★ 进入编辑必须带 body 的原文：hlHtml 只服务只读态展示，绝不能把高亮 HTML 灌进 textarea。
+  // ★ 进入编辑必须带 body 的原文：hlHtml / segments 只服务只读态展示，绝不能把高亮 HTML 灌进 textarea。
   const enterEdit = () => {
     setDraft(body);
     setEditing(true);
@@ -134,6 +150,17 @@ export function TextViewer({
             <pre className="max-h-[60vh] select-text overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.7] text-ink">
               {hlHtml !== null ? (
                 <code className="cc-hljs" dangerouslySetInnerHTML={{ __html: hlHtml }} />
+              ) : searching ? (
+                /* 搜索态：与 ClipCard 同款分段渲染（mark 命中 / Fragment 原文，React 自动转义）。 */
+                segments.map((segment, index) =>
+                  segment.hit ? (
+                    <mark key={index} className={HIT_CLASS}>
+                      {segment.text}
+                    </mark>
+                  ) : (
+                    <Fragment key={index}>{segment.text}</Fragment>
+                  ),
+                )
               ) : (
                 body
               )}
