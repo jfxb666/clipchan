@@ -512,6 +512,13 @@ export interface ClipchanApi {
     pastePlain(id: string): Promise<PasteResult>;
     /** 批量粘贴：把多条记录按列表顺序用换行拼成一段再贴出去。 */
     pasteMany(ids: string[]): Promise<PasteResult>;
+    /**
+     * v1.2：把**任意**文本（不必是库里的记录）写进剪贴板并尝试贴回原窗口。
+     * 与 pasteItem 同一编排但不查库、不 touch（历史顺序不变）；编辑再粘贴、
+     * OCR 直贴、片段使用都复用这条通道。结果语义与 PasteResult 一致：
+     * `no-target` = 已复制、只是没有可贴的目标窗口。
+     */
+    pasteText(text: string): Promise<PasteResult>;
     /** 批量删除（软删进回收站）；返回实际删掉的条数。 */
     removeMany(ids: string[]): Promise<number>;
     /** 批量收藏 / 取消收藏。 */

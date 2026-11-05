@@ -40,6 +40,9 @@ export const CH = {
     pasteMany: 'items:pasteMany',
     removeMany: 'items:removeMany',
     pinMany: 'items:pinMany',
+    // v1.2：通用 pasteText——把「写剪贴板 + 回贴原窗口」的编排（原 ai:copyAndPaste /
+    // snippets:use 内部路径）开放为可复用通道，编辑再粘贴、OCR 直贴都走它。
+    pasteText: 'items:pasteText',
     // v0.6.0：拖到外部应用。
     startDrag: 'items:startDrag',
     // v1.0.0 ⑥：标签与文件夹归类。两条都是写操作（落库 + 广播刷新），

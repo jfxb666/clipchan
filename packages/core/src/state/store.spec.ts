@@ -160,6 +160,8 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
       saveText: async () => ({ ok: true, id: 'saved-1' }),
       pastePlain: async () => ({ ok: true }),
       pasteMany: async () => ({ ok: true }),
+      // v1.2 通用 pasteText：只补形状，本文件不测它（UI 接线在后续任务）。
+      pasteText: async () => ({ ok: true }),
       removeMany: async () => 0,
       pinMany: async () => {},
       startDrag: async () => {},

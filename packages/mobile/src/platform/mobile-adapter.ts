@@ -422,6 +422,12 @@ export function createMobileAdapter(): PlatformAdapter {
         }
       },
 
+      // v1.2 通用 pasteText 通道：手机端没有"写剪贴板 + 回贴原窗口"的注入编排，
+      // 如实 reject 而不是退化成只写剪贴板（那是 clipboard.writeText 的职责，不混在一起）。
+      async pasteText(_text: string): Promise<never> {
+        throw new Error('当前环境没有实现 items.pasteText');
+      },
+
       async removeMany(ids: string[]): Promise<number> {
         let removed = 0;
         for (const id of ids) {

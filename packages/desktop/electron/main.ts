@@ -38,7 +38,7 @@ import { maybeBackup, recoverCorruptDb } from './storage-guard';
 import { createDeltaThrottle } from './deltaThrottle';
 import type { AiApi } from './ai';
 import Database from 'better-sqlite3';
-import { URL_PREVIEW_TTL_MS, describeMigrationFailure, openDb } from './db';
+import { TEXT_LIMIT, URL_PREVIEW_TTL_MS, describeMigrationFailure, openDb } from './db';
 import type { Db, InsertResult } from './db';
 import { runLegacyMigration } from './migrate-runner';
 import { createLogSink, installCrashHooks } from './logs';
@@ -800,6 +800,19 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
         broadcast.itemsChanged();
         return result;
       });
+    },
+    // ★ v1.2 通用 pasteText 通道（A2/D2 公共底座）：任意文本（不一定是库里的记录）走
+    //   「写剪贴板 + 回贴原窗口」编排——与 ai:copyAndPaste 同一条 PasteService.pasteText
+    //   路径（不查库、不 touch，列表顺序不变，所以无需广播 itemsChanged）。
+    //   边界上做两道校验：非字符串 / 空串直接拒绝；超长按 db 的 TEXT_LIMIT 截断——
+    //   与文本条目入库同一口径，这里不发明第二个数字。
+    //   ★ PasteResult 的 reason 联合里没有 'empty'，空串沿用 send-failed
+    //   （与 pasteText 自己对空串的处理一致），不为了表达"空"去扩类型。
+    [CH.items.pasteText]: (_e, text: string) => {
+      const content = typeof text === 'string' && text.length > 0 ? text.slice(0, TEXT_LIMIT) : '';
+      const svc = pasteSvc;
+      if (!content || !svc) return { ok: false as const, reason: 'send-failed' as const };
+      return Promise.resolve(svc.pasteText(content));
     },
     // ★ v0.3.0 起删除 = 进回收站（软删）：只盖 deleted_at、**不删盘**。
     //   所以这里没有任何"文件删不掉"的 toast —— 根本没删文件，留着那句提示只会误导用户。

@@ -78,6 +78,8 @@ const api = {
     saveText: (text: string): Promise<{ ok: boolean; id?: string }> => ipcRenderer.invoke(CH.items.saveText, text),
     pastePlain: (id: string): Promise<PasteResult> => ipcRenderer.invoke(CH.items.pastePlain, id),
     pasteMany: (ids: string[]): Promise<PasteResult> => ipcRenderer.invoke(CH.items.pasteMany, ids),
+    // v1.2：通用 pasteText——任意文本走「写剪贴板 + 回贴原窗口」编排（编辑再粘贴 / OCR 直贴的公共底座）。
+    pasteText: (text: string): Promise<PasteResult> => ipcRenderer.invoke(CH.items.pasteText, text),
     removeMany: (ids: string[]): Promise<number> => ipcRenderer.invoke(CH.items.removeMany, ids),
     pinMany: (ids: string[], pinned: boolean): Promise<void> => ipcRenderer.invoke(CH.items.pinMany, ids, pinned),
     startDrag: (id: string): Promise<void> => { ipcRenderer.send(CH.items.startDrag, id); return Promise.resolve(); },

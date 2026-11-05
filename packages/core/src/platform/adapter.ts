@@ -35,6 +35,7 @@ const stub: PlatformAdapter = {
     saveText: () => Promise.reject(new Error('当前环境没有实现 items.saveText')),
     pastePlain: () => Promise.reject(new Error('当前环境没有实现 items.pastePlain')),
     pasteMany: () => Promise.reject(new Error('当前环境没有实现 items.pasteMany')),
+    pasteText: () => Promise.reject(new Error('当前环境没有实现 items.pasteText')),
     removeMany: () => Promise.reject(new Error('当前环境没有实现 items.removeMany')),
     pinMany: () => Promise.reject(new Error('当前环境没有实现 items.pinMany')),
     startDrag: () => Promise.reject(new Error('当前环境没有实现 items.startDrag')),
