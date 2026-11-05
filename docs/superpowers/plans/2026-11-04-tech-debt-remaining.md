@@ -1,5 +1,7 @@
 # Clipchan 技术债剩余项清理 Implementation Plan
 
+> ✅ **状态：已全部执行完毕（2026-11-05）**，13 个实现任务全部落地并通过两段评审，随 v1.1.0 发布。执行中发现并修正的偏差记录在对应任务的提交信息里；「需要用户点头的事」与「建议另立计划的大块」仍未决。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 清掉工程质量审计（23 条）里**不需要产品决策就能落地**的剩余条目，并把需要决策的条目连同证据一起交到用户手上。
@@ -56,9 +58,9 @@
 - Consumes: 当前工作树（`git status` 22 项：20 改 + 2 新）
 - Produces: 4 个可独立 revert 的提交
 
-- [ ] **Step 1: 向用户确认可以提交**（用户此前只说"帮我完成修复"，没要求提交；未确认前不要执行任何 `git commit`）
+- [x] **Step 1: 向用户确认可以提交**（用户此前只说"帮我完成修复"，没要求提交；未确认前不要执行任何 `git commit`）
 
-- [ ] **Step 2: 按逻辑分组暂存并提交**
+- [x] **Step 2: 按逻辑分组暂存并提交**
 
 ```bash
 cd clipchan
@@ -87,12 +89,12 @@ git add packages/desktop/electron/perf.ts packages/desktop/electron/perf.spec.ts
 git commit -m "feat: 最小性能观测面（T-N8）+ 启动重活移出建窗路径（T-B4 半）"
 ```
 
-- [ ] **Step 3: 验证工作树干净、提交可追溯**
+- [x] **Step 3: 验证工作树干净、提交可追溯**
 
 Run: `git status --short && git log --oneline -5`
 Expected: 无输出（工作树干净）+ 上面 4 条提交在最前
 
-- [ ] **Step 4: 不推送。** `git remote` 指向公开仓库 `jfxb666/clipchan`，推送由用户决定。
+- [x] **Step 4: 不推送。** `git remote` 指向公开仓库 `jfxb666/clipchan`，推送由用户决定。
 
 ---
 
@@ -108,7 +110,7 @@ Expected: 无输出（工作树干净）+ 上面 4 条提交在最前
 - Consumes: `makeBroadcaster(getWindow)` 现有签名不变
 - Produces: `makeBroadcaster(getWindow, opts?: { coalesceMs?: number; now?: () => number; setTimeout?; clearTimeout? })` —— 默认开 120ms 合并；`itemsChanged()` 语义变为"最近一次变更的去抖广播"
 
-- [ ] **Step 1: 写失败测试**（追加到 `ipc.spec.ts` 末尾）
+- [x] **Step 1: 写失败测试**（追加到 `ipc.spec.ts` 末尾）
 
 ```ts
 /**
@@ -168,12 +170,12 @@ describe('makeBroadcaster 的 itemsChanged 合并窗口', () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run packages/desktop/electron/ipc.spec.ts -t "合并窗口" 2>&1 | tail -20`
 Expected: FAIL —— "Window-内多次调用只发一次" 收到 3 条（当前无合并）
 
-- [ ] **Step 3: 写最小实现**（替换 `makeBroadcaster`）
+- [x] **Step 3: 写最小实现**（替换 `makeBroadcaster`）
 
 ```ts
 export interface BroadcasterOptions {
@@ -240,12 +242,12 @@ export function makeBroadcaster(
 export const ITEMS_CHANGED_COALESCE_MS = 120;
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/desktop/electron/ipc.spec.ts 2>&1 | tail -12`
 Expected: PASS（含既有 toIpcError 用例）
 
-- [ ] **Step 5: 全量门禁 + 提交**
+- [x] **Step 5: 全量门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test && node scripts/smoke-main.mjs
@@ -272,7 +274,7 @@ git commit -m "perf(ipc): itemsChanged 加 120ms 合并窗口，批量操作不�
   - `export class SchemaMigrationError extends Error { readonly cause: unknown; readonly dbFile: string; readonly backupFile: string | null }`
   - `describeMigrationFailure(e: unknown): string | null`（纯函数，把该错误翻成中文文案；不是迁移错误就返回 null）
 
-- [ ] **Step 1: 写失败测试**（追加到 `db.spec.ts`）
+- [x] **Step 1: 写失败测试**（追加到 `db.spec.ts`）
 
 ```ts
 import { SchemaMigrationError, describeMigrationFailure } from './db';
@@ -317,12 +319,12 @@ describe('迁移失败兜底', () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts -t "迁移失败兜底" 2>&1 | tail -20`
 Expected: FAIL —— `SchemaMigrationError` 未从 `./db` 导出（undefined）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `db.ts` 里，在 `openDb` 之前加：
 
@@ -414,12 +416,12 @@ Step 4（同任务内）：新增局部函数 `openDbReadOnlyFallback(file)` —
 
 （落地时以"窗口能起来、提示能看懂、数据没丢"为验收点，不追求降级模式下功能可用。）
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts 2>&1 | tail -14`
 Expected: PASS（迁移兜底 2 条 + 既有 130+ 条）
 
-- [ ] **Step 5: 门禁 + 提交**
+- [x] **Step 5: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test && node scripts/smoke-main.mjs
@@ -441,7 +443,7 @@ git commit -m "fix(db): 迁移失败先留备份再抛 SchemaMigrationError，�
 - Consumes: `FolderDTO`、`api.listFolders()` 现有形状
 - Produces: `createFolder` / `renameFolder` 在重名时抛 `Error('同级已有同名文件夹「X」')`；空名仍然静默返回（既有注释明确说"敲空格回车不该弹错误框"，不动它）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 describe('文件夹同级重名（T-N6）', () => {
@@ -472,12 +474,12 @@ describe('文件夹同级重名（T-N6）', () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts -t "同级重名" 2>&1 | tail -16`
 Expected: FAIL —— 第二次 `createFolder` 没抛，返回 3 条
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `FOLDER_SQL` 之后（迁移尾部，理由同 Global Constraints 的索引规则）：
 
@@ -503,7 +505,7 @@ Expected: FAIL —— 第二次 `createFolder` 没抛，返回 3 条
 
 渲染层不需要改：`store.ts` 的 `createFolder`/`renameFolder` 已经在 `catch` 里 `toast(errorText(err), 'error')`，中文消息会直接显示。
 
-- [ ] **Step 4: 跑测试确认通过 + 门禁 + 提交**
+- [x] **Step 4: 跑测试确认通过 + 门禁 + 提交**
 
 ```bash
 pnpm vitest run packages/desktop/electron/db.spec.ts 2>&1 | tail -8
@@ -527,7 +529,7 @@ git commit -m "fix(db): 同级重名文件夹改为明确报错并加判重索�
 - Consumes: `UrlPreviewInput`
 - Produces: `export const URL_PREVIEW_TTL_MS`、`export const URL_PREVIEW_MAX_ROWS`、`Db.pruneUrlPreviews(nowMs?: number): { expired: number; overflow: number }`；`upsertUrlPreview` 内部写后顺手剪（有上限，不做无界扫描）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 describe('url_previews 淘汰（T-M6）', () => {
@@ -566,12 +568,12 @@ describe('url_previews 淘汰（T-M6）', () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts -t "url_previews" 2>&1 | tail -16`
 Expected: FAIL —— `URL_PREVIEW_TTL_MS` / `pruneUrlPreviews` 未导出
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `db.ts` 顶部常量区：
 
@@ -617,11 +619,11 @@ export const URL_PREVIEW_MAX_ROWS = 5000;
 
 `main.ts` 删掉本地的 `URL_PREVIEW_TTL_MS` 常量定义，改为从 `./db` import（避免两处数字漂移）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts packages/desktop/electron/qrcode.spec.ts 2>&1 | tail -10`
 
-- [ ] **Step 5: 门禁 + 提交**
+- [x] **Step 5: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test && node scripts/smoke-main.mjs
@@ -643,7 +645,7 @@ git commit -m "fix(db): url_previews 按 TTL 与行数上限淘汰，写侧自�
 - Consumes: `openDb` 作用域内的 `raw`
 - Produces: `const stmt = { ... }`（openDb 作用域内的静态语句缓存），`restoreOne(conn, id)` → `restoreOne(statement, id)`
 
-- [ ] **Step 1: 先量出当前代价，别盲改**（审计自己也承认"better-sqlite3 是否内部缓存 statement 未查证"——所以第一步是查证，不是优化）
+- [x] **Step 1: 先量出当前代价，别盲改**（审计自己也承认"better-sqlite3 是否内部缓存 statement 未查证"——所以第一步是查证，不是优化）
 
 ```bash
 node -e "const D=require('./packages/desktop/node_modules/better-sqlite3');const db=new D(':memory:');db.exec('CREATE TABLE t(a TEXT PRIMARY KEY, b INTEGER)');const sql='INSERT INTO t(a,b) VALUES(?,?)';let s=process.hrtime.bigint();for(let i=0;i<20000;i++){db.prepare(sql).run('k'+i,i)}const perPrep=Number(process.hrtime.bigint()-s)/20000/1000;s=process.hrtime.bigint();const p=db.prepare(sql);for(let i=0;i<20000;i++){p.run('k2'+i,i)}const perReuse=Number(process.hrtime.bigint()-s)/20000/1000;console.log('每次 prepare 约',perPrep.toFixed(2),'us;复用同一 statement 约',perReuse.toFixed(2),'us;差值',(perPrep-perReuse).toFixed(2),'us/次');db.close();"
@@ -651,7 +653,7 @@ node -e "const D=require('./packages/desktop/node_modules/better-sqlite3');const
 
 Expected: 打印两个耗时。**若差值 < 1µs，本任务关掉，只在代码里记一行结论**（这是审计明确标为"强推断"的条目，先证伪再动手）。
 
-- [ ] **Step 2: 写回归测试（锁语义，不锁性能）**
+- [x] **Step 2: 写回归测试（锁语义，不锁性能）**
 
 ```ts
 describe('prepare 上移不改语义（T-M8）', () => {
@@ -675,7 +677,7 @@ describe('prepare 上移不改语义（T-M8）', () => {
 });
 ```
 
-- [ ] **Step 3: 实现（只做静态 SQL、最热的那几条；动态拼接的三条明确不动）**
+- [x] **Step 3: 实现（只做静态 SQL、最热的那几条；动态拼接的三条明确不动）**
 
 `openDb` 内、`api` 定义之前：
 
@@ -712,16 +714,16 @@ describe('prepare 上移不改语义（T-M8）', () => {
 - ✗ 把 `nextSeqOf` 改成接收 statement：会牵动 `migrate.ts` 等外部调用点。
 - ✓ 保留 `nextSeqOf(raw)` 作为模块级函数，另在 `openDb` 作用域里加 `const nextSeq = () => Number((stmt.nextSeq.get() as { m: number }).m) + 1;`，把 `api` 内部 4 处调用（`db.ts:1144 / :1176 / :1224 / :1007` 附近）换成本地 `nextSeq()`。外部调用方继续走 `nextSeqOf(raw)`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts 2>&1 | tail -10`
 Expected: PASS（含既有全部 130+ 条 —— 本任务的行为契约就是"什么都没变"）
 
-- [ ] **Step 5: 用观测面复测写路径耗时**
+- [x] **Step 5: 用观测面复测写路径耗时**
 
 `CLIPCHAN_PERF_MS=1 pnpm dev` → 复制一张图 → 日志里「写库（含去重与上限淘汰）」的毫秒数应与改动前同量级或更低。**没有下降就回滚本任务**（数据驱动，不为改动而改动）。
 
-- [ ] **Step 6: 门禁 + 提交**
+- [x] **Step 6: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test && node scripts/smoke-main.mjs
@@ -747,7 +749,7 @@ git commit -m "perf(db): 静态 SQL 的 statement 预编译复用，restoreMany 
   - 通道 `CH.items.searchPage = 'items:searchPage'`，preload `items.searchPage(q)`，adapter 缺省拒绝文案 `'当前环境没有实现 items.searchPage'`
   - `store.ts` 的 `load()` 在 `query.expr` 存在时改调 `searchPage`
 
-- [ ] **Step 1: 写失败测试（先测 db 层的"扫一遍"）**
+- [x] **Step 1: 写失败测试（先测 db 层的"扫一遍"）**
 
 ```ts
 describe('★ T-M1：带表达式的搜索只扫一遍候选', () => {
@@ -790,12 +792,12 @@ describe('★ T-M1：带表达式的搜索只扫一遍候选', () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts -t "T-M1" 2>&1 | tail -16`
 Expected: FAIL —— `db.searchPage is not a function`
 
-- [ ] **Step 3: db 层实现**
+- [x] **Step 3: db 层实现**
 
 `scanByExpr` 顶部加列裁剪（只选判定要用的列 + 排序键；展示字段命中后再按 id 取）：
 
@@ -843,11 +845,11 @@ const SCAN_COLUMNS = 'id, kind, content, search_index, image_path, thumb_path, w
 
 新增 `Db.rowsByIds(ids: string[]): ClipItemDTO[]`（`SELECT <DTO 所需列> WHERE id IN (...)`，保持传入顺序 —— 分页顺序由候选集决定，不能被 SQL 的排序打乱；测试：`rowsByIds` 返回顺序 === 入参顺序）。
 
-- [ ] **Step 4: 所有写出口挂 `bumpGen()`**
+- [x] **Step 4: 所有写出口挂 `bumpGen()`**
 
 逐个在 `insertText` / `insertImage` / `insertFiles` / `touchRow` / `remove` / `removeMany` / `togglePin` / `pinMany` / `clearUnpinned` / `clearAll` / `restore` / `restoreMany` / `purge` / `purgeTrashOverLimit` / `setFolder` / `setTags` / `emptyTrash` 的成功分支后调用 `bumpGen()`。**测试保护**：Step 1 第三条用例（写完立刻搜得到）就是这条的回归钉；再加一条"pin 之后候选里的 pinned 排序必须刷新"。
 
-- [ ] **Step 5: IPC/preload/adapter/store 接线**
+- [x] **Step 5: IPC/preload/adapter/store 接线**
 
 ```ts
 // channels.ts（items 组内，紧挨 searchPage 语义 neighbours）
@@ -882,7 +884,7 @@ const SCAN_COLUMNS = 'id, kind, content, search_index, image_path, thumb_path, w
           ]);
 ```
 
-- [ ] **Step 6: 跑测试确认通过 + store 层补一条**
+- [x] **Step 6: 跑测试确认通过 + store 层补一条**
 
 `packages/core/src/state/store.spec.ts` 追加：
 
@@ -899,14 +901,14 @@ const SCAN_COLUMNS = 'id, kind, content, search_index, image_path, thumb_path, w
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts packages/core/src/state/store.spec.ts 2>&1 | tail -12`
 
-- [ ] **Step 7: 真机验证搜索手感与耗时**
+- [x] **Step 7: 真机验证搜索手感与耗时**
 
 ```bash
 CLIPCHAN_PERF_MS=50 pnpm dev
 ```
 在真实库里输入 `合同 AND 3`（以及一个非法日期 `after:2024-13-01`，既有 spec 钉过不崩），确认：条数与列表一致、翻页正常、第二页不是"候选里恰好命中的那几条"。
 
-- [ ] **Step 8: 门禁 + 提交**
+- [x] **Step 8: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test && node scripts/smoke-main.mjs
@@ -930,7 +932,7 @@ git commit -m "perf(search): 表达式搜索一次返回页与总数，候选扫
 **Interfaces:**
 - Produces: `Db.allTrashIds(): string[]`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 describe('回收站夹取与全量取 id（T-M2）', () => {
@@ -969,12 +971,12 @@ describe('回收站夹取与全量取 id（T-M2）', () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts -t "回收站夹取" 2>&1 | tail -16`
 Expected: FAIL —— `db.allTrashIds is not a function`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `listTrash` 复用夹取（把它的内联 clamp 换成 `clampPage`，并让谓词继续用自己的 `deleted_at IS NOT NULL`）：
 
@@ -1018,7 +1020,7 @@ Expected: FAIL —— `db.allTrashIds is not a function`
     },
 ```
 
-- [ ] **Step 4: 跑测试确认通过 + 门禁 + 提交**
+- [x] **Step 4: 跑测试确认通过 + 门禁 + 提交**
 
 ```bash
 pnpm vitest run packages/desktop/electron/db.spec.ts 2>&1 | tail -8
@@ -1041,7 +1043,7 @@ git commit -m "perf(trash): listTrash 复用 clampPage 夹取，清空回收站�
 - Consumes: `FolderDTO`（含 `itemCount` / `totalCount`）
 - Produces: `folderSkeleton(): { id: string; name: string; parentId: string | null }[]`（模块内私有 helper，不开到 `Db` 接口上 —— 它只是校验用的内部件，暴露出去只会多一个没人该调的入口）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 describe('文件夹校验不再跑聚合查询（T-N5）', () => {
@@ -1078,12 +1080,12 @@ describe('文件夹校验不再跑聚合查询（T-N5）', () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts -t "T-N5" 2>&1 | tail -16`
 Expected: FAIL —— 计数为 2
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `db.ts` 里 `api` 定义之前（与 `listFolders` 放一起）：
 
@@ -1134,12 +1136,12 @@ Expected: FAIL —— 计数为 2
 
 > 若 Task 4 已落地，这里的重名判定就用 skeleton 版替代 Task 4 里那条 `SELECT id FROM folders WHERE name = ? AND …`（二选一，别留两条查同名的 SQL —— **执行时以本任务的 skeleton 版为准，并在 Task 4 的提交说明里指向这里**）。skeleton 已经带 name/parentId，判重是纯内存比较，省掉一次 SQL。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/desktop/electron/db.spec.ts 2>&1 | tail -10`
 Expected: PASS（含 v1.0.0 ⑥ 文件夹 CRUD 的既有用例，期望值不许改）
 
-- [ ] **Step 5: 门禁 + 提交**
+- [x] **Step 5: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test && node scripts/smoke-main.mjs
@@ -1160,7 +1162,7 @@ git commit -m "perf(folders): 校验改查文件夹骨架，聚合计数每次�
 **Interfaces:**
 - Produces: `LastSeen.textLen: number`（与既有 `text` 并存；粗判只用长度，长度相同仍要读一次做全等判定，避免"长度相同内容不同"漏记）
 
-- [ ] **Step 1: 先把量加进去，用它拿真实数字（这条本来就标着"需实测"）**
+- [x] **Step 1: 先把量加进去，用它拿真实数字（这条本来就标着"需实测"）**
 
 `watcher.ts` 的 `handleText` 第一行读取处，把裸调用换成计时调用（这段改动**就是最终代码的一部分**，不是临时脚手架）：
 
@@ -1183,7 +1185,7 @@ powershell -NoProfile -Command "Set-Clipboard -Value ('a' * 100000)"
 - `读纯文本` 单次平均 **≥ 1ms**，或 60 秒内累计 **≥ 60ms**（≈ 每秒都在为一次没变化的剪贴板掏 1ms 以上）→ 继续 Step 2，落地粗判。
 - 单次平均 **< 1ms** → **本任务关闭**：把实测数字写进 `handleText` 顶部的注释（例如"实测 10 万字空跑单次读取 0.4ms，300ms 一跳的占比 0.13%，加粗判层不值得"），只提交那一行注释，并跳到 Step 4。
 
-- [ ] **Step 2: 写失败测试（若 Step 1 判定值得做）**
+- [x] **Step 2: 写失败测试（若 Step 1 判定值得做）**
 
 ```ts
 describe('文本分支粗判（T-N1）', () => {
@@ -1219,7 +1221,7 @@ describe('文本分支粗判（T-N1）', () => {
 
 （若 `makeClip` 的假剪贴板没有 `readTextCalls` 计数，先给它加一个——它已经记 `calls` 数组，复用即可。）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```ts
   private handleText(fmts: string[], suppressed: boolean): void {
@@ -1234,7 +1236,7 @@ describe('文本分支粗判（T-N1）', () => {
 
 **注意：** 上面这段的实现形态依赖 Step 1 的实测结论 —— 如果 `readText()` 的代价主要来自 Electron 侧的字符串拷贝，而 `availableFormats()` 拿不到长度，就必须给 `ClipboardLike` 加 `textLength?()`（Electron 侧可用 `clipboard.readText()` 的替代：`readBuffer('text/plain').length`）。若加不出来（Electron API 不给低成本长度），**这条就以"实测结论 + 不改"收尾**，同样提交一行注释说明。
 
-- [ ] **Step 4: 门禁 + 提交**
+- [x] **Step 4: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test && node scripts/smoke-main.mjs
@@ -1258,7 +1260,7 @@ git commit -m "perf(watcher): 文本分支按实测结论处理（粗判落地 /
 - Consumes: `NativeImageLike.toBitmap?(): Buffer`（BGRA，`images.ts:46`）
 - Produces: `export function pixelsOf(img: NativeImageLike): Buffer | null`（一次解码，alpha 与 phash 共用）；`detectAlphaFrom(bmp: Buffer): boolean`；`phashFrom(bmp: Buffer): string | undefined`；两个原函数保留为薄封装（外部调用点不变）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```ts
 describe('★ 一次复制只解码一次像素（T-M10）', () => {
@@ -1287,12 +1289,12 @@ describe('★ 一次复制只解码一次像素（T-M10）', () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `pnpm vitest run packages/desktop/electron/images.spec.ts -t "只解码一次" 2>&1 | tail -16`
 Expected: FAIL —— `pixelsOf` 未导出
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ```ts
 /**
@@ -1333,19 +1335,19 @@ export function imagePhash(img: NativeImageLike): string | undefined { return ph
 
 `saveImage` 增加可选第三参 `pixels?: Buffer | null`，内部 `hasAlpha` 用 `detectAlphaFrom(pixels ?? pixelsOf(img))`（不传仍然工作，保持向后兼容与既有测试）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/desktop/electron/images.spec.ts packages/desktop/electron/recorder.spec.ts packages/desktop/electron/qrcode.spec.ts 2>&1 | tail -12`
 Expected: PASS —— 特别是既有的 alpha→PNG / 无 alpha→JPEG 分流用例与 phash 用例，一条都不许改期望值。
 
-- [ ] **Step 5: 真机复测（观测面给出数字）**
+- [x] **Step 5: 真机复测（观测面给出数字）**
 
 ```bash
 CLIPCHAN_PERF_MS=30 pnpm dev     # 复制一张截图，看「图片解码与落盘」「图片感知哈希」两行的毫秒数
 ```
 Expected: 与改动前对比，两段之和下降。**没下降就回滚**。
 
-- [ ] **Step 6: 门禁 + 提交**
+- [x] **Step 6: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test && node scripts/smoke-main.mjs
@@ -1366,7 +1368,7 @@ git commit -m "perf(images): alpha 判定与感知哈希共用一次像素解码
 - Modify: `packages/core/src/ui/MasonryList.tsx`（只加/改注释）
 - Test: `packages/core/src/ui/masonry.spec.ts`（若无则新建）
 
-- [ ] **Step 1: 写钉住既有契约的测试**
+- [x] **Step 1: 写钉住既有契约的测试**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -1393,12 +1395,12 @@ describe('列骨架的稳定性（T-N4 定性）', () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试**
+- [x] **Step 2: 跑测试**
 
 Run: `pnpm vitest run packages/core/src/ui/masonry.spec.ts 2>&1 | tail -10`
 Expected: PASS（若 FAIL，说明 `distributeColumns` 真有重复/丢项 —— 那才是需要修的 bug，回到实现层）
 
-- [ ] **Step 3: 结论落注释**（二选一，按 Step 2 结果）
+- [x] **Step 3: 结论落注释**（二选一，按 Step 2 结果）
 
 ```tsx
       {/*
@@ -1411,7 +1413,7 @@ Expected: PASS（若 FAIL，说明 `distributeColumns` 真有重复/丢项 —�
         <div key={index} className="flex min-w-0 flex-1 flex-col gap-tight">
 ```
 
-- [ ] **Step 4: 门禁 + 提交**
+- [x] **Step 4: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test
@@ -1434,7 +1436,7 @@ git commit -m "test(masonry): 复核 T-N4 结论 —— 列容器用 index 作 k
 - Consumes: 既有 `ErrorBoundary`（`4ae7606` 那次提交引入）
 - Produces: 视图组件的懒加载边界（`Suspense` 已经在 ErrorBoundary 内）
 
-- [ ] **Step 1: 记录改动前的基线体积**
+- [x] **Step 1: 记录改动前的基线体积**
 
 ```bash
 cd clipchan && pnpm --filter @clipchan/desktop build 2>/dev/null || node scripts/build-main.mjs
@@ -1442,7 +1444,7 @@ du -sk packages/desktop/dist 2>/dev/null; find packages/desktop/dist -name "*.js
 ```
 把最大 chunk 的字节数抄进任务说明（改动后要对比）。
 
-- [ ] **Step 2: 构建配置改动**
+- [x] **Step 2: 构建配置改动**
 
 ```ts
   build: {
@@ -1462,7 +1464,7 @@ du -sk packages/desktop/dist 2>/dev/null; find packages/desktop/dist -name "*.js
   },
 ```
 
-- [ ] **Step 3: 视图懒加载（只切"重且低频"的那几个，不做全量改造）**
+- [x] **Step 3: 视图懒加载（只切"重且低频"的那几个，不做全量改造）**
 
 `App.tsx`：
 
@@ -1502,7 +1504,7 @@ function ViewSkeleton(): JSX.Element {
 grep -n "^export function\|^export const" packages/core/src/ui/{SettingsView,OptimizeViewCard,WordCloudView,SnippetView,TrashView}.tsx | head -12
 ```
 
-- [ ] **Step 4: 验证产物与首屏**
+- [x] **Step 4: 验证产物与首屏**
 
 ```bash
 cd clipchan && CLIPCHAN_SOURCEMAP=0 pnpm --filter @clipchan/desktop build
@@ -1512,7 +1514,7 @@ Expected: 主 chunk 比 Step 1 基线小；出现若干小 chunk（视图切片�
 
 真机：`pnpm dev` 打开面板 → 依次切到 设置/词云/片段/回收站/整理/优化，每个都要正常渲染（懒加载最典型的事故是默认导出与具名导出搞错 → 白屏）。
 
-- [ ] **Step 5: 门禁 + 提交**
+- [x] **Step 5: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test && node scripts/smoke-main.mjs
@@ -1539,14 +1541,14 @@ git commit -m "build: 生产关源映射并剥 console，低频视图改懒加�
 **Interfaces:**
 - Produces: 删除两个导出；`urlPreview.ts` 顶部注释记录"为什么只用同主机 favicon"
 
-- [ ] **Step 1: 确认没有隐藏调用点**
+- [x] **Step 1: 确认没有隐藏调用点**
 
 ```bash
 cd clipchan && grep -rn "faviconCandidates\|AUTO_TAGS" packages --include=*.ts --include=*.tsx | grep -v node_modules
 ```
 Expected: 只命中各自的定义处与 spec（本会话实测：`faviconCandidates` 产品 0 处、`AUTO_TAGS` 产品 0 处）
 
-- [ ] **Step 2: 删 `faviconCandidates` 及其用例，并把隐私理由写进注释**
+- [x] **Step 2: 删 `faviconCandidates` 及其用例，并把隐私理由写进注释**
 
 `urlPreview.ts`：删除整个 `faviconCandidates` 函数。在其上方 `normalizeUrl` 或文件头注释里补：
 
@@ -1570,7 +1572,7 @@ Expected: 只命中各自的定义处与 spec（本会话实测：`faviconCandid
   });
 ```
 
-- [ ] **Step 3: 处理 `AUTO_TAGS`**
+- [x] **Step 3: 处理 `AUTO_TAGS`**
 
 两个方向，**默认取 ①**（删除导出，`TAG_RULES` 保持模块内私有）：
 
@@ -1590,12 +1592,12 @@ Expected: 只命中各自的定义处与 spec（本会话实测：`faviconCandid
 
 ②  若要把词表呈现给用户（整理页里标出"这些标签是规则自动打的"），那是**新功能**，另立计划，不在本任务里顺手做。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run packages/core/src/logic/urlPreview.spec.ts packages/core/src/logic/organize.spec.ts 2>&1 | tail -12`
 Expected: PASS，且 `faviconCandidates` 相关用例已不存在
 
-- [ ] **Step 5: 门禁 + 提交**
+- [x] **Step 5: 门禁 + 提交**
 
 ```bash
 pnpm typecheck && pnpm test   # smoke 不需要（纯 core 逻辑改动）

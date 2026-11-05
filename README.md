@@ -9,9 +9,9 @@
 
   <p>
     <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?style=flat-square&logo=windows11&logoColor=white">
-    <img alt="release" src="https://img.shields.io/badge/release-v1.0.0-2ea44f?style=flat-square">
+    <img alt="release" src="https://img.shields.io/badge/release-v1.1.0-2ea44f?style=flat-square">
     <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
-    <img alt="tests" src="https://img.shields.io/badge/tests-1670%20passing-brightgreen?style=flat-square">
+    <img alt="tests" src="https://img.shields.io/badge/tests-1740%20passing-brightgreen?style=flat-square">
     <img alt="electron" src="https://img.shields.io/badge/Electron-37-47848F?style=flat-square&logo=electron&logoColor=white">
     <img alt="react" src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black">
     <img alt="sqlite" src="https://img.shields.io/badge/SQLite-WAL-003B57?style=flat-square&logo=sqlite&logoColor=white">
@@ -107,7 +107,7 @@ Clipchan 是给「一天到晚在复制粘贴」的人做的：
 
 | 版本 | 文件 | 说明 |
 | --- | --- | --- |
-| **安装版（推荐）** | `Clipchan-Setup-1.0.0.exe` | 77 MB 安装包，装完占 291 MB 磁盘，**启动 0.3 秒级**，支持自动更新 |
+| **安装版（推荐）** | `Clipchan-Setup-1.1.0.exe` | 77 MB 安装包，装完占 291 MB 磁盘，**启动 0.3 秒级**，支持自动更新 |
 | 免安装版 | `Clipchan.exe` | 单文件，双击即用。但它是个自解压包，**每次双击都要先把 291 MB 解到 `%TEMP%` 再启动**，本机实测 3.1 秒、慢机器上十几秒。只在不能安装的场合用 |
 
 安装版装完托盘出现图标，按 <kbd>Ctrl</kbd>+<kbd>&#96;</kbd> 唤起面板。卸载走「设置 → 应用」或安装目录里的 `Uninstall Clipchan.exe`。
@@ -219,7 +219,8 @@ pnpm build        # 打包 → release/Clipchan.exe 与 release/Clipchan-Setup-<
 
 ## 更新日志
 
-- **v1.0.0**（当前）— AI 助手、搜索语法、智能整理、链接预览、图片去重、二维码识别、Key 加密、自动备份、包体瘦身 10.6 MB。[完整说明](docs/release-notes-1.0.0.md)
+- **v1.1.0**（当前）— 全面体检版：搜索更快（表达式搜索一次返回）、批量操作不闪、升级失败不再白屏（自动备份+降级启动）、数据库与回收站多项提速、生产构建去源码映射。[完整说明](docs/release-notes-1.1.0.md)
+- **v1.0.0** — AI 助手、搜索语法、智能整理、链接预览、图片去重、二维码识别、Key 加密、自动备份、包体瘦身 10.6 MB。[完整说明](docs/release-notes-1.0.0.md)
 - 更早的版本见 [Releases](https://github.com/jfxb666/clipchan/releases) 与 [docs/](docs/)。
 
 ## License

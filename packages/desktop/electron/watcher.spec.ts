@@ -1407,10 +1407,12 @@ describe('T-N8：轮询耗时接进观测器', () => {
     const w = new ClipboardWatcher({ clip, recorder: sink, intervalMs: 5, onTrace: () => {}, perf });
 
     w.start();
-    await sleep(40);
+    await sleep(150);
     w.stop();
 
-    // 5ms 一跳跑 40ms，至少要看到 3 跳（定时器被事件循环挤掉一两跳属正常，不能断言精确值）
+    // 5ms 一跳跑 150ms 名义上有 30 跳，只要求 ≥3：并行跑全套时事件循环可能把绝大多数跳
+    // 挤掉（本会话实测 40ms 窗口被挤到只剩 2 跳导致发版门禁随机挂），这里钉的是
+    // 「观测器确实在每一跳被调用」这件事，不是节拍精度 —— 窗口放宽，下限不动。
     expect(observed.length).toBeGreaterThanOrEqual(3);
     expect(observed.every((o) => o.label === '剪贴板轮询')).toBe(true);
     expect(observed.every((o) => o.ms >= 0 && Number.isFinite(o.ms))).toBe(true);
