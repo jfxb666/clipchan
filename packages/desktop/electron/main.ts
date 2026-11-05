@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DEFAULT_SETTINGS, normalizeUrl, pasteHintOf } from '@clipchan/core';
+import { DEFAULT_SETTINGS, expandSnippet, normalizeUrl, pasteHintOf } from '@clipchan/core';
 import type {
   Capabilities,
   CaptureFinishPayload,
@@ -1043,7 +1043,17 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
       broadcast.send(EV.snippetsChanged);
       const svc = pasteSvc;
       if (snippet && svc) {
-        void svc.pasteText(snippet.content).then((result) => {
+        // ★ 模板原文不可变——变量是「使用时」语义，只在使用瞬间展开（db 里存的永远是模板）。
+        //   剪贴板文本与 ClipboardWatcher 同源：直接读 electron 的 clipboard 模块；
+        //   读不到/读挂给 ''，让 {{剪贴板}} 展开为空串而不是字面残留占位。
+        let clipText = '';
+        try {
+          clipText = clipboard.readText() ?? '';
+        } catch {
+          clipText = '';
+        }
+        const expanded = expandSnippet(snippet.content, { now: new Date(), clipboard: clipText });
+        void svc.pasteText(expanded).then((result) => {
           // 区分两种失败：no-target 是"已复制、只是没处可贴"，其余是压根没写进剪贴板。
           if (result.ok) return;
           if (result.reason === 'no-target') broadcast.toast('片段已复制，但没有可粘贴的目标窗口', 'info');

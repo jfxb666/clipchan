@@ -9,3 +9,4 @@ export * from './logic/searchQuery';
 export * from './logic/organize';
 export * from './logic/phash';
 export * from './logic/urlPreview';
+export * from './logic/snippetVars';
