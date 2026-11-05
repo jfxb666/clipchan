@@ -549,6 +549,23 @@ export function App() {
   }, []);
 
   /**
+   * 查看浮层「粘贴修改后内容」（v1.2 A2）：走通用 pasteText 通道贴编辑后的文本。
+   * ★ 历史条目不可变——编辑只是浮层里的暂存态，粘贴的是修改后内容，不回写历史条目。
+   *   toast 与卡片粘贴同一份 pasteToast 文案；成功才关浮层，失败留着让用户改完重试。
+   */
+  const pasteViewerText = useCallback(async (edited: string) => {
+    const store = useClipStore.getState();
+    try {
+      const result = await getPlatform().items.pasteText(edited);
+      const { text, tone } = pasteToast(result);
+      store.toast(text, tone);
+      if (result.ok) setViewer(null);
+    } catch (err) {
+      store.toast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  }, []);
+
+  /**
    * 识别当前这一条。
    * ★ 失败原因翻成中文后放进 error（面板红字），loading 由 finally 收掉 ——
    *   否则识别一失败按钮就永远停在「识别中…」。
@@ -1355,6 +1372,8 @@ export function App() {
         loading={viewer?.loading}
         onCopy={(text) => void writeClipboard(text).then(() => toast('已复制到剪贴板', 'ok'))}
         onClose={() => setViewer(null)}
+        onPasteText={(edited) => void pasteViewerText(edited)}
+        onSaveAsSnippet={(text) => void createSnippet({ title: '', content: text })}
       />
 
       {/* 与 TextViewer 同层：都要盖住所有视图（含小组件形态）。 */}
