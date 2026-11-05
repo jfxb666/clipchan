@@ -63,6 +63,15 @@ export function canSaveAsItem(r: OcrResult): boolean {
   return r.text.trim() !== '';
 }
 
+/**
+ * 「直接粘贴 / 送 AI 助手」的可用性（v1.2 D2）。
+ * ★ 判定与 canSaveAsItem 完全一致：全空白的识别结果贴出去、送出去都没有意义。
+ *   直接复用而不另写一份 trim——空白口径将来要变只改这一处。
+ */
+export function canPaste(r: OcrResult): boolean {
+  return canSaveAsItem(r);
+}
+
 export const OCR_SAVED_TOAST = '已存为一条记录';
 /** 没识别到文字不是失败（图里本来就可能没字），所以是 warn 而不是 error。 */
 export const OCR_EMPTY_TOAST = '没有识别到文字';

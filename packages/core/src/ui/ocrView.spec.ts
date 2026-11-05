@@ -3,6 +3,7 @@ import type { OcrProgress, OcrStatus } from '../types';
 import {
   OCR_EMPTY_TOAST,
   OCR_SAVED_TOAST,
+  canPaste,
   canSaveAsItem,
   ocrEmptyToast,
   ocrErrorText,
@@ -76,6 +77,26 @@ describe('canSaveAsItem', () => {
     expect(canSaveAsItem({ text: '   ', confidence: 0, ms: 12 })).toBe(false);
     expect(canSaveAsItem({ text: '', confidence: 0, ms: 12 })).toBe(false);
     expect(canSaveAsItem({ text: '\n\t', confidence: 0, ms: 12 })).toBe(false);
+  });
+});
+
+describe('canPaste（v1.2 D2 直接粘贴 / 送 AI 助手）', () => {
+  it('★ 与 canSaveAsItem 同一空白口径：有非空白文字 → 可用', () => {
+    expect(canPaste({ text: '识别出的文字', confidence: 90, ms: 12 })).toBe(true);
+    expect(canPaste({ text: '  \n文字\t ', confidence: 90, ms: 12 })).toBe(true);
+  });
+
+  it('全空白 / 空串 → 不可用（按钮禁用）', () => {
+    expect(canPaste({ text: '   ', confidence: 0, ms: 12 })).toBe(false);
+    expect(canPaste({ text: '', confidence: 0, ms: 12 })).toBe(false);
+    expect(canPaste({ text: '\n\t', confidence: 0, ms: 12 })).toBe(false);
+  });
+
+  it('与 canSaveAsItem 判定逐例一致（复用而非复刻）', () => {
+    for (const text of ['', ' ', '\n\t', 'a', ' 甲乙 ', '  .  ']) {
+      const r = { text, confidence: 50, ms: 1 };
+      expect(canPaste(r)).toBe(canSaveAsItem(r));
+    }
   });
 });
 

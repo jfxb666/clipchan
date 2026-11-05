@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import type { OcrProgress, OcrResult, OcrStatus } from '../types';
-import { canSaveAsItem, ocrErrorText, ocrProgressText, ocrStatusText } from './ocrView';
+import { canPaste, canSaveAsItem, ocrErrorText, ocrProgressText, ocrStatusText } from './ocrView';
 
 export interface OcrResultViewProps {
   open: boolean;
@@ -23,6 +23,10 @@ export interface OcrResultViewProps {
   onRecognize: () => void;
   onSaveAsItem: (text: string) => void;
   onCopy: (text: string) => void;
+  /** v1.2 D2：把识别文字直接贴回原窗口（走通用 pasteText 通道，由 App 编排）。 */
+  onPasteText: (text: string) => void;
+  /** v1.2 D2：带着识别文字打开 AI 助手视图，动作由用户在那边自选。 */
+  onSendToAssist: (text: string) => void;
   onClose: () => void;
 }
 
@@ -46,6 +50,8 @@ export function OcrResultView({
   onRecognize,
   onSaveAsItem,
   onCopy,
+  onPasteText,
+  onSendToAssist,
   onClose,
 }: OcrResultViewProps) {
   useEffect(() => {
@@ -65,6 +71,8 @@ export function OcrResultView({
   const ready = status?.ready === true;
   const text = result?.text ?? '';
   const canSave = result !== null && canSaveAsItem(result);
+  // 「直接粘贴 / 送 AI 助手」与「存为一条新记录」同一空白口径（v1.2 D2）：canPaste 复用 canSaveAsItem 的判定。
+  const canSend = result !== null && canPaste(result);
   // 下载阶段才有百分比；识别阶段的 ratio 无意义，只显示一句「正在识别…」。
   const downloading = loading && progress !== null && progress.phase === 'download';
   const ratio = downloading && progress !== null && progress.ratio >= 0 ? progress.ratio : null;
@@ -162,6 +170,15 @@ export function OcrResultView({
           >
             复制
           </button>
+          {/* v1.2 D2：直接粘贴与送 AI 助手都要有非空文字（与存记录同一口径，canPaste）。 */}
+          <button
+            type="button"
+            className={GHOST_BUTTON_CLASS}
+            disabled={!canSend}
+            onClick={() => onPasteText(text)}
+          >
+            直接粘贴
+          </button>
           {/* 全空白时禁用：存进去只会是一条空记录，不如让用户当场看见按钮是灰的。 */}
           <button
             type="button"
@@ -170,6 +187,14 @@ export function OcrResultView({
             onClick={() => onSaveAsItem(text)}
           >
             存为一条新记录
+          </button>
+          <button
+            type="button"
+            className={GHOST_BUTTON_CLASS}
+            disabled={!canSend}
+            onClick={() => onSendToAssist(text)}
+          >
+            送 AI 助手
           </button>
           <button type="button" className={GHOST_BUTTON_CLASS} onClick={onClose}>
             关闭

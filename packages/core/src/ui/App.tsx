@@ -851,6 +851,34 @@ export function App() {
     setOcrLoading(false);
   }, []);
 
+  /**
+   * OCR 结果「直接粘贴」（v1.2 D2）：识别文字走通用 pasteText 通道贴回原窗口。
+   * toast 与卡片粘贴同一份 pasteToast 文案；成功才关浮层，失败留着让用户改用复制兜底。
+   */
+  const pasteOcrText = useCallback(
+    async (text: string) => {
+      const store = useClipStore.getState();
+      try {
+        const result = await getPlatform().items.pasteText(text);
+        const { text: message, tone } = pasteToast(result);
+        store.toast(message, tone);
+        if (result.ok) closeOcr();
+      } catch (err) {
+        store.toast(err instanceof Error ? err.message : String(err), 'error');
+      }
+    },
+    [closeOcr],
+  );
+
+  /** OCR 结果「送 AI 助手」：带原文打开助手视图（assistSource 预选）并关掉 OCR 浮层，动作由用户在那边自选。 */
+  const sendOcrToAssist = useCallback(
+    (text: string) => {
+      useClipStore.getState().openAssist(text);
+      closeOcr();
+    },
+    [closeOcr],
+  );
+
   const closeQr = useCallback(() => {
     setQr(null);
     setQrResult(null);
@@ -1430,6 +1458,8 @@ export function App() {
         onRecognize={recognizeCurrentOcr}
         onSaveAsItem={(text) => void saveOcrAsItem(text)}
         onCopy={(text) => void writeClipboard(text).then(() => toast('已复制到剪贴板', 'ok'))}
+        onPasteText={(text) => void pasteOcrText(text)}
+        onSendToAssist={sendOcrToAssist}
         onClose={closeOcr}
       />
 
