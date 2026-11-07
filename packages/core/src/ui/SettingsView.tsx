@@ -72,7 +72,7 @@ export const MERGE_SEPARATOR_PRESETS: readonly string[] = ['\r\n', ', ', ' '];
 export const GHOST_MAX_MINUTES = 720;
 export const GHOST_PRESETS = [5, 10, 30, 60] as const;
 /** 底部展示的版本号。 */
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.2.0';
 
 const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: 'auto', label: '跟随系统' },
