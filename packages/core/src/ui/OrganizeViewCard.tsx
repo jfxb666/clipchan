@@ -205,7 +205,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
   const applyBatch = async (): Promise<void> => {
     if (applying || wizardLoading) return;
     const batch = collectBatch(wizardRows, selections);
-    if (batch.entries.length === 0) return; // 按钮已禁用，这里双保险（applied=0 会让向导原地打转）
+    if (batch.entries.length === 0) return; // 按钮已禁用，这里双保险（本批没有要应用的行，不触发应用也不推进）
     setApplying(true);
     try {
       const applied = await applyTagsBulk(batch.entries);
@@ -215,8 +215,10 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
         label: UNDO_LABEL,
         onClick: () => void undoLast(batch.undo),
       });
-      // ★ 自动进下一批：offset += 实际应用条数（没勾的行留在原地，本会话不再回头展示）。
-      const next = nextBatchOffset(wizardOffset, applied);
+      // ★ 自动进下一批：已应用的行从未归类集合里消失、没勾的行仍占位 —— 游标只前进
+      //   「被跳过」的数量（本批行数 − 应用数）。全选应用时游标不动：应用行已离开集合，
+      //   原位置上正是下一批从未展示过的行（本会话内跳过的行不再回头展示）。
+      const next = nextBatchOffset(wizardOffset, wizardRows.length, applied);
       setWizardOffset(next);
       setWizardBatchNo((no) => no + 1);
       await fetchBatch(next);

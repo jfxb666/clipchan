@@ -85,16 +85,22 @@ export function collectBatch(rows: WizardRow[], selectionOf: Record<string, stri
 }
 
 /**
- * 下一批的 offset：推进量 = 实际应用条数。
+ * 下一批的 offset：推进量 = 被跳过的行数（shown − applied）。
  *
- * ★ 应用过的行已离开未归类集合；没勾标签的行仍留在原地 —— offset 只按应用数推进，
- *   意味着本会话内跳过的行不再回头展示（重开向导从第一批重新开始）。
- *   applied=0 时不推进：否则下一批原样重拉，向导会原地打转。
+ * ★ 不变量：已应用的行从未归类集合里消失，未应用的行仍占位 —— 游标只前进「被跳过」
+ *   的数量。offset 指向当前集合里从未展示过的行的起点；本批展示 shown 行、应用 applied
+ *   行后，前 (shown − applied) 个占位行挡在原地，之后才轮到从未展示过的行。
+ *   全选应用（applied = shown）时 offset 不动：应用行已离开集合，原位置上正是下一批
+ *   从未展示过的行 —— 按应用数推进会整段跳过它们（800 条积压、批 200 全选应用时，
+ *   U201..U400 永远展示不到，最后还谎报「全部整理完成」）。
+ *   本会话内跳过的行不再回头展示（重开向导从第一批重新开始）。
+ *   组件在 applied ≤ 0（本批没有勾选 / 应用失败）时先行返回，不会走到这里。
  */
-export function nextBatchOffset(offset: number, applied: number): number {
+export function nextBatchOffset(offset: number, shown: number, applied: number): number {
   const at = typeof offset === 'number' && Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
-  const n = typeof applied === 'number' && Number.isFinite(applied) ? Math.max(0, Math.floor(applied)) : 0;
-  return at + n;
+  const n = typeof shown === 'number' && Number.isFinite(shown) ? Math.max(0, Math.floor(shown)) : 0;
+  const a = typeof applied === 'number' && Number.isFinite(applied) ? Math.max(0, Math.floor(applied)) : 0;
+  return at + Math.max(0, n - a);
 }
 
 /** 「已整理 N 条」提示文案（toast 上挂着撤销按钮，文案里带上可撤销）。 */
