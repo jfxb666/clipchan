@@ -24,6 +24,14 @@ export interface KeyEventLike {
 export interface KeyContext {
   /** 焦点在搜索框里（元素带 data-cc-search）。 */
   inSearch: boolean;
+  /**
+   * ★ 焦点在任意可编辑元素里（input / textarea / contentEditable）。
+   * 只约束数字速贴这一个分支：设置 / 片段 / 优化等页面的文本框（AI 表单、自定义动作、
+   * 各种数字/分隔符输入）里打的数字是内容不是指令，不能被劫持成「贴第 N 条」。
+   * 搜索框是 input 的特例且已被 inSearch 覆盖，inEditable 是它的一般化。
+   * Enter / Delete 在这些视图的既有行为不在本字段约束范围。
+   */
+  inEditable?: boolean;
   /** 当前选中集（取第一条做 Ctrl+D）。 */
   selectedIds: string[];
   /**
@@ -107,9 +115,12 @@ export function resolveKey(event: KeyEventLike, ctx: KeyContext): KeyAction {
   //   放在 inSearch 早退之后，天然不会抢搜索框的输入（那里是打字）；
   //   浮层/整理页开着时也让路（与 Esc 同一条所有权约定，BL-1）：浮层自己的
   //   交互可能用到数字键，全局表这时候不能抢。越界（列表不足 N 条）由 App 端静默忽略。
+  //   ★ 还要求 !ctx.inEditable：输入框（input/textarea/contentEditable）里打的数字
+  //   是内容不是指令——数字速贴让路；Enter/Delete 在这些视图的既有行为不在本改动范围。
   if (
     !ctx.overlayOpen &&
     !ctx.organizeOpen &&
+    !ctx.inEditable &&
     !event.ctrlKey &&
     !event.metaKey &&
     !event.altKey &&

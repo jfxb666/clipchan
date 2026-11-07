@@ -368,6 +368,14 @@ export function App() {
       const store = useClipStore.getState();
       const target = event.target as HTMLElement | null;
       const inSearch = target?.dataset?.['ccSearch'] !== undefined;
+      // ★ inEditable：焦点在任意可编辑元素里（input / textarea / contentEditable）。
+      //   数字速贴在这些地方让路——设置 / 片段 / 优化等页面的文本框里打的数字是内容
+      //   不是指令（v1.2 数字速贴回归）。搜索框是 HTMLInputElement 的特例且已被
+      //   inSearch 覆盖，inEditable 是它的一般化。事件时刻读 target，无需走 ref。
+      const inEditable =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target?.isContentEditable === true;
       const action = resolveKey(
         {
           key: event.key,
@@ -376,7 +384,7 @@ export function App() {
           shiftKey: event.shiftKey,
           altKey: event.altKey,
         },
-        { inSearch, selectedIds: store.selectedIds, ...escapeCtx.current },
+        { inSearch, inEditable, selectedIds: store.selectedIds, ...escapeCtx.current },
       );
       if (action.type === 'none') return;
       if (shouldPreventDefault(action)) event.preventDefault();

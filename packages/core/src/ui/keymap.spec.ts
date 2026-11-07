@@ -10,7 +10,7 @@ import { resolveKey, shouldPreventDefault, type KeyAction, type KeyContext } fro
 const ctx = (
   inSearch: boolean,
   selectedIds: string[] = [],
-  extra: Partial<Pick<KeyContext, 'overlayOpen' | 'organizeOpen'>> = {},
+  extra: Partial<Pick<KeyContext, 'overlayOpen' | 'organizeOpen' | 'inEditable'>> = {},
 ): KeyContext => ({ inSearch, selectedIds, overlayOpen: false, organizeOpen: false, ...extra });
 const key = (k: string, mods: Partial<{ ctrl: boolean; meta: boolean; shift: boolean; alt: boolean }> = {}) => ({
   key: k,
@@ -177,6 +177,31 @@ describe('数字键速贴（v1.2 A1）', () => {
   it('搜索态/浮层开时数字不触发（在输入框打数字不能被抢走）', () => {
     expect(resolveKey(key('1'), ctx(true, ['a']))).toEqual({ type: 'none' });
     expect(resolveKey(key('5'), { inSearch: false, selectedIds: [], overlayOpen: true, organizeOpen: false })).toEqual({ type: 'none' });
+  });
+  it('★ 焦点在输入框（inEditable）里按 1-9 → none：数字是内容不是指令', () => {
+    // 设置 / 片段 / 优化等页面的文本框（AI 表单、自定义动作、historyLimit 等），
+    // 里面打的数字必须原样落进输入框，不能被劫持成「贴第 N 条」。
+    for (const d of ['1', '2', '3', '4', '5', '6', '7', '8', '9']) {
+      expect(resolveKey(key(d), ctx(false, ['a'], { inEditable: true }))).toEqual({ type: 'none' });
+    }
+  });
+  it('★ inEditable 让路与浮层/整理无关：两者都没开时也照样让路', () => {
+    // 显式钉住 overlayOpen / organizeOpen 都为 false，让路的唯一原因就是 inEditable。
+    expect(
+      resolveKey(key('7'), {
+        inSearch: false,
+        selectedIds: [],
+        overlayOpen: false,
+        organizeOpen: false,
+        inEditable: true,
+      }),
+    ).toEqual({ type: 'none' });
+  });
+  it('★ inEditable 只让路数字速贴：Enter 粘贴 / Delete 删除的既有行为不变（早于本批次的约定，另行决策）', () => {
+    expect(resolveKey(key('Enter'), ctx(false, ['a'], { inEditable: true }))).toEqual({ type: 'paste' });
+    expect(resolveKey(key('Delete'), ctx(false, ['a'], { inEditable: true }))).toEqual({
+      type: 'remove-selected',
+    });
   });
   it('数字键在 shouldPreventDefault 覆盖内', () => {
     expect(shouldPreventDefault({ type: 'paste-index', index: 1 })).toBe(true);
