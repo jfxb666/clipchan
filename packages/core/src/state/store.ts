@@ -11,6 +11,7 @@ import type {
   ListQuery,
   Settings,
   TagCountDTO,
+  TextExportFormat,
   WordCloudData,
 } from '../types';
 import { DEFAULT_SETTINGS } from '../types';
@@ -213,6 +214,11 @@ export interface ClipStoreActions {
   emptyTrash(): Promise<void>;
   /** 导出全部记录为 zip（设置页「数据」区）。用户取消不算失败，静默返回。 */
   exportAll(): Promise<void>;
+  /**
+   * v1.2 E1：导出全部记录为通用文本格式（Markdown/JSON/CSV，设置页「数据」区）。
+   * 结果语义与 exportAll 完全一致（成功报路径、取消静默、失败报原因）。
+   */
+  exportText(format: TextExportFormat): Promise<void>;
   /**
    * 从 zip 备份包导入（设置页「数据」区）。纯加法：重复 id / 哈希一律跳过，绝不覆盖。
    * 成功后的汇总提示由主进程发（它知道四类计数），这里只刷新列表，不重复 toast。
@@ -1034,6 +1040,22 @@ export const useClipStore = create<ClipStore>((set, get) => ({
       }
       // ★ 用户在保存对话框点「取消」不是失败：既没落盘也没出错，
       //   弹「导出失败」会让人以为出了故障。静默返回。
+      if (result.cancelled) return;
+      get().toast('导出失败：' + (result.reason ?? '未知原因'), 'warn');
+    } catch (err) {
+      get().toast(errorText(err), 'error');
+    }
+  },
+
+  // v1.2 E1：通用文本导出与 exportAll 同一套结果语义，逐行镜像（文案也共用），
+  // 两边的行为差异将来只该来自产品决策，不该来自实现漂移。
+  exportText: async (format) => {
+    try {
+      const result = await getPlatform().items.exportText(format);
+      if (result.ok) {
+        get().toast('已导出到：' + (result.path ?? ''), 'ok');
+        return;
+      }
       if (result.cancelled) return;
       get().toast('导出失败：' + (result.reason ?? '未知原因'), 'warn');
     } catch (err) {

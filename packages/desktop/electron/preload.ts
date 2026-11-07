@@ -44,6 +44,7 @@ import type {
   Snippet,
   SnippetInput,
   TagCountDTO,
+  TextExportFormat,
   TrashQuery,
   UpdateStatus,
   WordCloudData,
@@ -76,6 +77,8 @@ const api = {
       ipcRenderer.invoke(CH.items.searchPage, q),
     exportAll: (): Promise<ExportResult> => ipcRenderer.invoke(CH.items.exportAll),
     importAll: (): Promise<ImportResult> => ipcRenderer.invoke(CH.items.importAll),
+    // v1.2 E1 通用格式导出：格式随 payload 传给主进程（过滤器与文件扩展名由主进程按格式选）。
+    exportText: (format: TextExportFormat): Promise<ExportResult> => ipcRenderer.invoke(CH.items.exportText, format),
     getText: (id: string): Promise<string> => ipcRenderer.invoke(CH.items.getText, id),
     saveText: (text: string): Promise<{ ok: boolean; id?: string }> => ipcRenderer.invoke(CH.items.saveText, text),
     pastePlain: (id: string): Promise<PasteResult> => ipcRenderer.invoke(CH.items.pastePlain, id),

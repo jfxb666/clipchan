@@ -25,6 +25,8 @@ export const CH = {
     searchPage: 'items:searchPage',
     exportAll: 'items:exportAll',
     importAll: 'items:importAll',
+    // v1.2 E1 通用格式导出：payload 是格式串（'md'|'json'|'csv'），回 ExportResult（与 exportAll 同形状）。
+    exportText: 'items:exportText',
     getText: 'items:getText',
     // ★ 回收站五通道：加在这里就自动进 ALL_INVOKE_CHANNELS（它由 ...Object.values(CH.items) 展平），
     //   所以 channels.ts 只需要改这一处，别再手工往下面那个数组里补。

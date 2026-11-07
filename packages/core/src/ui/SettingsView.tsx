@@ -12,6 +12,7 @@ import type {
   OcrProgress,
   OcrStatus,
   Settings,
+  TextExportFormat,
   ThemeMode,
   UpdateStatus,
 } from '../types';
@@ -246,6 +247,7 @@ export function SettingsView({
   onClearAll,
   onOpenDataFolder,
   onExportAll,
+  onExportText,
   onImportAll,
   onSetAutoStart,
   onToggleMode,
@@ -278,6 +280,8 @@ export function SettingsView({
   onOpenDataFolder: () => void;
   /** 导出全部记录为 zip；结果（含失败）由 store 统一 toast。 */
   onExportAll: () => void;
+  /** v1.2 E1：导出全部记录为通用文本格式（Markdown/JSON/CSV 由下面的 Segmented 选定）。 */
+  onExportText: (format: TextExportFormat) => void;
   /** 从 zip 备份包导入（纯加法，重复项跳过，所以不需要二次确认）。 */
   onImportAll: () => void;
   /** 返回 false 表示写入没成功（例如注册表被拒），此时开关要回滚，不能假装成功。 */
@@ -313,6 +317,8 @@ export function SettingsView({
   // 危险操作两次点击确认（spec §6.7）：第一次点变成"再点一次"，3 秒后自动复位。
   const [pendingClear, setPendingClear] = useState<'unpinned' | 'all' | null>(null);
   const [customMinutes, setCustomMinutes] = useState('15');
+  // v1.2 E1：通用文本导出的目标格式（纯 UI 选择，不进 Settings —— 它不是设置项，是一次导出的参数）。
+  const [exportFormat, setExportFormat] = useState<TextExportFormat>('md');
 
   /**
    * ★ 自启动开关必须自己留一份现值（状态推进见 autoStartToggle.ts，带回归单测）。
@@ -965,6 +971,32 @@ export function SettingsView({
             >
               <Upload size={12} aria-hidden />
               导入备份包
+            </button>
+          </div>
+        </Row>
+
+        {/* v1.2 E1 通用格式导出：文本包只带走文本与标签（图片条目落占位说明），要图请用上面的 zip。 */}
+        <Row
+          label="导出为文本"
+          hint="全部记录导出为 Markdown / JSON / CSV；图片条目写占位说明，不带图片本体"
+        >
+          <div className="flex shrink-0 items-center gap-tight">
+            <Segmented
+              value={exportFormat}
+              options={[
+                { value: 'md' as const, label: 'Markdown' },
+                { value: 'json' as const, label: 'JSON' },
+                { value: 'csv' as const, label: 'CSV' },
+              ]}
+              onChange={setExportFormat}
+            />
+            <button
+              type="button"
+              onClick={() => onExportText(exportFormat)}
+              className="flex shrink-0 items-center gap-[4px] rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
+            >
+              <Download size={12} aria-hidden />
+              导出为文本
             </button>
           </div>
         </Row>

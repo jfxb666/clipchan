@@ -299,6 +299,11 @@ export function createMobileAdapter(): PlatformAdapter {
         return { ok: false, reason: '手机端没有文件系统落盘能力' };
       },
 
+      // v1.2 E1 通用格式导出：与 exportAll 同款——如实报失败，不假装导出成功。
+      async exportText(): Promise<ExportResult> {
+        return { ok: false, reason: '手机端没有文件系统落盘能力' };
+      },
+
       async importAll(): Promise<ImportResult> {
         // 手机端既不能选 zip 也不能解压落盘 —— 与回收站五方法同样明确抛错，不返回假成功。
         throw new Error('手机端暂不支持导入备份包');

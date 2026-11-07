@@ -31,6 +31,8 @@ const stub: PlatformAdapter = {
     searchPage: () => Promise.reject(new Error('当前环境没有实现 items.searchPage')),
     exportAll: () => Promise.reject(new Error('当前环境没有实现 items.exportAll')),
     importAll: () => Promise.reject(new Error('当前环境没有实现 items.importAll')),
+    // v1.2 E1 通用格式导出：与其余 items 方法同款——没实现就如实拒绝。
+    exportText: () => Promise.reject(new Error('当前环境没有实现 items.exportText')),
     getText: () => Promise.reject(new Error('当前环境没有实现 items.getText')),
     saveText: () => Promise.reject(new Error('当前环境没有实现 items.saveText')),
     pastePlain: () => Promise.reject(new Error('当前环境没有实现 items.pastePlain')),

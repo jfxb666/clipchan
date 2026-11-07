@@ -14,9 +14,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import AdmZip from 'adm-zip';
-import type { ExportResult, ImportResult } from '@clipchan/core';
+import type { ExportResult, ImportResult, TextExportFormat } from '@clipchan/core';
 import { hashBuffer, hashText, TEXT_LIMIT, type Db, type ItemRow } from './db';
 import { IMAGES_DIR_NAME, THUMBS_DIR_NAME, imageAbs } from './paths';
+import { buildTextExport, textExportFileName, textExportItemsFromRows } from './export-text';
 
 /** 备份包格式版本。v1 是旧的 JSON 导出（没有图片），这里只认 2。 */
 export const EXPORT_VERSION = 2;
@@ -144,6 +145,18 @@ function toManifestItem(row: ItemRow): ExportManifestItem {
 
 
 /**
+ * 读全部活跃行（deleted_at IS NULL），按 created_at DESC, seq DESC 排序。
+ *
+ * ★ 单独提出来：zip 导出（buildArchive）与通用文本导出（exportAllToTextFile）共用
+ *   同一条读取 —— 「导出 = 我的有效历史」这个口径只写一遍，两条导出路径永不漂移。
+ */
+export function readActiveRows(db: Db): ItemRow[] {
+  return db.raw
+    .prepare('SELECT * FROM items WHERE deleted_at IS NULL ORDER BY created_at DESC, seq DESC')
+    .all() as ItemRow[];
+}
+
+/**
  * 把活跃记录 + 原图/缩略图打成一个 AdmZip 对象。
  *
  * ★ 只导活跃行（deleted_at IS NULL）：回收站内容不属于「我的有效历史」。
@@ -155,9 +168,7 @@ function buildArchive(
   dataDir: string,
   now: number,
 ): { zip: AdmZip; manifest: ExportManifest; missingImages: number } {
-  const rows = db.raw
-    .prepare('SELECT * FROM items WHERE deleted_at IS NULL ORDER BY created_at DESC, seq DESC')
-    .all() as ItemRow[];
+  const rows = readActiveRows(db);
 
   const zip = new AdmZip();
   const files: { name: string; buf: Buffer }[] = [];
@@ -235,6 +246,51 @@ export async function exportAllToZip(opts: {
     };
   } catch (e) {
     return { ok: false, reason: '写入备份包失败：' + errText(e) };
+  }
+}
+
+/** IPC 载荷不可信：格式必须是三个白名单之一，坏载荷如实报失败而不是按缺省值导出。 */
+function asTextExportFormat(v: unknown): TextExportFormat | null {
+  return v === 'md' || v === 'json' || v === 'csv' ? v : null;
+}
+
+/**
+ * 导出全部活跃记录为通用文本格式（v1.2 E1：Markdown / JSON / CSV）。
+ *
+ * ★ 与 exportAllToZip 同一套注入/取消语义：pickSave 由 main.ts 注入（真身是
+ *   dialog.showSaveDialog，过滤器名随格式变）；用户取消 → { ok:false, cancelled:true }，
+ *   界面据此静默返回，不弹「导出失败」。
+ * ★ 读取复用 zip 导出的 readActiveRows（同一条「导出 = 我的有效历史」口径）；
+ *   内容由 export-text.ts 的纯函数 buildTextExport 生成，这里只负责选路、读行与落盘。
+ *   文本包不带图片本体（图片条目落占位说明），要图请走 zip。
+ */
+export async function exportAllToTextFile(opts: {
+  db: Db;
+  format: TextExportFormat;
+  /** defaultFileName 已按格式带好扩展名；第二个参数让调用方选对话框过滤器。 */
+  pickSave: (defaultFileName: string, format: TextExportFormat) => Promise<SavePick>;
+  now?: number;
+}): Promise<ExportResult> {
+  const format = asTextExportFormat(opts.format);
+  if (!format) return { ok: false, reason: '不支持的导出格式：' + String(opts.format) };
+
+  const now = typeof opts.now === 'number' ? opts.now : Date.now();
+  let picked: SavePick;
+  try {
+    picked = await opts.pickSave(textExportFileName(new Date(now), format), format);
+  } catch (e) {
+    return { ok: false, reason: '保存对话框打不开：' + errText(e) };
+  }
+  if (picked.canceled || !picked.filePath) return { ok: false, cancelled: true };
+
+  try {
+    const items = textExportItemsFromRows(readActiveRows(opts.db));
+    const text = buildTextExport(items, format, new Date(now).toISOString());
+    // 同步写：调用方是主进程 handler，写完才回结果，界面不会拿到「还没落盘」的路径。
+    fs.writeFileSync(picked.filePath, text, 'utf8');
+    return { ok: true, path: picked.filePath, items: items.length };
+  } catch (e) {
+    return { ok: false, reason: '写入文本导出失败：' + errText(e) };
   }
 }
 

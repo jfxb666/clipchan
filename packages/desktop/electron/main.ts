@@ -26,6 +26,7 @@ import type {
   OptimizeResult,
   Settings,
   SnippetInput,
+  TextExportFormat,
   UpdateStatus,
 } from '@clipchan/core';
 import { adapterFor } from '@clipchan/ai';
@@ -49,7 +50,7 @@ import { sweepOrphans } from './images-policy';
 import { DB_FILE_NAME, backupsDir, imageAbs, imagesDir, logsDir, thumbsDir, dbFile, resolveDataDir, toRelativePath } from './paths';
 import { THUMB_SCHEME, imageUrlFor, mapThumbUrl, resolveImageRequest, resolveThumbRequest } from './thumb-url';
 import { registerHotkeys, unregisterHotkeys } from './hotkeys';
-import { exportAllToZip, importAllFromZip, importSummaryText } from './export-import';
+import { exportAllToTextFile, exportAllToZip, importAllFromZip, importSummaryText } from './export-import';
 import { makeBroadcaster, registerIpc, registeredChannels, runRestore } from './ipc';
 import type { IpcHandler } from './ipc';
 import { createTray, defaultTrayIcon, trayLabels, buildTrayMenu } from './tray';
@@ -85,6 +86,12 @@ const SMOKE = process.argv.includes('--smoke');
 const BACKUP_POLL_MS = 60 * 60 * 1000;
 /** 启动即为小组件形态（--widget，旧版 --ghost 的位置）。 */
 const START_WIDGET = process.argv.includes('--widget');
+/** v1.2 E1：通用文本导出的保存对话框过滤器——名字随格式变，用户一眼认出在导哪种格式。 */
+const TEXT_EXPORT_FILTERS: Record<TextExportFormat, { name: string; extensions: string[] }> = {
+  md: { name: 'Markdown 文档', extensions: ['md'] },
+  json: { name: 'JSON 文件', extensions: ['json'] },
+  csv: { name: 'CSV 表格', extensions: ['csv'] },
+};
 
 /**
  * ★ 缩略图协议必须在 app ready **之前**声明特权，否则 <img> 会被 CSP/安全策略挡下。
@@ -922,6 +929,26 @@ function buildHandlers(): Partial<Record<string, IpcHandler>> {
             title: '导出备份包',
             defaultPath: path.join(app.getPath('documents'), defaultFileName),
             filters: [{ name: 'Clipchan 备份包', extensions: ['zip'] }],
+          };
+          const picked = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
+          return { canceled: picked.canceled, filePath: picked.filePath };
+        },
+      }),
+    // ★ v1.2 E1 通用格式导出（Markdown/JSON/CSV）：与 exportAll 同一套注入模式——
+    //   实现在 export-import.ts 的 exportAllToTextFile（不 import electron，可单测），
+    //   这里只负责把 dialog 注入进去；活跃条目读取与 zip 导出共用 readActiveRows。
+    //   文本包只带走文本与标签，图片条目落占位说明（要图请用 zip 备份包）。
+    [CH.items.exportText]: (_e, format: TextExportFormat) =>
+      exportAllToTextFile({
+        db: needDb(),
+        format,
+        pickSave: async (defaultFileName, fmt) => {
+          // 有窗口就挂在窗口上（模态，用户不会跑到后面去点别的），没有窗口就走无父窗口重载。
+          const win = rt.win;
+          const options = {
+            title: '导出为文本',
+            defaultPath: path.join(app.getPath('documents'), defaultFileName),
+            filters: [TEXT_EXPORT_FILTERS[fmt]],
           };
           const picked = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
           return { canceled: picked.canceled, filePath: picked.filePath };

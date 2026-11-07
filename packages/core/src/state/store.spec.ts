@@ -155,6 +155,8 @@ function makeFakeAdapter(seed: ClipItemDTO[] = []) {
         exportCalls.push(1);
         return exportResult;
       },
+      // v1.2 E1 通用文本导出：只补形状，本文件不测它（行为逐行镜像 exportAll，用例同款）。
+      exportText: async () => ({ ok: false, cancelled: true }),
       importAll: async () => {
         importCalls.push(1);
         return importResult;

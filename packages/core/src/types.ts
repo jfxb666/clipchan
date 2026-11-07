@@ -450,6 +450,12 @@ export interface CustomActionInput {
 }
 
 /**
+ * v1.2 E1 通用格式导出（文本包）的目标格式。
+ * md = 可读的 Markdown 文档；json = 全字段的机器可读清单；csv = 表格（Excel 可直接打开）。
+ */
+export type TextExportFormat = 'md' | 'json' | 'csv';
+
+/**
  * 导出为 zip 备份包的结果。
  *
  * ★ 为什么用「ok + cancelled」而不是抛异常表达取消：用户点「取消」是**正常操作**，
@@ -537,6 +543,12 @@ export interface ClipchanApi {
      * 绝不覆盖现有数据：重复 id / 重复哈希一律跳过并计数；用户取消 → cancelled:true。
      */
     importAll(): Promise<ImportResult>;
+    /**
+     * v1.2 E1：导出全部活跃记录为通用文本格式（Markdown / JSON / CSV）。
+     * 与 exportAll 同一套取消/失败语义（取消 → cancelled:true）；图片条目只落占位说明
+     * （文本包不带图片本体，要图请用 exportAll 的 zip 备份包）。
+     */
+    exportText(format: TextExportFormat): Promise<ExportResult>;
     /** 正文全文（列表预览是截断的）；图片行或 id 不存在 → ''。 */
     getText(id: string): Promise<string>;
     /** 把一段纯文本存成一条普通记录（kind='text'）。空串回 ok:false。 */

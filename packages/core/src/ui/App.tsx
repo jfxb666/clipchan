@@ -1318,6 +1318,7 @@ export function App() {
               onClearAll={clearAll}
               onOpenDataFolder={openDataFolder}
               onExportAll={() => void useClipStore.getState().exportAll()}
+              onExportText={(format) => void useClipStore.getState().exportText(format)}
               onImportAll={() => void useClipStore.getState().importAll()}
               onSetAutoStart={setAutoStart}
               onToggleMode={toggleMode}
