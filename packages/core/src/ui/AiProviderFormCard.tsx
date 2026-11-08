@@ -20,7 +20,7 @@ const INPUT_CLASS =
 const GHOST_BUTTON_CLASS =
   'rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
 const PRIMARY_BUTTON_CLASS =
-  'rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+  'rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 active:opacity-80 disabled:cursor-not-allowed disabled:opacity-60';
 
 export interface AiProviderFormProps {
   /** 有值 = 编辑既有 provider；无值 = 新增（不传 id，Key 必须填）。 */
