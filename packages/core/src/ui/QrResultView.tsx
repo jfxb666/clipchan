@@ -1,6 +1,8 @@
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'framer-motion';
 import { X } from 'lucide-react';
+import { fadeMotion, popMotion, useRespectReducedMotion } from './motion';
 import { qrLooksLikeUrl, qrMessageOf, type QrStatus } from './qrView';
 
 export interface QrResultViewProps {
@@ -34,6 +36,11 @@ export function QrResultView({
   onSaveAsItem,
   onClose,
 }: QrResultViewProps) {
+  // P3 动效层（a 项）：浮层进出 spring。动机：二维码面板同样是盖上来的层级切换，
+  //   与 OCR / 全文浮层共用同一副进出场面孔（POP_IN + scrim 淡入淡出）；
+  //   reduced-motion 时退化为直接落位。
+  const reduced = useRespectReducedMotion();
+
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -46,22 +53,34 @@ export function QrResultView({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, onClose]);
 
-  if (!open) return null;
-
   // ★ 只有 found 才算"有东西可以拿走"：loading / empty / error 下亮着按钮，
   //   用户点了只会复制一段空串，比按钮灰着更让人困惑。
   const ready = status === 'found';
   const message = qrMessageOf(status);
   const isUrl = ready && qrLooksLikeUrl(result);
 
+  /*
+   * ★ AnimatePresence 包住条件根节点（与 TextViewer / OCR 同一处理）：退出期间旧元素
+   *   冻结重放，exit 播完才卸载。退出态不响应键盘——keydown effect 以 open 为闸，
+   *   open=false 即刻摘掉自己的 Esc 监听；全局键盘表此刻 overlayOpen 已是 false，
+   *   第二次 Esc 回到「隐藏面板」语义（与改动前一致），关闭时序不变。
+   */
   return createPortal(
-    <div
-      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="cc-pop flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-panel">
+    <AnimatePresence>
+      {open ? (
+        <motion.div
+          key="qr-scrim"
+          className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) onClose();
+          }}
+          {...fadeMotion(reduced)}
+        >
+          {/* 面板用 framer 弹出（POP_IN），不再挂 .cc-pop——两套进场动画会互相打架。 */}
+          <motion.div
+            className="flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-panel"
+            {...popMotion(reduced)}
+          >
         <header className="flex shrink-0 items-center justify-between gap-snug border-b border-line px-snug py-tight">
           <h2 className="truncate text-[12px] font-medium text-ink-2">识别二维码</h2>
           <button
@@ -123,8 +142,10 @@ export function QrResultView({
             关闭
           </button>
         </footer>
-      </div>
-    </div>,
+          </motion.div>
+        </motion.div>
+      ) : null}
+    </AnimatePresence>,
     document.body,
   );
 }

@@ -228,6 +228,24 @@ body {
 .cc-fade { animation: cc-fade 160ms ease-out; }
 
 /*
+ * 粘贴成功行闪动（P3 动效层 b 项）。
+ * 动机：粘贴回传成功后该行会因 touch 跳到列表顶部——一次背景脉冲把「刚才贴的就是
+ *   这条」指给用户看，属于操作反馈。走 CSS 类而不是 framer 包装：ClipCard 是 200 行
+ *   长列表的逐项组件，性能红线（审计 T-M9）要求卡片层零额外 motion 节点。
+ * ★ 只动 background-color（行内有文字，动 opacity 会把内容一起闪掉；位移类属性按
+ *   铁律禁动）。整条规则包在 prefers-reduced-motion: no-preference 里——用户要求
+ *   减少动效时不闪，卡片保持静止（这也是本文件第一条 reduced-motion 分支）。
+ */
+@keyframes cc-flash {
+  0% { background-color: transparent; }
+  35% { background-color: var(--cc-primary-soft); }
+  100% { background-color: transparent; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .cc-flash { animation: cc-flash 400ms ease-out; }
+}
+
+/*
  * highlight.js token → 主题变量（v0.4.0 语法高亮）。
  * 一套规则吃两套主题：颜色全走 --cc-* 变量，深色主题下变量自己会换值，不必写两份。
  */

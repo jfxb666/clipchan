@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { motion } from 'framer-motion';
+import { popMotion, useRespectReducedMotion } from './motion';
 import { clampMenuPosition, type MenuAction, type MenuItem } from './contextMenu';
 import { cn } from './util';
 
@@ -26,6 +28,10 @@ function firstEnabledIndex(items: MenuItem[]): number {
 export function ContextMenu({ x, y, items, onPick, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [active, setActive] = useState(() => firstEnabledIndex(items));
+  // P3 动效层（a 项）：右键菜单弹出/退场。动机：菜单是瞬时出现的层级，200ms 的
+  //   POP_IN（scale 0.96→1）给它一个「从点击处长出来」的方向感；退场由 App 层的
+  //   AnimatePresence 驱动（组件条件卸载 → 冻结旧元素播 exit）。reduced-motion 退化。
+  const reduced = useRespectReducedMotion();
 
   const position = useMemo(
     () =>
@@ -95,14 +101,17 @@ export function ContextMenu({ x, y, items, onPick, onClose }: ContextMenuProps) 
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [active, items, onPick, onClose]);
 
+  // ★ 退出动画期间（App 已置 menu=null、本组件靠 AnimatePresence 冻结重放）：Esc/点外
+  //   的监听还挂着，但 onClose 落在 setMenu(null) 上是空操作，不会二次触发任何关闭。
   return createPortal(
-    <div
+    <motion.div
       ref={menuRef}
       role="menu"
       tabIndex={-1}
       aria-label="条目操作"
       style={{ left: position.x, top: position.y, width: MENU_WIDTH }}
-      className="cc-pop cc-no-drag fixed z-[60] rounded-card border border-line bg-surface py-[6px] shadow-panel outline-none"
+      className="cc-no-drag fixed z-[60] rounded-card border border-line bg-surface py-[6px] shadow-panel outline-none"
+      {...popMotion(reduced)}
     >
       {items.map((item, index) => (
         <button
@@ -132,7 +141,7 @@ export function ContextMenu({ x, y, items, onPick, onClose }: ContextMenuProps) 
           {item.hint ? <span className="shrink-0 text-[11px] text-ink-3">{item.hint}</span> : null}
         </button>
       ))}
-    </div>,
+    </motion.div>,
     document.body,
   );
 }

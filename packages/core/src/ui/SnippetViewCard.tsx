@@ -46,7 +46,7 @@ const GHOST_BUTTON_CLASS =
   'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2';
 
 const INPUT_CLASS =
-  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-line-strong';
+  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-primary';
 
 /**
  * 就地表单。校验走 snippetView 的纯函数（那边能单测），这里只负责把错误串显示出来。

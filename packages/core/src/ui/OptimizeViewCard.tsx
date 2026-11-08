@@ -86,7 +86,7 @@ const SELECT_CLASS =
 const GHOST_BUTTON_CLASS =
   'rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
 const PRIMARY_BUTTON_CLASS =
-  'flex items-center gap-[4px] rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+  'flex items-center gap-[4px] rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 active:opacity-80 disabled:cursor-not-allowed disabled:opacity-60';
 
 /** 右栏 loading 期间的骨架块。 */
 function Skeleton() {

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
+import { motion } from 'framer-motion';
 import { FolderPlus, MoveRight, Pencil, Tag, Trash2, X } from 'lucide-react';
 import { useClipStore, errorText } from '../state/store';
+import { fadeMotion, useRespectReducedMotion } from './motion';
 import { cn } from './util';
 import { countLabel, folderMoveTargets, folderRows, isOrganizeEmpty, toggleTag } from './organizeView';
 import { UNDO_LABEL } from './toastText';
@@ -30,7 +32,7 @@ export interface OrganizeViewProps {
 }
 
 const INPUT_CLASS =
-  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-line-strong';
+  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-primary';
 
 const GHOST_BUTTON_CLASS =
   'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2';
@@ -83,6 +85,12 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
    * ★ 会话内单级撤销，重启即失效（组件卸载同样失效）；再应用一批会被新快照覆盖。
    */
   const [undoBatch, setUndoBatch] = useState<WizardBatch['undo'] | null>(null);
+  // P3 动效层（d 项）：向导批间过渡。动机：应用一批后整屏内容换成下一批，150ms 淡入
+  //   给「这一页结束了、下一页来了」的边界感（轻量，不做逐行 stagger）；
+  //   「已应用行淡出」用 fadingIds + CSS opacity 过渡标记正在应用的行。
+  const reduced = useRespectReducedMotion();
+  /** 应用本批时正在淡出的行 id（与 applyTagsBulk 的 IPC 并行跑，不加延迟）。 */
+  const [fadingIds, setFadingIds] = useState<string[]>([]);
 
   // 打开整理页时刷一次文件夹平表：别的窗口可能刚建/删过，列表页那次拉取已经过时了。
   // 未归类计数同理：入口按钮的 N 用它，打开时刷一次，应用/撤销一批后由 store 再刷。
@@ -144,12 +152,16 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
         setWizardDone(true);
         setWizardRows([]);
         setSelections({});
+        setFadingIds([]);
         return;
       }
       const next = wizardRowsOf(items);
       setWizardRows(next);
       setSelections(Object.fromEntries(next.map((row) => [row.id, defaultSelection(row)])));
+      setFadingIds([]);
     } catch (err) {
+      // 拉取失败时旧行留在屏上：把淡出撤回来，不然停在原批的行会一直半透明。
+      setFadingIds([]);
       toast(errorText(err), 'error');
     } finally {
       setWizardLoading(false);
@@ -207,9 +219,16 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
     const batch = collectBatch(wizardRows, selections);
     if (batch.entries.length === 0) return; // 按钮已禁用，这里双保险（本批没有要应用的行，不触发应用也不推进）
     setApplying(true);
+    // 已应用的行立刻开始淡出（CSS opacity 过渡，150ms）——与下面的 IPC 并行，
+    // 不为动画拖延应用本身；失败时 fetchBatch 的 catch 会把淡出撤回。
+    setFadingIds(batch.entries.map((entry) => entry.id));
     try {
       const applied = await applyTagsBulk(batch.entries);
-      if (applied <= 0) return; // 失败已在 store 里 toast；不推进、不清快照
+      if (applied <= 0) {
+        // 失败已在 store 里 toast；不推进、不清快照，行留在屏上（撤回淡出）。
+        setFadingIds([]);
+        return;
+      }
       setUndoBatch(batch.undo);
       toast(appliedToastText(applied), 'ok', {
         label: UNDO_LABEL,
@@ -279,13 +298,24 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
           ) : (
             <>
               <div className="cc-scroll min-h-0 flex-1 overflow-y-auto px-base py-tight">
-                {wizardRows.map((row) => {
-                  const selected = selections[row.id] ?? [];
-                  return (
-                    <div
-                      key={row.id}
-                      className="flex items-center gap-snug border-b border-line py-snug last:border-b-0"
-                    >
+                {/*
+                  ★ P3 动效层（d 项）：批内容以 wizardBatchNo 为 key 整体淡入（160ms，150-200ms 档）。
+                    换批 = key 变化 = 重挂载 → 走一次 fadeMotion；reduced-motion 时直接落位。
+                    批行是轻内容（WIZARD_BATCH_SIZE 上限 200 行纯文本行），整块淡入不做逐行 stagger。
+                */}
+                <motion.div key={wizardBatchNo} {...fadeMotion(reduced)}>
+                  {wizardRows.map((row) => {
+                    const selected = selections[row.id] ?? [];
+                    return (
+                      <div
+                        key={row.id}
+                        className={cn(
+                          // 已应用行淡出：transition 只在 motion-safe 下启用——
+                          // prefers-reduced-motion 时无过渡，opacity 直接落位（退化合规）。
+                          'flex items-center gap-snug border-b border-line py-snug last:border-b-0 motion-safe:transition-opacity',
+                          fadingIds.includes(row.id) ? 'opacity-0' : '',
+                        )}
+                      >
                       <span className="min-w-0 flex-1 truncate text-[12px] text-ink" title={row.preview}>
                         {row.preview === '' ? '（无预览）' : row.preview}
                       </span>
@@ -313,9 +343,10 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                           })}
                         </div>
                       )}
-                    </div>
-                  );
-                })}
+                      </div>
+                    );
+                  })}
+                </motion.div>
                 {wizardLoading ? (
                   <p className="py-snug text-center text-[11px] text-ink-3">正在加载未归类条目…</p>
                 ) : null}
@@ -342,7 +373,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                   onClick={() => void applyBatch()}
                   disabled={applying || wizardLoading || applyableCount === 0}
                   title="把勾选的标签应用到本批条目，然后自动进入下一批"
-                  className="shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:opacity-40"
+                  className="shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:opacity-60"
                 >
                   应用本批（{applyableCount} 条）
                 </button>
@@ -400,7 +431,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
               type="button"
               onClick={submitNew}
               disabled={newName.trim() === ''}
-              className="shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:opacity-40"
+              className="shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:opacity-60"
             >
               新建
             </button>

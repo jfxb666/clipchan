@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import {
   AppWindow,
   CalendarClock,
@@ -462,6 +463,9 @@ export function App() {
       const result = await getPlatform().items.paste(id);
       const { text, tone } = pasteToast(result);
       store.toast(text, tone);
+      // P3 动效层 b 项：粘贴成功的行闪一次（双击 / 右键 / 数字键共用这条路径；
+      // Enter 路径的信号在 store.pasteSelected 里发）。失败不闪——没有可指的成功。
+      if (result.ok) store.flashItem(id);
     } catch (err) {
       store.toast(err instanceof Error ? err.message : String(err), 'error');
     }
@@ -1423,21 +1427,31 @@ export function App() {
         onWidgetWidth={(px) => void useClipStore.getState().setWidgetSize(px)}
       />
 
-      {/* 右键菜单与查看器都渲染在最后：它们要盖住所有视图（含小组件形态）。 */}
-      {menu ? (
-        <ContextMenu
-          x={menu.x}
-          y={menu.y}
-          items={menuItems(menu.id)}
-          onPick={(action) => pickMenu(action, menu.id)}
-          onClose={() => setMenu(null)}
-        />
-      ) : null}
+      {/*
+        右键菜单与查看器都渲染在最后：它们要盖住所有视图（含小组件形态）。
+        ★ P3 动效层（a 项）：AnimatePresence 包住条件挂载的浮层，关闭时先播 150ms 退场
+          再真正卸载（菜单本体/弹窗是 motion 节点，自带 exit）。退出期间冻结的是关闭前
+          最后一帧元素（x/y/items 原样），且 onClose 已指向置空操作、重复触发是空操作
+          ——关闭时序不变，Esc 不会因退场动画二次弹窗。
+      */}
+      <AnimatePresence>
+        {menu ? (
+          <ContextMenu
+            x={menu.x}
+            y={menu.y}
+            items={menuItems(menu.id)}
+            onPick={(action) => pickMenu(action, menu.id)}
+            onClose={() => setMenu(null)}
+          />
+        ) : null}
+      </AnimatePresence>
 
-      {/* 整理弹窗与右键菜单同层：从菜单里打开，也要盖住所有视图。 */}
-      {organizeItemId !== null ? (
-        <OrganizeItemDialog itemId={organizeItemId} onClose={() => setOrganizeItemId(null)} />
-      ) : null}
+      {/* 整理弹窗与右键菜单同层：从菜单里打开，也要盖住所有视图（退场处理同上）。 */}
+      <AnimatePresence>
+        {organizeItemId !== null ? (
+          <OrganizeItemDialog itemId={organizeItemId} onClose={() => setOrganizeItemId(null)} />
+        ) : null}
+      </AnimatePresence>
 
       <TextViewer
         open={viewer !== null}

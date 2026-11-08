@@ -144,6 +144,15 @@ export interface ClipStoreState {
    *   它只是个入口提示，不值得为它挡住整理页。
    */
   untaggedCount: number;
+  /**
+   * 纯 UI 状态（P3 动效层 b 项）：最近一次「粘贴成功」事件的行 id 与递增序号。
+   * ★ 不进 db / 不走 IPC，也不参与任何业务判定——列表行据此做一次 400ms 背景脉冲
+   *   （tokens.css 的 .cc-flash），把「刚贴的就是这条」指给用户看。
+   * ★ 序号是为了同一行连续粘贴两次时动画能重放（同值 set 不会触发重渲染）；
+   *   信号只发一次，动画的启停由卡片自己管（本地 state + setTimeout），这里不清零。
+   */
+  flashId: string | null;
+  flashSeq: number;
 }
 
 export interface ClipStoreActions {
@@ -246,6 +255,11 @@ export interface ClipStoreActions {
   applyBurstHint(ids: string[], count: number): void;
   /** 标签筛选：条件变了旧选中行可能已不在列表里，所以清选中并立刻重载（不走防抖）。 */
   setTagFilter(tags: string[]): void;
+  /**
+   * 粘贴成功后给对应行发一次闪动信号（P3 动效层 b 项；纯 UI 状态，见 flashId 注释）。
+   * ★ 重复粘贴同一行也要有反馈：靠 flashSeq 递增而不是 flashId 变化来触发重渲染。
+   */
+  flashItem(id: string): void;
   /** 文件夹筛选（三态语义同 ListQuery.folderId）：同上，立刻重载。 */
   setFolderFilter(folderId: string | null | undefined): void;
   /** 拉文件夹平表。文件夹是可选能力：拉不到就静默保持空表，不打扰首屏。 */
@@ -443,6 +457,8 @@ function initialState(): ClipStoreState {
     knownTags: [],
     aiProviders: [],
     untaggedCount: 0,
+    flashId: null,
+    flashSeq: 0,
   };
 }
 
@@ -514,6 +530,14 @@ export const useClipStore = create<ClipStore>((set, get) => ({
     //   真实条件，不是"没给值"。set 里原样存下，由 listQuery 负责保真到 ListQuery。
     set({ folderFilter: folderId, selectedIds: [], mergeHint: null });
     void get().load();
+  },
+
+  flashItem: (id) => {
+    if (!id) return;
+    // 只发布事件（id + 序号），动画的启停由 ClipCard 本地管：不清零、不设定时器，
+    // store 里少一个计时器就少一处可能漏掉的清理（与 lastDeletedIds 的撤销窗口不同，
+    // 这个信号过期无害，谁都不再读它）。
+    set({ flashId: id, flashSeq: get().flashSeq + 1 });
   },
 
   load: async () => {
@@ -955,6 +979,8 @@ export const useClipStore = create<ClipStore>((set, get) => ({
       const result = await getPlatform().items.paste(id);
       const { text, tone } = pasteToast(result);
       get().toast(text, tone);
+      // 粘贴成功给对应行发一次闪动信号（P3 动效层 b）：Enter 路径与双击同享这份反馈。
+      if (result.ok) get().flashItem(id);
     } catch (err) {
       get().toast(errorText(err), 'error');
     }

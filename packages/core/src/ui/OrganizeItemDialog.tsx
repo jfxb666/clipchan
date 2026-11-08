@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { motion } from 'framer-motion';
 import { FolderOpen, FolderPlus, Plus, Sparkles, Tag, X } from 'lucide-react';
 import { useClipStore } from '../state/store';
 import { sanitizeTag, suggestFolder, suggestTags } from '../logic/organize';
+import { fadeMotion, popMotion, useRespectReducedMotion } from './motion';
 import { cn } from './util';
 import {
   folderMoveTargets,
@@ -33,7 +35,7 @@ export interface OrganizeItemDialogProps {
 }
 
 const INPUT_CLASS =
-  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-line-strong';
+  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-primary';
 
 export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps): JSX.Element | null {
   const item = useClipStore((s) => s.items.find((i) => i.id === itemId));
@@ -44,6 +46,10 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
   const aiProviders = useClipStore((s) => s.aiProviders);
   const suggestTagsByAi = useClipStore((s) => s.suggestTagsByAi);
   const createFolder = useClipStore((s) => s.createFolder);
+  // P3 动效层（a 项）：整理弹窗弹出/退场。动机：与右键菜单同源的层级切换，共用同一副
+  //   POP_IN 面孔；退场由 App 层 AnimatePresence 驱动，退出期间 Esc 落在已置空的
+  //   setOrganizeItemId(null) 上是空操作，关闭时序不变。reduced-motion 时退化为直接落位。
+  const reduced = useRespectReducedMotion();
 
   const [selected, setSelected] = useState<string[]>(() => itemTagsOf(item));
   const [draftTag, setDraftTag] = useState('');
@@ -167,14 +173,21 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
     onClose();
   };
 
+  // ★ 本组件由 App 条件挂载（organizeItemId !== null），退出动画由 App 层的
+  //   AnimatePresence 驱动：scrim 淡出 + 面板反向弹出同时进行（两个 motion 节点都带 exit）。
   return createPortal(
-    <div
+    <motion.div
       className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
+      {...fadeMotion(reduced)}
     >
-      <div className="cc-pop flex max-h-[80vh] w-full max-w-[560px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-panel">
+      {/* 面板用 framer 弹出（POP_IN），不再挂 .cc-pop——两套进场动画会互相打架。 */}
+      <motion.div
+        className="flex max-h-[80vh] w-full max-w-[560px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-panel"
+        {...popMotion(reduced)}
+      >
         <header className="flex shrink-0 items-center justify-between gap-snug border-b border-line px-snug py-tight">
           <h2 className="truncate text-[12px] font-medium text-ink-2">整理这条记录</h2>
           <button
@@ -202,7 +215,7 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
                   type="button"
                   onClick={() => void addTagsFromAi()}
                   disabled={aiTagging}
-                  className="ml-auto flex shrink-0 items-center gap-[3px] rounded-button border border-line px-snug py-[3px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:opacity-40"
+                  className="ml-auto flex shrink-0 items-center gap-[3px] rounded-button border border-line px-snug py-[3px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:opacity-60"
                 >
                   <Sparkles size={11} aria-hidden />
                   {aiTagging ? '正在起名…' : '用 AI 起名'}
@@ -273,7 +286,7 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
                 type="button"
                 onClick={addDraftTag}
                 disabled={sanitizeTag(draftTag) === ''}
-                className="flex shrink-0 items-center gap-[3px] rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:opacity-40"
+                className="flex shrink-0 items-center gap-[3px] rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:opacity-60"
               >
                 <Plus size={11} aria-hidden />
                 加入
@@ -358,8 +371,8 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
             保存
           </button>
         </footer>
-      </div>
-    </div>,
+      </motion.div>
+    </motion.div>,
     document.body,
   );
 }

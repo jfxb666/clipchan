@@ -1,7 +1,9 @@
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'framer-motion';
 import { X } from 'lucide-react';
 import type { OcrProgress, OcrResult, OcrStatus } from '../types';
+import { fadeMotion, popMotion, useRespectReducedMotion } from './motion';
 import { canPaste, canSaveAsItem, ocrErrorText, ocrProgressText, ocrStatusText } from './ocrView';
 
 export interface OcrResultViewProps {
@@ -54,6 +56,10 @@ export function OcrResultView({
   onSendToAssist,
   onClose,
 }: OcrResultViewProps) {
+  // P3 动效层（a 项）：浮层进出 spring。动机：OCR 面板是盖在列表上的层级切换，
+  //   进出动画让「开面板 / 关面板」有方向感；reduced-motion 时退化为直接落位。
+  const reduced = useRespectReducedMotion();
+
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -66,8 +72,6 @@ export function OcrResultView({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, onClose]);
 
-  if (!open) return null;
-
   const ready = status?.ready === true;
   const text = result?.text ?? '';
   const canSave = result !== null && canSaveAsItem(result);
@@ -77,14 +81,28 @@ export function OcrResultView({
   const downloading = loading && progress !== null && progress.phase === 'download';
   const ratio = downloading && progress !== null && progress.ratio >= 0 ? progress.ratio : null;
 
+  /*
+   * ★ AnimatePresence 包住条件根节点（与 TextViewer 同一处理）：退出期间旧元素冻结重放，
+   *   exit 播完才卸载。退出态不响应键盘——keydown effect 以 open 为闸，open=false 即刻
+   *   摘掉自己的 Esc 监听；全局键盘表此刻 overlayOpen 已是 false，第二次 Esc 回到
+   *   「隐藏面板」语义（与改动前关闭后的第二次 Esc 一致），关闭时序不变。
+   */
   return createPortal(
-    <div
-      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="cc-pop flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-panel">
+    <AnimatePresence>
+      {open ? (
+        <motion.div
+          key="ocr-scrim"
+          className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) onClose();
+          }}
+          {...fadeMotion(reduced)}
+        >
+          {/* 面板用 framer 弹出（POP_IN），不再挂 .cc-pop——两套进场动画会互相打架。 */}
+          <motion.div
+            className="flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-panel"
+            {...popMotion(reduced)}
+          >
         <header className="flex shrink-0 items-center justify-between gap-snug border-b border-line px-snug py-tight">
           <h2 className="truncate text-[12px] font-medium text-ink-2">识别结果</h2>
           <button
@@ -200,8 +218,10 @@ export function OcrResultView({
             关闭
           </button>
         </footer>
-      </div>
-    </div>,
+          </motion.div>
+        </motion.div>
+      ) : null}
+    </AnimatePresence>,
     document.body,
   );
 }

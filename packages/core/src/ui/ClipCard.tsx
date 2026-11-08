@@ -1,8 +1,9 @@
 import type { CSSProperties } from 'react';
-import { Fragment } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ImageIcon, Sparkles, Star } from 'lucide-react';
 import type { ClipItemDTO } from '../types';
+import { useClipStore } from '../state/store';
 import { TypeBadge } from './TypeBadge';
 import { guessLanguage, highlightToHtml, shouldHighlight } from './codeHighlight';
 import { highlightSegments } from './highlight';
@@ -51,6 +52,21 @@ export function ClipCard({
   // ★ 只有图片与文件记录真的能拖出去（Electron 的 startDrag 只认文件路径）。
   //   文本类也挂 draggable 只会让用户拖半天等一句"拖不出去"，所以干脆不给拖拽手柄。
   const canDrag = onDragStart !== undefined && (item.kind === 'image' || item.kind === 'files');
+  // P3 动效层 b 项：粘贴成功行闪动。动机：粘贴回传成功后这条会因 touch 跳到列表顶部，
+  //   一次 400ms 背景脉冲（.cc-flash，tokens.css）把「刚贴的就是这条」指给用户看——
+  //   操作反馈，不是装饰。★ 长列表红线：这里只多一个布尔订阅 + 一个 CSS 类，
+  //   不加 motion 节点（闪动的启停由下面这个 effect 本地管，store 只发事件不清零）。
+  //   选择器收窄成「闪的、且只闪这一行」的序号：flashId 不是本行时恒为 0，
+  //   别的行闪动 / store 任意变化不会让这张卡重渲染。
+  const flashEvent = useClipStore((s) => (s.flashId === item.id ? s.flashSeq : 0));
+  const [flashing, setFlashing] = useState(false);
+  useEffect(() => {
+    if (flashEvent === 0) return;
+    setFlashing(true);
+    // 动画 400ms，多留 50ms 再摘类，避免边缘帧上背景被硬切回。
+    const timer = setTimeout(() => setFlashing(false), 450);
+    return () => clearTimeout(timer);
+  }, [flashEvent]);
   const segments = highlightSegments(item.preview, term);
   // ★ 铁律二：有搜索词时只做搜索词高亮（shouldHighlight 已把 term 非空判掉），
   //   语法高亮为 null 就原样走 segments 分支。
@@ -91,6 +107,8 @@ export function ClipCard({
       //   （opacity-60）+ 悬停不透明，不再依赖 hover 才可见（也不再需要 group）。
       className={cn(
         'relative flex cursor-default items-start gap-snug rounded-card border bg-surface p-snug shadow-card',
+        // 闪动走 CSS 类：prefers-reduced-motion 下 tokens.css 的 media query 让它整体不生效。
+        flashing ? 'cc-flash' : '',
         selected
           ? // ★ 键盘选中（↑/↓ 移动的就是这把选中）：2px 主色环 + 2px 外移，与全局
             //   focus-visible 规范同一副面孔。外移色用 --cc-bg（卡片就坐在主背景上），

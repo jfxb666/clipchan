@@ -1,7 +1,9 @@
+import { motion } from 'framer-motion';
 import type { KindFilter } from '../types';
 import { APP_ICON_URL } from './assets';
 import { emptyHintOf } from './badges';
 import { firstRunTips } from './firstRun';
+import { enterMotion, useRespectReducedMotion } from './motion';
 
 /**
  * 空状态（spec §6.1 / §6.3）：用应用图标本身 96px 降饱和（saturate(.35) opacity(.7)）
@@ -23,12 +25,17 @@ export function EmptyState({
   /** 为真时在文案下方补三条上手提示（仅在「全部」页且一条记录都没有时由调用方置真）。 */
   showFirstRun?: boolean;
 }) {
+  // P3 动效层（f 项）：空状态首次挂载 fade + 上移 8px（150ms）。动机：空状态替换骨架 /
+  //   列表出现，是一次状态过渡，轻轻「落座」比硬切温和；只进不出（卸载不退场）。
+  //   reduced-motion 时 enterMotion 退化为直接落位。
+  const reduced = useRespectReducedMotion();
   return (
-    <div
+    <motion.div
       className={
         'flex h-full flex-col items-center justify-center gap-base px-comfortable text-center ' +
         (className ?? '')
       }
+      {...enterMotion(reduced)}
     >
       <div className="flex h-[128px] w-[128px] items-center justify-center rounded-card bg-surface-2">
         <img
@@ -52,6 +59,6 @@ export function EmptyState({
           ))}
         </ul>
       ) : null}
-    </div>
+    </motion.div>
   );
 }

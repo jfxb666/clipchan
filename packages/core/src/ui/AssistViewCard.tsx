@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import { motion } from 'framer-motion';
 import { Copy, Play, Save, Square, X } from 'lucide-react';
 import type { AiProvider, AssistRequest, AssistResult, CustomAction } from '../types';
 import { getPlatform } from '../platform/adapter';
 import { aiErrorMessage } from './aiProviderForm';
+import { popMotion, useRespectReducedMotion } from './motion';
 import {
   ASSIST_ACTION_OPTIONS,
   ASSIST_LANG_OPTIONS,
@@ -50,7 +52,7 @@ const SELECT_CLASS =
 const GHOST_BUTTON_CLASS =
   'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
 const PRIMARY_BUTTON_CLASS =
-  'flex items-center gap-[4px] rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+  'flex items-center gap-[4px] rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 active:opacity-80 disabled:cursor-not-allowed disabled:opacity-60';
 
 /** 默认选第一个配好 Key 的 provider；都没有就落到第一个，再没有就是空串。 */
 function initialProviderId(providers: AiProvider[]): string {
@@ -72,6 +74,12 @@ export function AssistView({
   onGoSettings,
 }: AssistViewProps) {
   const [providerId, setProviderId] = useState(() => initialProviderId(providers));
+  // P3 动效层（a 项）：助手页入场弹出。动机：从列表切进助手页是视图层级的切换，
+  //   200ms 的 POP_IN 让「进来了一个工作面板」有方向感。★ 只做入场不做退场：
+  //   这是整页视图切换（不是浮层），退场动画会让新旧两页同时占位（布局跳变）
+  //   或让新页等 150ms 才出现——面板是秒开工具，两种代价都不划算。
+  //   reduced-motion 时 popMotion 退化为直接落位。
+  const reduced = useRespectReducedMotion();
   const [action, setAction] = useState<AssistRequest['action']>('translate');
   /** 自定义动作的选中 id；null = 选中的是内置动作（与 action 互斥，两态只活一个）。 */
   const [customId, setCustomId] = useState<string | null>(null);
@@ -177,7 +185,7 @@ export function AssistView({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <motion.div className="flex min-h-0 flex-1 flex-col" {...popMotion(reduced)}>
       <div className="flex shrink-0 items-center justify-between gap-snug border-b border-line px-base py-snug">
         <h2 className="truncate text-[12px] font-medium text-ink">AI 助手</h2>
         <button
@@ -289,7 +297,7 @@ export function AssistView({
                 value={extra}
                 onChange={(event) => setExtra(event.target.value)}
                 placeholder="可选的额外要求（例如：更口语一点）"
-                className="min-w-0 flex-1 rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-line-strong"
+                className="min-w-0 flex-1 rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-primary"
                 aria-label="额外要求"
               />
             ) : (
@@ -364,6 +372,6 @@ export function AssistView({
           </div>
         </>
       )}
-    </div>
+    </motion.div>
   );
 }

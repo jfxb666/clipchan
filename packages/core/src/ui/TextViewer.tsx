@@ -1,9 +1,11 @@
 import { Fragment, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'framer-motion';
 import { X } from 'lucide-react';
 import { HIGHLIGHT_MAX_CHARS, guessLanguage, highlightToHtml } from './codeHighlight';
 import { highlightSegments } from './highlight';
 import { editTextActions } from './textEdit';
+import { fadeMotion, popMotion, useRespectReducedMotion } from './motion';
 import { cn } from './util';
 
 /** 搜索命中片段样式：与 ClipCard 的 HIT_CLASS 同一套（accent-soft 底衬），改要两处一起改。 */
@@ -57,6 +59,10 @@ export function TextViewer({
   //   不回写历史条目本体；「取消编辑」直接丢弃暂存。
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  // P3 动效层（a 项）：浮层进出 spring。动机：浮层是「盖上来」的层级切换，进出都有
+  //   动画才不会显得突兀；scrim 淡入淡出、面板 POP_IN（scale 0.96→1，200ms house 曲线）。
+  //   prefers-reduced-motion 时 popMotion/fadeMotion 退化为直接落位（无动画）。
+  const reduced = useRespectReducedMotion();
 
   useEffect(() => {
     if (!open) return;
@@ -74,8 +80,6 @@ export function TextViewer({
   useEffect(() => {
     if (open) setEditing(false);
   }, [open]);
-
-  if (!open) return null;
 
   const isImage = typeof imageUrl === 'string' && imageUrl.length > 0;
   const broken = isImage && failedUrl === imageUrl;
@@ -98,14 +102,30 @@ export function TextViewer({
     setEditing(true);
   };
 
+  /*
+   * ★ AnimatePresence 包住条件根节点：open 翻 false 时旧元素被冻结重放（退出期间
+   *   内容仍是关闭前那一帧，不会闪空壳），exit 动画播完才真正卸载。
+   * ★ 退出态不响应键盘：上面的 keydown effect 以 open 为闸，open=false 即刻摘掉
+   *   自己的 Esc 监听——退出动画期间按 Esc 不会再触发 onClose；全局键盘表此刻
+   *   已把 overlayOpen 读成 false，第二次 Esc 的语义回到「隐藏面板」（与改动前
+   *   关闭后的第二次 Esc 完全一致），关闭时序不变。
+   */
   return createPortal(
-    <div
-      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="cc-pop flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-panel">
+    <AnimatePresence>
+      {open ? (
+        <motion.div
+          key="viewer-scrim"
+          className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) onClose();
+          }}
+          {...fadeMotion(reduced)}
+        >
+          {/* 面板用 framer 弹出（POP_IN），不再挂 .cc-pop——两套进场动画会互相打架。 */}
+          <motion.div
+            className="flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-card border border-line bg-surface shadow-panel"
+            {...popMotion(reduced)}
+          >
         <header className="flex shrink-0 items-center justify-between gap-snug border-b border-line px-snug py-tight">
           <h2 className="truncate text-[12px] font-medium text-ink-2">{title}</h2>
           <button
@@ -180,7 +200,7 @@ export function TextViewer({
                   className={cn(
                     'rounded-button border border-line px-snug py-micro text-[12px] text-ink-2 transition-colors',
                     'hover:border-line-strong hover:text-ink',
-                    'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-2',
+                    'disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-line disabled:hover:text-ink-2',
                   )}
                 >
                   存为片段
@@ -214,7 +234,7 @@ export function TextViewer({
                 onClick={() => onPasteText?.(draft)}
                 className={cn(
                   'rounded-button bg-primary px-snug py-micro text-[12px] text-on-primary transition-opacity',
-                  'hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:opacity-40',
+                  'hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:opacity-60',
                 )}
               >
                 粘贴修改后内容
@@ -249,8 +269,10 @@ export function TextViewer({
             </footer>
           )
         ) : null}
-      </div>
-    </div>,
+          </motion.div>
+        </motion.div>
+      ) : null}
+    </AnimatePresence>,
     document.body,
   );
 }

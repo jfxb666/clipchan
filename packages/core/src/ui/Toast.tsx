@@ -1,4 +1,6 @@
+import { AnimatePresence, motion } from 'framer-motion';
 import type { ToastAction, ToastTone } from './toastText';
+import { riseMotion, useRespectReducedMotion } from './motion';
 import { cn } from './util';
 
 /** 单条浮层提示。与 store 里的 Toast 结构一致（这里不 import store，保持组件可单测）。 */
@@ -27,13 +29,20 @@ const TONE_CLASS: Record<ToastTone, string> = {
  */
 export function Toast({ toast, onDismiss }: { toast: ToastItem; onDismiss?: (id: number) => void }) {
   const dismissible = Boolean(onDismiss);
+  // P3 动效层（c 项）：toast 滑入滑出。动机：提示条从底部「冒出来」是状态出现的
+  //   位置语义，进出场同一副面孔（y 8→0 + 淡入 200ms；退出反向 150ms）让用户能预期
+  //   它从哪来回哪去；退场由外层 ToastStack 的 AnimatePresence 驱动（TTL 到点 /
+  //   手动关闭都走同一动画）。reduced-motion 时 riseMotion 退化为直接出现/消失。
+  const reduced = useRespectReducedMotion();
   return (
-    <div
+    <motion.div
       role="status"
       className={cn(
-        'cc-pop pointer-events-auto flex max-w-[420px] items-center gap-tight rounded-button border px-snug py-tight text-left text-[12px] leading-[1.6] shadow-panel',
+        // 进场交给 framer（riseMotion），不再挂 .cc-pop——两套进场动画会互相打架。
+        'pointer-events-auto flex max-w-[420px] items-center gap-tight rounded-button border px-snug py-tight text-left text-[12px] leading-[1.6] shadow-panel',
         TONE_CLASS[toast.tone],
       )}
+      {...riseMotion(reduced)}
     >
       {dismissible ? (
         <button
@@ -62,11 +71,16 @@ export function Toast({ toast, onDismiss }: { toast: ToastItem; onDismiss?: (id:
           {toast.action.label}
         </button>
       ) : null}
-    </div>
+    </motion.div>
   );
 }
 
-/** 浮层容器：底部居中堆叠，点任意一条可提前关掉。 */
+/**
+ * 浮层容器：底部居中堆叠，点任意一条可提前关掉。
+ * ★ P3 动效层（c 项）：AnimatePresence 让每条 toast 在移除时先播 150ms 退场再卸载。
+ *   原来的「toasts 空就整层 return null」必须拿掉——最后一个 toast 退场时容器得
+ *   还挂着，否则退出动画没有宿主可播。空容器只是不可见（absolute + pointer-events-none）。
+ */
 export function ToastStack({
   toasts,
   onDismiss,
@@ -76,7 +90,6 @@ export function ToastStack({
   onDismiss?: (id: number) => void;
   className?: string;
 }) {
-  if (toasts.length === 0) return null;
   return (
     <div
       className={cn(
@@ -84,9 +97,11 @@ export function ToastStack({
         className,
       )}
     >
-      {toasts.map((toast) => (
-        <Toast key={toast.id} toast={toast} onDismiss={onDismiss} />
-      ))}
+      <AnimatePresence initial={false}>
+        {toasts.map((toast) => (
+          <Toast key={toast.id} toast={toast} onDismiss={onDismiss} />
+        ))}
+      </AnimatePresence>
     </div>
   );
 }
