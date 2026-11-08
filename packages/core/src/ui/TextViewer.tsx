@@ -7,7 +7,7 @@ import { editTextActions } from './textEdit';
 import { cn } from './util';
 
 /** 搜索命中片段样式：与 ClipCard 的 HIT_CLASS 同一套（accent-soft 底衬），改要两处一起改。 */
-const HIT_CLASS = 'rounded-sm bg-[var(--cc-accent-soft)] px-0.5 text-[var(--cc-accent)]';
+const HIT_CLASS = 'rounded-sm bg-accent-soft px-0.5 text-accent';
 
 export interface TextViewerProps {
   open: boolean;
@@ -100,7 +100,7 @@ export function TextViewer({
 
   return createPortal(
     <div
-      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-[var(--cc-scrim)] p-comfortable"
+      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -112,7 +112,7 @@ export function TextViewer({
             type="button"
             title="关闭（Esc）"
             onClick={onClose}
-            className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+            className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-accent"
           >
             <X size={14} aria-hidden />
           </button>
@@ -144,7 +144,7 @@ export function TextViewer({
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               spellCheck={false}
-              className="cc-scroll min-h-[120px] w-full flex-1 resize-none break-words rounded-input border border-line bg-surface px-snug py-tight font-mono text-[12px] leading-[1.7] text-ink outline-none focus:border-[var(--cc-primary)]"
+              className="cc-scroll min-h-[120px] w-full flex-1 resize-none break-words rounded-input border border-line bg-surface px-snug py-tight font-mono text-[12px] leading-[1.7] text-ink outline-none focus:border-primary"
             />
           ) : (
             <pre className="max-h-[60vh] select-text overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.7] text-ink">
@@ -179,7 +179,7 @@ export function TextViewer({
                   onClick={() => onSaveAsSnippet(draft)}
                   className={cn(
                     'rounded-button border border-line px-snug py-micro text-[12px] text-ink-2 transition-colors',
-                    'hover:border-[var(--cc-border-strong)] hover:text-ink',
+                    'hover:border-line-strong hover:text-ink',
                     'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink-2',
                   )}
                 >
@@ -192,7 +192,7 @@ export function TextViewer({
                   onClick={() => onCopy(draft)}
                   className={cn(
                     'rounded-button border border-line px-snug py-micro text-[12px] text-ink-2 transition-colors',
-                    'hover:border-[var(--cc-border-strong)] hover:text-ink',
+                    'hover:border-line-strong hover:text-ink',
                   )}
                 >
                   复制
@@ -203,7 +203,7 @@ export function TextViewer({
                 onClick={() => setEditing(false)}
                 className={cn(
                   'rounded-button border border-line px-snug py-micro text-[12px] text-ink-2 transition-colors',
-                  'hover:border-[var(--cc-border-strong)] hover:text-ink',
+                  'hover:border-line-strong hover:text-ink',
                 )}
               >
                 取消编辑
@@ -213,7 +213,7 @@ export function TextViewer({
                 disabled={!editTextActions(draft).canPaste}
                 onClick={() => onPasteText?.(draft)}
                 className={cn(
-                  'rounded-button bg-[var(--cc-primary)] px-snug py-micro text-[12px] text-white transition-opacity',
+                  'rounded-button bg-primary px-snug py-micro text-[12px] text-on-primary transition-opacity',
                   'hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:opacity-40',
                 )}
               >
@@ -228,7 +228,7 @@ export function TextViewer({
                   onClick={() => onCopy(text ?? '')}
                   className={cn(
                     'rounded-button border border-line px-snug py-micro text-[12px] text-ink-2 transition-colors',
-                    'hover:border-[var(--cc-border-strong)] hover:text-ink',
+                    'hover:border-line-strong hover:text-ink',
                   )}
                 >
                   复制全文
@@ -240,7 +240,7 @@ export function TextViewer({
                   onClick={enterEdit}
                   className={cn(
                     'rounded-button border border-line px-snug py-micro text-[12px] text-ink-2 transition-colors',
-                    'hover:border-[var(--cc-border-strong)] hover:text-ink',
+                    'hover:border-line-strong hover:text-ink',
                   )}
                 >
                   编辑

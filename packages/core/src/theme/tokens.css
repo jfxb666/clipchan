@@ -1,4 +1,18 @@
-/* 剪贴板酱设计令牌 —— 取色自用户提供的应用图标（暖色水彩）。 */
+/*
+ * 剪贴板酱设计令牌 —— 取色自用户提供的应用图标（暖色水彩）。
+ *
+ * ★ 主题策略（P1 token 收口定稿）：**CSS 变量 + data-theme 是唯一主题机制**。
+ *   组件层只用语义工具类（bg-surface / text-ink-2 / border-line …），它们的值全部
+ *   指到这里的 --cc-* 变量；切换主题时只换变量值，不换类名。
+ *   tailwind.config 的 darkMode:['selector','[data-theme="dark"]'] 仅作为
+ *   dark: 变体的兜底开关保留，当前组件层 0 处 dark: 用法 —— 若出现请视为回潮。
+ *
+ * ★ 对比度（WCAG，本文件值与注释必须互相印证）：
+ *   浅色正文 text 13.49:1 / 次级 text-2 5.10:1 —— 均 ≥4.5 达 AA；
+ *   深色正文 13.46:1 / 次级 7.61:1 —— 达 AA。
+ *   三级 text-3（占位符、弱提示）浅 2.61 / 深 3.91：刻意保持「退后」的视觉层级，
+ *   未到 4.5，列为 P2（调亮会破坏层级感，需要连排版一起重排）。
+ */
 :root {
   --cc-bg: #FEFBF4;
   --cc-surface: #FFFDF8;
@@ -12,6 +26,10 @@
   --cc-accent-soft: #F3E0DC;
   --cc-warm: #C8A078;
   --cc-pink: #DCB4A0;
+  /* 彩色底上的文字/图标：主按钮、警示按钮的标签。浅深两主题同取暖白。 */
+  --cc-on-primary: #FFFDF8; /* on #446971 = 5.89:1 (AA) */
+  --cc-on-accent: #FFF6F3;  /* on #81271E = 8.80:1 (AA) */
+  --cc-danger: #B3382B;     /* on #FFFDF8 = 5.87:1 (AA)；替换原 text-red-400（浅色下仅 2.72:1） */
   --cc-border: rgba(60, 40, 20, 0.08);
   --cc-border-strong: rgba(60, 40, 20, 0.16);
   --cc-shadow: 0 8px 28px rgba(60, 40, 20, 0.12);
@@ -32,9 +50,31 @@
   --cc-radius-input: 10px;
   --cc-font: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
   --cc-font-mono: "Cascadia Code", Consolas, "Courier New", monospace;
+
+  /*
+   * 截图 HUD（CaptureOverlay）：独立小窗盖在屏幕上做框选/标注，**恒暗、不随 data-theme
+   * 切换**（底下是任意用户的桌面内容，只有恒暗面板才可读），所以只定义在这一份。
+   * 取 iOS 深色 HUD 原值；纯白/纯黑按「无 #000/#fff」铁律换成近值。
+   * HUD 蓝是第二强调色（iOS 语义蓝），与应用主强调色（暖红）不一致 —— P2 再定夺收编或豁免。
+   */
+  --cc-hud-backdrop: #0A0A0B;      /* 原 #000：overlay 根节点的底色 */
+  --cc-hud-panel: rgba(28, 28, 30, 0.96);
+  --cc-hud-border: rgba(255, 255, 255, 0.14);   /* 工具条/错误卡边框（原 .14/.16 归一） */
+  --cc-hud-substrate: rgba(255, 255, 255, 0.10); /* 次级按钮底 */
+  --cc-hud-divider: rgba(255, 255, 255, 0.18);
+  --cc-hud-accent: #0A84FF;
+  --cc-hud-on-accent: #F5F5F7;     /* on #0A84FF = 3.35:1（HUD 按钮标签，P2 记录） */
+  --cc-hud-text: #F5F5F7;
+  --cc-hud-text-2: #C7C7CC;
+  --cc-hud-text-3: #8E8E93;
+  --cc-hud-mask: rgba(6, 6, 7, 0.45);           /* 选区外遮罩（原 rgba(0,0,0,.45)） */
+  --cc-hud-scrim: rgba(6, 6, 7, 0.35);          /* 文字草稿输入底 */
+  --cc-hud-select-stroke: rgba(6, 6, 7, 0.55);  /* 画布上选区描边（压在截图像素上） */
 }
 
-/* 深色：夜晚书房 */
+/* 深色：夜晚书房。
+ * ★ 与下方「auto + 系统深色」块是同一套值的**两份拷贝**，改任何一个都必须同步另一块
+ *   —— 之所以重复而不是共用，是因为纯 CSS 无法跨 @media 复用声明块（无预处理器）。 */
 :root[data-theme="dark"] {
   --cc-bg: #1E1813;
   --cc-surface: #2A221B;
@@ -44,14 +84,21 @@
   --cc-text-3: #8E7C6B;
   --cc-primary: #7FA8B0;
   --cc-primary-soft: #26363A;
-  --cc-accent: #C25A4E;
+  /* accent #C25A4E → #B55448（P1 唯一一次动现有色值）：原值是中调红，任何浅色文字
+   * 压上去最高只有 4.32:1（纯 #fff）到不了 AA；#B55448 色相不变、ΔRGB≈(13,6,5)，
+   * 配 --cc-on-accent 达 4.56:1。代价：accent 当文字用时对比从 3.62 降到 3.22（本来就
+   * 不到 4.5，P2 单独处理 accent 文字变体）。 */
+  --cc-accent: #B55448;
   --cc-accent-soft: #3A241F;
   --cc-warm: #C8A078;
   --cc-pink: #B98C78;
+  --cc-on-primary: #1E1813; /* on #7FA8B0 = 6.80:1 (AA)；原白字只有 2.58:1 */
+  --cc-on-accent: #FFF6F3;  /* on #B55448 = 4.56:1 (AA) */
+  --cc-danger: #F0908A;     /* on #2A221B = 6.75:1 (AA) */
   --cc-border: rgba(245, 237, 225, 0.10);
   --cc-border-strong: rgba(245, 237, 225, 0.20);
-  --cc-shadow: 0 8px 28px rgba(0, 0, 0, 0.42);
-  --cc-shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.30);
+  --cc-shadow: 0 8px 28px rgba(6, 6, 7, 0.42);
+  --cc-shadow-sm: 0 2px 8px rgba(6, 6, 7, 0.30);
   --cc-badge-text-bg: #3B3025;
   --cc-badge-link-bg: #24363A;
   --cc-badge-code-bg: #3C2521;
@@ -61,23 +108,15 @@
   --cc-scroll: rgba(245, 237, 225, 0.20);
   --cc-glass: rgba(42, 34, 27, 0.72);
   --cc-glass-fallback: rgba(42, 34, 27, 0.90);
-  --cc-scrim: rgba(0, 0, 0, 0.52);
+  --cc-scrim: rgba(6, 6, 7, 0.52);
 }
 
-/* 不依赖系统主题的显式覆盖（设置页选浅色/深色时由 JS 设置 data-theme） */
-@media (prefers-color-scheme: light) {
-  :root[data-theme="auto"] {
-    --cc-bg: #FEFBF4;
-    --cc-surface: #FFFDF8;
-    --cc-surface-2: #F7F1E6;
-    --cc-text: #3C2814;
-    --cc-text-2: #8C6450;
-    --cc-primary: #446971;
-    --cc-accent: #81271E;
-    --cc-border: rgba(60, 40, 20, 0.08);
-  }
-}
-
+/*
+ * 跟随系统（data-theme="auto"）：浅色系统直接吃 :root 的浅色值，所以这里只补
+ * 「系统深色」分支。★ 此块曾只覆盖 8 个变量，badge/glass/scrim/shadow/text-3 等
+ * 在深色系统下一直漏成浅色值 —— v1.2.1 token 收口补全为与 [data-theme="dark"]
+ * 完全相同的一份（两块必须同步改）。
+ */
 @media (prefers-color-scheme: dark) {
   :root[data-theme="auto"] {
     --cc-bg: #1E1813;
@@ -85,9 +124,30 @@
     --cc-surface-2: #352B22;
     --cc-text: #F5EDE1;
     --cc-text-2: #C4B2A0;
+    --cc-text-3: #8E7C6B;
     --cc-primary: #7FA8B0;
-    --cc-accent: #C25A4E;
+    --cc-primary-soft: #26363A;
+    --cc-accent: #B55448;
+    --cc-accent-soft: #3A241F;
+    --cc-warm: #C8A078;
+    --cc-pink: #B98C78;
+    --cc-on-primary: #1E1813;
+    --cc-on-accent: #FFF6F3;
+    --cc-danger: #F0908A;
     --cc-border: rgba(245, 237, 225, 0.10);
+    --cc-border-strong: rgba(245, 237, 225, 0.20);
+    --cc-shadow: 0 8px 28px rgba(6, 6, 7, 0.42);
+    --cc-shadow-sm: 0 2px 8px rgba(6, 6, 7, 0.30);
+    --cc-badge-text-bg: #3B3025;
+    --cc-badge-link-bg: #24363A;
+    --cc-badge-code-bg: #3C2521;
+    --cc-badge-image-bg: #3B2B24;
+    --cc-badge-path-bg: #362E22;
+    --cc-badge-number-bg: #33301F;
+    --cc-scroll: rgba(245, 237, 225, 0.20);
+    --cc-glass: rgba(42, 34, 27, 0.72);
+    --cc-glass-fallback: rgba(42, 34, 27, 0.90);
+    --cc-scrim: rgba(6, 6, 7, 0.52);
   }
 }
 

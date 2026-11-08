@@ -46,7 +46,7 @@ const GHOST_BUTTON_CLASS =
   'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2';
 
 const INPUT_CLASS =
-  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]';
+  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-line-strong';
 
 /**
  * 就地表单。校验走 snippetView 的纯函数（那边能单测），这里只负责把错误串显示出来。
@@ -76,7 +76,7 @@ function SnippetForm({
   };
 
   return (
-    <div className="flex flex-col gap-tight rounded-card border border-[var(--cc-primary)] bg-surface p-snug">
+    <div className="flex flex-col gap-tight rounded-card border border-primary bg-surface p-snug">
       <input
         // 标题可以留空：snippetLabel 会用内容首行兜底，所以不设 required。
         value={draft.title}
@@ -93,7 +93,7 @@ function SnippetForm({
         onChange={(event) => onChange({ ...draft, content: event.target.value })}
         className={cn(INPUT_CLASS, 'cc-scroll resize-y font-mono leading-[1.6]')}
       />
-      {error !== null ? <p className="text-[11px] text-[var(--cc-accent)]">{error}</p> : null}
+      {error !== null ? <p className="text-[11px] text-accent">{error}</p> : null}
       <div className="flex items-center gap-tight">
         <span className="text-[11px] text-ink-3">
           {draft.content.length} / {SNIPPET_CONTENT_MAX}
@@ -105,7 +105,7 @@ function SnippetForm({
         <button
           type="button"
           onClick={submit}
-          className="shrink-0 rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90"
+          className="shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90"
         >
           保存
         </button>
@@ -149,7 +149,7 @@ function SnippetRow({
           type="button"
           title="粘贴这条片段"
           onClick={onUse}
-          className="shrink-0 rounded-full p-[3px] text-ink-3 opacity-60 transition-colors hover:opacity-100 hover:text-[var(--cc-primary)]"
+          className="shrink-0 rounded-full p-[3px] text-ink-3 opacity-60 transition-colors hover:opacity-100 hover:text-primary"
         >
           <ClipboardPaste size={14} aria-hidden />
         </button>
@@ -168,8 +168,8 @@ function SnippetRow({
           className={cn(
             'shrink-0 rounded-button px-snug py-[3px] text-[11px] transition-colors',
             pending
-              ? 'bg-[var(--cc-accent)] text-white'
-              : 'text-ink-3 opacity-60 hover:opacity-100 hover:text-[var(--cc-accent)]',
+              ? 'bg-accent text-on-accent'
+              : 'text-ink-3 opacity-60 hover:opacity-100 hover:text-accent',
           )}
         >
           {pending ? '确认删除' : <Trash2 size={14} aria-hidden />}

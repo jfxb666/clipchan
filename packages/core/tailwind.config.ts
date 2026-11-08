@@ -24,10 +24,23 @@ const config: Config = {
         'primary-soft': 'var(--cc-primary-soft)',
         accent: 'var(--cc-accent)',
         'accent-soft': 'var(--cc-accent-soft)',
+        /* 彩色底上的文字（主/警示按钮标签）与危险语义 —— P1 收口新增。 */
+        'on-primary': 'var(--cc-on-primary)',
+        'on-accent': 'var(--cc-on-accent)',
+        danger: 'var(--cc-danger)',
         warm: 'var(--cc-warm)',
         pink: 'var(--cc-pink)',
         line: 'var(--cc-border)',
         'line-strong': 'var(--cc-border-strong)',
+        /* 模态浮层的压暗层。 */
+        scrim: 'var(--cc-scrim)',
+        /* 六类类型徽章底色（badge fg 走 warm/pink/primary/accent）。 */
+        'badge-text': 'var(--cc-badge-text-bg)',
+        'badge-link': 'var(--cc-badge-link-bg)',
+        'badge-code': 'var(--cc-badge-code-bg)',
+        'badge-image': 'var(--cc-badge-image-bg)',
+        'badge-path': 'var(--cc-badge-path-bg)',
+        'badge-number': 'var(--cc-badge-number-bg)',
       },
       borderRadius: {
         card: 'var(--cc-radius-card)',

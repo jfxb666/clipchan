@@ -33,7 +33,7 @@ export interface OrganizeItemDialogProps {
 }
 
 const INPUT_CLASS =
-  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]';
+  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-line-strong';
 
 export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps): JSX.Element | null {
   const item = useClipStore((s) => s.items.find((i) => i.id === itemId));
@@ -169,7 +169,7 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
 
   return createPortal(
     <div
-      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-[var(--cc-scrim)] p-comfortable"
+      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -181,7 +181,7 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
             type="button"
             title="关闭（Esc）"
             onClick={onClose}
-            className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+            className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-accent"
           >
             <X size={14} aria-hidden />
           </button>
@@ -245,7 +245,7 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
                       className={cn(
                         'rounded-button border px-snug py-[3px] text-[11px]',
                         active
-                          ? 'border-[var(--cc-accent)] bg-[var(--cc-accent)] text-white'
+                          ? 'border-accent bg-accent text-on-accent'
                           : 'border-line text-ink-2 hover:bg-surface-2',
                       )}
                     >
@@ -311,7 +311,7 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
                 className={cn(
                   'rounded-button px-[6px] py-[4px] text-left text-[12px] hover:bg-surface-2',
                   // 用真值判断而不是 === undefined：folderId 经 IPC 回来可能是 null。
-                  !item.folderId ? 'text-[var(--cc-accent)]' : 'text-ink',
+                  !item.folderId ? 'text-accent' : 'text-ink',
                 )}
               >
                 未归类
@@ -326,7 +326,7 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
                   }}
                   className={cn(
                     'rounded-button px-[6px] py-[4px] text-left text-[12px] hover:bg-surface-2',
-                    item.folderId === target.id ? 'text-[var(--cc-accent)]' : 'text-ink',
+                    item.folderId === target.id ? 'text-accent' : 'text-ink',
                   )}
                 >
                   {target.label}
@@ -353,7 +353,7 @@ export function OrganizeItemDialog({ itemId, onClose }: OrganizeItemDialogProps)
           <button
             type="button"
             onClick={save}
-            className="shrink-0 rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90"
+            className="shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90"
           >
             保存
           </button>

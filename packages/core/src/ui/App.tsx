@@ -1154,7 +1154,7 @@ export function App() {
                     className={cn(
                       'cc-no-drag flex shrink-0 items-center rounded-button border px-[6px] py-[7px] transition-colors',
                       settings.listLayout === key
-                        ? 'border-[var(--cc-primary)] bg-primary-soft text-[var(--cc-primary)]'
+                        ? 'border-primary bg-primary-soft text-primary'
                         : 'border-line text-ink-2 hover:bg-surface-2',
                     )}
                   >
@@ -1259,7 +1259,7 @@ export function App() {
                       className={cn(
                         'shrink-0 rounded-button border px-snug py-[3px] transition-colors disabled:cursor-not-allowed disabled:opacity-60',
                         action.danger
-                          ? 'border-line text-ink-2 hover:bg-surface hover:text-[var(--cc-accent)]'
+                          ? 'border-line text-ink-2 hover:bg-surface hover:text-accent'
                           : 'border-line text-ink-2 hover:bg-surface hover:text-ink',
                       )}
                     >

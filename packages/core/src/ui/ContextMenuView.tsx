@@ -120,7 +120,7 @@ export function ContextMenu({ x, y, items, onPick, onClose }: ContextMenuProps) 
           }}
           className={cn(
             'flex h-8 w-full items-center justify-between gap-tight px-snug text-left text-[12px] transition-colors',
-            item.danger ? 'text-[var(--cc-accent)]' : 'text-ink',
+            item.danger ? 'text-accent' : 'text-ink',
             item.disabled
               ? 'cursor-not-allowed opacity-40'
               : active === index

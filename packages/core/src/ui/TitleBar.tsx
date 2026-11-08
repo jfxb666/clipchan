@@ -59,10 +59,10 @@ export function TitleBar({
       {/* 幽灵模式：常驻暗红圆点 + 剩余时间（spec §6.8） */}
       {ghostActive ? (
         <span
-          className="cc-no-drag flex items-center gap-tight rounded-full bg-[var(--cc-accent-soft)] px-tight py-[3px] text-[11px] text-[var(--cc-accent)]"
+          className="cc-no-drag flex items-center gap-tight rounded-full bg-accent-soft px-tight py-[3px] text-[11px] text-accent"
           title="幽灵模式中，复制的任何内容都不会被记录，也不会在结束后补录"
         >
-          <span className="h-[7px] w-[7px] rounded-full bg-[var(--cc-accent)]" />
+          <span className="h-[7px] w-[7px] rounded-full bg-accent" />
           幽灵模式 · 剩余 {formatRemaining(ghostRemainingMs)}
         </span>
       ) : null}
@@ -79,7 +79,7 @@ export function TitleBar({
         type="button"
         title="隐藏到托盘"
         onClick={onClose}
-        className="cc-no-drag rounded-button p-[5px] text-ink-2 hover:bg-[var(--cc-accent-soft)] hover:text-[var(--cc-accent)]"
+        className="cc-no-drag rounded-button p-[5px] text-ink-2 hover:bg-accent-soft hover:text-accent"
       >
         <X size={14} aria-hidden />
       </button>

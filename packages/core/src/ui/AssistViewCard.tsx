@@ -46,11 +46,11 @@ export interface AssistViewProps {
 }
 
 const SELECT_CLASS =
-  'max-w-[190px] shrink-0 rounded-input border border-line bg-surface px-snug py-[4px] text-[11px] text-ink outline-none focus:border-[var(--cc-primary)]';
+  'max-w-[190px] shrink-0 rounded-input border border-line bg-surface px-snug py-[4px] text-[11px] text-ink outline-none focus:border-primary';
 const GHOST_BUTTON_CLASS =
   'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
 const PRIMARY_BUTTON_CLASS =
-  'flex items-center gap-[4px] rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+  'flex items-center gap-[4px] rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
 
 /** 默认选第一个配好 Key 的 provider；都没有就落到第一个，再没有就是空串。 */
 function initialProviderId(providers: AiProvider[]): string {
@@ -184,7 +184,7 @@ export function AssistView({
           type="button"
           title="关闭（Esc）"
           onClick={onClose}
-          className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+          className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-accent"
         >
           <X size={14} aria-hidden />
         </button>
@@ -232,7 +232,7 @@ export function AssistView({
                   className={cn(
                     'rounded-[9px] px-snug py-[3px] text-[11px] transition-colors',
                     customId === null && action === option.id
-                      ? 'bg-[var(--cc-accent-soft)] font-medium text-[var(--cc-accent)]'
+                      ? 'bg-accent-soft font-medium text-accent'
                       : 'text-ink-2 hover:text-ink',
                   )}
                 >
@@ -256,7 +256,7 @@ export function AssistView({
                     className={cn(
                       'rounded-[9px] px-snug py-[3px] text-[11px] transition-colors',
                       customId === custom.id
-                        ? 'bg-[var(--cc-accent-soft)] font-medium text-[var(--cc-accent)]'
+                        ? 'bg-accent-soft font-medium text-accent'
                         : 'text-ink-2 hover:text-ink',
                     )}
                   >
@@ -289,7 +289,7 @@ export function AssistView({
                 value={extra}
                 onChange={(event) => setExtra(event.target.value)}
                 placeholder="可选的额外要求（例如：更口语一点）"
-                className="min-w-0 flex-1 rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-border-strong)]"
+                className="min-w-0 flex-1 rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-line-strong"
                 aria-label="额外要求"
               />
             ) : (
@@ -315,7 +315,7 @@ export function AssistView({
           <div className="flex min-h-0 flex-1 flex-col gap-tight px-base py-snug">
             {status === 'error' && error !== null ? (
               <div className="cc-scroll flex min-h-0 flex-1 flex-col gap-snug overflow-y-auto rounded-input border border-line bg-surface px-snug py-tight">
-                <p className="text-[11px] leading-[1.6] text-[var(--cc-accent)]">{error}</p>
+                <p className="text-[11px] leading-[1.6] text-accent">{error}</p>
                 <div>
                   <button type="button" className={GHOST_BUTTON_CLASS} onClick={() => void run()}>
                     重试
@@ -328,7 +328,7 @@ export function AssistView({
               <>
                 {/* degraded：模型没按 <result> 契约返回，正文是整段回复的兜底，得让用户知道。 */}
                 {degraded !== '' ? (
-                  <p className="shrink-0 rounded-input bg-[var(--cc-accent-soft)] px-snug py-tight text-[11px] leading-[1.6] text-[var(--cc-accent)]">
+                  <p className="shrink-0 rounded-input bg-accent-soft px-snug py-tight text-[11px] leading-[1.6] text-accent">
                     {degraded}
                   </p>
                 ) : null}

@@ -96,8 +96,8 @@ function TrashCard({
           className={cn(
             'flex items-center gap-[3px] rounded-button border px-snug py-[3px] text-[11px]',
             pending
-              ? 'border-[var(--cc-accent)] bg-[var(--cc-accent)] text-white'
-              : 'border-line text-ink-2 hover:bg-surface-2 hover:text-[var(--cc-accent)]',
+              ? 'border-accent bg-accent text-on-accent'
+              : 'border-line text-ink-2 hover:bg-surface-2 hover:text-accent',
           )}
         >
           <Trash2 size={11} aria-hidden />
@@ -162,7 +162,7 @@ export function TrashView({
             className={cn(
               'flex shrink-0 items-center gap-[4px] rounded-button border px-snug py-[4px] text-[11px]',
               pendingEmpty
-                ? 'border-[var(--cc-accent)] bg-[var(--cc-accent)] text-white'
+                ? 'border-accent bg-accent text-on-accent'
                 : 'border-line text-ink-2 hover:bg-surface-2',
             )}
           >

@@ -24,7 +24,7 @@ function ListSkeleton() {
       {Array.from({ length: LIST_SKELETON_ROWS }, (_, index) => (
         <div
           key={index}
-          className="flex animate-pulse items-start gap-snug rounded-card border border-line bg-[var(--cc-surface)] p-snug"
+          className="flex animate-pulse items-start gap-snug rounded-card border border-line bg-surface p-snug"
         >
           <div className="h-4 w-8 shrink-0 rounded-[4px] bg-surface-2" />
           <div className="min-w-0 flex-1">

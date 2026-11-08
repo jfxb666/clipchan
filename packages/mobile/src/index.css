@@ -5,7 +5,8 @@
  *   （flex / px-snug / text-ink-2 / hover:bg-surface-2 …）。桌面端由 packages/desktop
  *   的 tailwindcss + postcss 把类名编译成 CSS；手机端 package.json 里没有 tailwindcss，
  *   按 Task 11 的硬约束「绝不为它新增依赖 / 不装 tailwind」，所以这里手写一份等价规则：
- *   对 core 界面真正用到的 181 条类名逐条映射。
+ *   对 core 界面真正用到的工具类名逐条映射（v1.2.1 P1 起色值统一走语义工具类：
+ *   bg-primary / text-on-accent / text-danger / bg-badge-* 等，不再用 [var(--cc-*)] 任意值）。
  *   值不写死颜色，全部指向 tokens.css 的 --cc-* 变量，因此明暗主题照常跟着 data-theme 走。
  *
  * ★ 命名与转义严格照抄 Tailwind：变体类名保留**完整原串**再转义，
@@ -407,13 +408,13 @@ body,
 .border-line {
   border-color: var(--cc-border);
 }
-.border-\[var\(--cc-primary\)\] {
+.border-primary {
   border-color: var(--cc-primary);
 }
-.border-\[var\(--cc-accent\)\] {
+.border-accent {
   border-color: var(--cc-accent);
 }
-.border-\[var\(--cc-accent-soft\)\] {
+.border-accent-soft {
   border-color: var(--cc-accent-soft);
 }
 .border-transparent {
@@ -422,22 +423,22 @@ body,
 .bg-surface-2 {
   background-color: var(--cc-surface-2);
 }
-.bg-\[var\(--cc-badge-text-bg\)\] {
+.bg-badge-text {
   background-color: var(--cc-badge-text-bg);
 }
-.bg-\[var\(--cc-badge-link-bg\)\] {
+.bg-badge-link {
   background-color: var(--cc-badge-link-bg);
 }
-.bg-\[var\(--cc-badge-code-bg\)\] {
+.bg-badge-code {
   background-color: var(--cc-badge-code-bg);
 }
-.bg-\[var\(--cc-badge-path-bg\)\] {
+.bg-badge-path {
   background-color: var(--cc-badge-path-bg);
 }
-.bg-\[var\(--cc-badge-number-bg\)\] {
+.bg-badge-number {
   background-color: var(--cc-badge-number-bg);
 }
-.bg-\[var\(--cc-badge-image-bg\)\] {
+.bg-badge-image {
   background-color: var(--cc-badge-image-bg);
 }
 .bg-surface {
@@ -446,26 +447,26 @@ body,
 .bg-transparent {
   background-color: transparent;
 }
-.bg-\[var\(--cc-primary\)\] {
+.bg-primary {
   background-color: var(--cc-primary);
 }
-.bg-\[var\(--cc-border-strong\)\] {
+.bg-line-strong {
   background-color: var(--cc-border-strong);
 }
-.bg-white {
-  background-color: #fff;
+.bg-on-primary {
+  background-color: var(--cc-on-primary);
 }
-.bg-\[var\(--cc-accent\)\] {
+.bg-accent {
   background-color: var(--cc-accent);
 }
 .bg-primary-soft {
   background-color: var(--cc-primary-soft);
 }
-.bg-\[var\(--cc-accent-soft\)\] {
+.bg-accent-soft {
   background-color: var(--cc-accent-soft);
 }
-.bg-\[var\(--cc-primary-soft\)\] {
-  background-color: var(--cc-primary-soft);
+.bg-scrim {
+  background-color: var(--cc-scrim);
 }
 .text-\[11px\] {
   font-size: 11px;
@@ -473,22 +474,28 @@ body,
 .text-ink-2 {
   color: var(--cc-text-2);
 }
+.text-danger {
+  color: var(--cc-danger);
+}
+.opacity-70 {
+  opacity: 0.7;
+}
 .text-ink-3 {
   color: var(--cc-text-3);
 }
-.text-\[var\(--cc-warm\)\] {
+.text-warm {
   color: var(--cc-warm);
 }
-.text-\[var\(--cc-primary\)\] {
+.text-primary {
   color: var(--cc-primary);
 }
-.text-\[var\(--cc-accent\)\] {
+.text-accent {
   color: var(--cc-accent);
 }
 .font-mono {
   font-family: var(--cc-font-mono);
 }
-.text-\[var\(--cc-pink\)\] {
+.text-pink {
   color: var(--cc-pink);
 }
 .text-\[13px\] {
@@ -509,8 +516,11 @@ body,
 .text-right {
   text-align: right;
 }
-.text-white {
-  color: #fff;
+.text-on-primary {
+  color: var(--cc-on-primary);
+}
+.text-on-accent {
+  color: var(--cc-on-accent);
 }
 .text-\[10px\] {
   font-size: 10px;
@@ -530,7 +540,7 @@ body,
 .ring-1 {
   box-shadow: 0 0 0 1px var(--tw-ring-color, currentColor);
 }
-.ring-\[var\(--cc-primary\)\] {
+.ring-primary {
   --tw-ring-color: var(--cc-primary);
   box-shadow: 0 0 0 1px var(--tw-ring-color);
 }
@@ -562,17 +572,20 @@ body,
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   transition-duration: 150ms;
 }
-.accent-\[var\(--cc-primary\)\] {
+.accent-primary {
   accent-color: var(--cc-primary);
 }
-.hover\:border-\[var\(--cc-border-strong\)\]:hover {
+.hover\:border-line-strong:hover {
   border-color: var(--cc-border-strong);
 }
-.focus-within\:border-\[var\(--cc-border-strong\)\]:focus-within {
+.focus-within\:border-line-strong:focus-within {
   border-color: var(--cc-border-strong);
 }
-.focus\:border-\[var\(--cc-border-strong\)\]:focus {
+.focus\:border-line-strong:focus {
   border-color: var(--cc-border-strong);
+}
+.focus\:border-primary:focus {
+  border-color: var(--cc-primary);
 }
 .hover\:border-line:hover {
   border-color: var(--cc-border);
@@ -583,7 +596,7 @@ body,
 .hover\:bg-surface:hover {
   background-color: var(--cc-surface);
 }
-.hover\:bg-\[var\(--cc-accent-soft\)\]:hover {
+.hover\:bg-accent-soft:hover {
   background-color: var(--cc-accent-soft);
 }
 .hover\:text-ink:hover {
@@ -592,13 +605,13 @@ body,
 .hover\:text-ink-2:hover {
   color: var(--cc-text-2);
 }
-.hover\:text-\[var\(--cc-warm\)\]:hover {
+.hover\:text-warm:hover {
   color: var(--cc-warm);
 }
 .placeholder\:text-ink-3::placeholder {
   color: var(--cc-text-3);
 }
-.hover\:text-\[var\(--cc-accent\)\]:hover {
+.hover\:text-accent:hover {
   color: var(--cc-accent);
 }
 .group:hover .group-hover\:opacity-100 {

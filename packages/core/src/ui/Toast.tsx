@@ -12,8 +12,8 @@ export interface ToastItem {
 
 const TONE_CLASS: Record<ToastTone, string> = {
   ok: 'bg-surface text-ink border-line',
-  warn: 'bg-[var(--cc-accent-soft)] text-[var(--cc-accent)] border-[var(--cc-accent-soft)]',
-  error: 'bg-[var(--cc-accent)] text-white border-[var(--cc-accent)]',
+  warn: 'bg-accent-soft text-accent border-accent-soft',
+  error: 'bg-accent text-on-accent border-accent',
 };
 
 /**
@@ -57,7 +57,7 @@ export function Toast({ toast, onDismiss }: { toast: ToastItem; onDismiss?: (id:
             toast.action?.onClick();
           }}
           // cc-no-drag：提示条浮在标题栏拖拽区上方，不标的话点击会被拖拽区吃掉。
-          className="cc-no-drag shrink-0 rounded-button border border-line bg-surface px-snug py-[2px] text-[11px] font-medium text-[var(--cc-primary)] hover:bg-surface-2"
+          className="cc-no-drag shrink-0 rounded-button border border-line bg-surface px-snug py-[2px] text-[11px] font-medium text-primary hover:bg-surface-2"
         >
           {toast.action.label}
         </button>

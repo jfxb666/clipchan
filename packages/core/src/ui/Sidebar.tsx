@@ -67,7 +67,7 @@ export function Sidebar({
     cn(
       'flex h-[52px] w-[52px] flex-col items-center justify-center gap-[3px] rounded-button transition-colors',
       active
-        ? 'bg-primary-soft text-[var(--cc-primary)]'
+        ? 'bg-primary-soft text-primary'
         : 'text-ink-2 hover:bg-surface-2 hover:text-ink',
     );
 

@@ -33,7 +33,7 @@ export interface OcrResultViewProps {
 const GHOST_BUTTON_CLASS =
   'rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
 const PRIMARY_BUTTON_CLASS =
-  'rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+  'rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
 
 /**
  * OCR 结果浮层。与 TextViewer / OptimizeViewCard 同风格：平台能力全部由 App 注入，
@@ -79,7 +79,7 @@ export function OcrResultView({
 
   return createPortal(
     <div
-      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-[var(--cc-scrim)] p-comfortable"
+      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -91,7 +91,7 @@ export function OcrResultView({
             type="button"
             title="关闭（Esc）"
             onClick={onClose}
-            className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+            className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-accent"
           >
             <X size={14} aria-hidden />
           </button>
@@ -100,7 +100,7 @@ export function OcrResultView({
         <div className="min-h-0 flex-1 overflow-auto px-snug py-tight">
           {/* 失败原因优先于一切：未就绪时的下载按钮再显眼，也不该盖住「为什么失败」。 */}
           {error !== null ? (
-            <p className="mb-tight rounded-input bg-[var(--cc-accent-soft)] px-snug py-tight text-[12px] leading-[1.6] text-[var(--cc-accent)]">
+            <p className="mb-tight rounded-input bg-accent-soft px-snug py-tight text-[12px] leading-[1.6] text-accent">
               {ocrErrorText(error)}
             </p>
           ) : null}
@@ -126,7 +126,7 @@ export function OcrResultView({
               <p className="text-[11px] text-ink-3">{progress !== null ? ocrProgressText(progress) : '正在下载…'}</p>
               {ratio !== null ? (
                 <div className="h-[4px] w-full overflow-hidden rounded-full bg-surface-2" role="progressbar" aria-valuenow={Math.round(ratio * 100)} aria-valuemin={0} aria-valuemax={100}>
-                  <div className="h-full bg-[var(--cc-primary)]" style={{ width: Math.round(ratio * 100) + '%' }} />
+                  <div className="h-full bg-primary" style={{ width: Math.round(ratio * 100) + '%' }} />
                 </div>
               ) : null}
             </div>

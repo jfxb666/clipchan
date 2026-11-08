@@ -140,12 +140,12 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void
       onClick={() => onChange(!on)}
       className={cn(
         'relative h-[20px] w-[36px] shrink-0 rounded-full transition-colors',
-        on ? 'bg-[var(--cc-primary)]' : 'bg-[var(--cc-border-strong)]',
+        on ? 'bg-primary' : 'bg-line-strong',
       )}
     >
       <span
         className={cn(
-          'absolute top-[2px] h-4 w-4 rounded-full bg-white transition-all',
+          'absolute top-[2px] h-4 w-4 rounded-full bg-on-primary transition-all',
           on ? 'left-[18px]' : 'left-[2px]',
         )}
       />
@@ -159,11 +159,11 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void
  * 保存失败（主进程是最后一道闸）把中文错误显示在表单里。
  */
 const CUSTOM_INPUT_CLASS =
-  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-primary)]';
+  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-primary';
 const CUSTOM_GHOST_BUTTON_CLASS =
   'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
 const CUSTOM_PRIMARY_BUTTON_CLASS =
-  'shrink-0 rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+  'shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
 
 function CustomActionForm({
   action,
@@ -221,7 +221,7 @@ function CustomActionForm({
         />
       </label>
 
-      {error !== null ? <p className="text-[11px] leading-[1.6] text-red-400">{error}</p> : null}
+      {error !== null ? <p className="text-[11px] leading-[1.6] text-danger">{error}</p> : null}
 
       <div className="flex items-center gap-snug">
         <button type="button" className={CUSTOM_PRIMARY_BUTTON_CLASS} disabled={saving} onClick={() => void submit()}>
@@ -469,7 +469,7 @@ export function SettingsView({
               : 'Win10 的系统模糊会铺满整个矩形、裁不出圆角（四边会发白），因此改为真圆角 + 88% 半透明'
           }
         >
-          <span className={cn('text-[11px]', capabilities.frostedGlass ? 'text-[var(--cc-primary)]' : 'text-ink-3')}>
+          <span className={cn('text-[11px]', capabilities.frostedGlass ? 'text-primary' : 'text-ink-3')}>
             {capabilities.frostedGlass ? '已启用' : '半透明'}
           </span>
         </Row>
@@ -488,7 +488,7 @@ export function SettingsView({
               step={HISTORY_SLIDER_STEP}
               value={historyValue}
               onChange={(event) => onUpdate({ historyLimit: Number(event.target.value) })}
-              className="w-[150px] accent-[var(--cc-primary)]"
+              className="w-[150px] accent-primary"
             />
             <input
               type="number"
@@ -500,7 +500,7 @@ export function SettingsView({
                 if (!Number.isFinite(next)) return;
                 onUpdate({ historyLimit: Math.min(HISTORY_INPUT_MAX, Math.max(HISTORY_SLIDER_MIN, Math.round(next))) });
               }}
-              className="w-[70px] rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]"
+              className="w-[70px] rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[12px] text-ink outline-none focus:border-line-strong"
             />
           </div>
         </Row>
@@ -522,7 +522,7 @@ export function SettingsView({
             step={1}
             value={settings.widgetSize}
             onChange={(event) => onUpdate({ widgetSize: Number(event.target.value) })}
-            className="w-[150px] accent-[var(--cc-primary)]"
+            className="w-[150px] accent-primary"
           />
         </Row>
         <Row label="出现位置">
@@ -565,7 +565,7 @@ export function SettingsView({
               }
             }}
             placeholder="例如 chrome.exe"
-            className="w-[180px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]"
+            className="w-[180px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-line-strong"
           />
           <button
             type="button"
@@ -610,7 +610,7 @@ export function SettingsView({
                   type="button"
                   title={'不再排除 ' + name}
                   onClick={() => onUpdate({ excludeApps: removeExcludeApp(settings.excludeApps, name) })}
-                  className="shrink-0 rounded-full p-[2px] text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+                  className="shrink-0 rounded-full p-[2px] text-ink-3 transition-colors hover:text-accent"
                 >
                   <X size={11} aria-hidden />
                 </button>
@@ -661,7 +661,7 @@ export function SettingsView({
             <button
               type="button"
               onClick={() => void removeProvider(p.id)}
-              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-red-400 hover:bg-surface-2"
+              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-danger hover:bg-surface-2"
             >
               删除
             </button>
@@ -721,7 +721,7 @@ export function SettingsView({
             <button
               type="button"
               onClick={() => void removeCustomAction(custom.id)}
-              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-red-400 hover:bg-surface-2"
+              className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-danger hover:bg-surface-2"
             >
               删除
             </button>
@@ -800,7 +800,7 @@ export function SettingsView({
               value={MERGE_SEPARATOR_PRESETS.includes(settings.mergeSeparator) ? '' : settings.mergeSeparator}
               placeholder="自定义"
               onChange={(event) => onUpdate({ mergeSeparator: event.target.value.slice(0, 8) })}
-              className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]"
+              className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-line-strong"
             />
           </div>
         </Row>
@@ -821,7 +821,7 @@ export function SettingsView({
             className={cn(
               'shrink-0 rounded-button border px-snug py-[4px] text-[11px]',
               pendingClear === 'unpinned'
-                ? 'border-[var(--cc-accent)] bg-[var(--cc-accent)] text-white'
+                ? 'border-accent bg-accent text-on-accent'
                 : 'border-line text-ink-2 hover:bg-surface-2',
             )}
           >
@@ -842,7 +842,7 @@ export function SettingsView({
             className={cn(
               'shrink-0 rounded-button border px-snug py-[4px] text-[11px]',
               pendingClear === 'all'
-                ? 'border-[var(--cc-accent)] bg-[var(--cc-accent)] text-white'
+                ? 'border-accent bg-accent text-on-accent'
                 : 'border-line text-ink-2 hover:bg-surface-2',
             )}
           >
@@ -888,17 +888,17 @@ export function SettingsView({
                 trashLimit: Math.min(TRASH_LIMIT_MAX, Math.max(TRASH_LIMIT_MIN, Math.round(next))),
               });
             }}
-            className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]"
+            className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[12px] text-ink outline-none focus:border-line-strong"
           />
         </Row>
 
         <div className="rounded-card border border-line bg-surface-2 px-snug py-tight">
           <div className="flex items-center gap-tight">
-            <Ghost size={14} className="text-[var(--cc-accent)]" aria-hidden />
+            <Ghost size={14} className="text-accent" aria-hidden />
             <span className="text-[12px] text-ink">幽灵模式</span>
             <div className="flex-1" />
             {ghost.active ? (
-              <span className="text-[11px] text-[var(--cc-accent)]">
+              <span className="text-[11px] text-accent">
                 剩余 {formatRemaining(ghost.remainingMs)}
                 {ghost.until ? '（到 ' + formatClock(ghost.until) + '）' : ''}
               </span>
@@ -934,7 +934,7 @@ export function SettingsView({
               max={GHOST_MAX_MINUTES}
               value={customMinutes}
               onChange={(event) => setCustomMinutes(event.target.value)}
-              className="w-[64px] rounded-input border border-line bg-surface px-tight py-[3px] text-right text-[11px] text-ink outline-none focus:border-[var(--cc-border-strong)]"
+              className="w-[64px] rounded-input border border-line bg-surface px-tight py-[3px] text-right text-[11px] text-ink outline-none focus:border-line-strong"
             />
             <button
               type="button"
@@ -948,7 +948,7 @@ export function SettingsView({
               自定义开启
             </button>
           </div>
-          <p className="mt-tight text-[11px] leading-[1.7] text-[var(--cc-accent)]">
+          <p className="mt-tight text-[11px] leading-[1.7] text-accent">
             幽灵模式会彻底停止剪贴板监听：期间复制的内容不会记录，结束后也不会补录；重启后不保留。
           </p>
         </div>

@@ -16,11 +16,11 @@ import { cn } from './util';
 export const LIST_FAILED_HINT = '没拉到模型列表，可直接手输模型名';
 
 const INPUT_CLASS =
-  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-primary)]';
+  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-primary';
 const GHOST_BUTTON_CLASS =
   'rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
 const PRIMARY_BUTTON_CLASS =
-  'rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+  'rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
 
 export interface AiProviderFormProps {
   /** 有值 = 编辑既有 provider；无值 = 新增（不传 id，Key 必须填）。 */
@@ -244,7 +244,7 @@ export function AiProviderForm({
       {errors.length > 0 ? (
         <ul className="flex flex-col gap-[2px]">
           {errors.map((message) => (
-            <li key={message} className="text-[11px] leading-[1.6] text-red-400">
+            <li key={message} className="text-[11px] leading-[1.6] text-danger">
               {message}
             </li>
           ))}
@@ -261,7 +261,7 @@ export function AiProviderForm({
         {provider && onRemove ? (
           <button
             type="button"
-            className={cn(GHOST_BUTTON_CLASS, 'ml-auto text-red-400')}
+            className={cn(GHOST_BUTTON_CLASS, 'ml-auto text-danger')}
             onClick={() => void onRemove(provider.id)}
           >
             删除

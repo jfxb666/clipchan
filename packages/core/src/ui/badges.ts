@@ -22,37 +22,37 @@ export interface Badge {
 const BADGES: Record<Kind, Badge> = {
   text: {
     label: 'T',
-    className: 'bg-[var(--cc-badge-text-bg)] text-[var(--cc-warm)]',
+    className: 'bg-badge-text text-warm',
     icon: null,
   },
   link: {
     label: 'Link',
-    className: 'bg-[var(--cc-badge-link-bg)] text-[var(--cc-primary)]',
+    className: 'bg-badge-link text-primary',
     icon: null,
   },
   code: {
     label: '</>',
-    className: 'bg-[var(--cc-badge-code-bg)] text-[var(--cc-accent)] font-mono',
+    className: 'bg-badge-code text-accent font-mono',
     icon: null,
   },
   path: {
     label: 'T',
-    className: 'bg-[var(--cc-badge-path-bg)] text-[var(--cc-warm)]',
+    className: 'bg-badge-path text-warm',
     icon: 'folder',
   },
   number: {
     label: 'T',
-    className: 'bg-[var(--cc-badge-number-bg)] text-[var(--cc-warm)]',
+    className: 'bg-badge-number text-warm',
     icon: 'hash',
   },
   image: {
     label: 'Img',
-    className: 'bg-[var(--cc-badge-image-bg)] text-[var(--cc-pink)]',
+    className: 'bg-badge-image text-pink',
     icon: null,
   },
   files: {
     label: 'File',
-    className: 'bg-[var(--cc-badge-path-bg)] text-[var(--cc-warm)]',
+    className: 'bg-badge-path text-warm',
     icon: 'folder',
   },
 };

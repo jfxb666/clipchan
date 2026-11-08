@@ -30,7 +30,7 @@ export interface OrganizeViewProps {
 }
 
 const INPUT_CLASS =
-  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-[var(--cc-border-strong)]';
+  'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none focus:border-line-strong';
 
 const GHOST_BUTTON_CLASS =
   'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2';
@@ -241,7 +241,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
           type="button"
           title="关闭整理（Esc）"
           onClick={onClose}
-          className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+          className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-accent"
         >
           <X size={14} aria-hidden />
         </button>
@@ -303,7 +303,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                                 className={cn(
                                   'rounded-button border px-snug py-[3px] text-[11px]',
                                   on
-                                    ? 'border-[var(--cc-accent)] bg-[var(--cc-accent)] text-white'
+                                    ? 'border-accent bg-accent text-on-accent'
                                     : 'border-line text-ink-2 hover:bg-surface-2',
                                 )}
                               >
@@ -342,7 +342,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                   onClick={() => void applyBatch()}
                   disabled={applying || wizardLoading || applyableCount === 0}
                   title="把勾选的标签应用到本批条目，然后自动进入下一批"
-                  className="shrink-0 rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90 disabled:opacity-40"
+                  className="shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:opacity-40"
                 >
                   应用本批（{applyableCount} 条）
                 </button>
@@ -363,7 +363,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
               className={cn(
                 'rounded-button px-snug py-[3px] text-[11px]',
                 folderFilter === undefined
-                  ? 'bg-[var(--cc-accent)] text-white'
+                  ? 'bg-accent text-on-accent'
                   : 'text-ink-2 hover:bg-surface-2',
               )}
             >
@@ -378,7 +378,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
               className={cn(
                 'rounded-button px-snug py-[3px] text-[11px]',
                 folderFilter === null
-                  ? 'bg-[var(--cc-accent)] text-white'
+                  ? 'bg-accent text-on-accent'
                   : 'text-ink-2 hover:bg-surface-2',
               )}
             >
@@ -400,7 +400,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
               type="button"
               onClick={submitNew}
               disabled={newName.trim() === ''}
-              className="shrink-0 rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90 disabled:opacity-40"
+              className="shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:opacity-40"
             >
               新建
             </button>
@@ -497,7 +497,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                       className={cn(
                         'flex cursor-pointer items-center gap-tight rounded-button px-[6px] py-[3px] text-[12px] hover:bg-surface-2',
                         folderFilter === row.id
-                          ? 'bg-surface-2 text-[var(--cc-accent)]'
+                          ? 'bg-surface-2 text-accent'
                           : 'text-ink',
                       )}
                     >
@@ -538,7 +538,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                           event.stopPropagation();
                           confirmRemove(row.id, row.name);
                         }}
-                        className="hidden shrink-0 text-ink-3 hover:text-[var(--cc-accent)] group-hover:block"
+                        className="hidden shrink-0 text-ink-3 hover:text-accent group-hover:block"
                       >
                         <Trash2 size={11} aria-hidden />
                       </button>
@@ -559,7 +559,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
               <button
                 type="button"
                 onClick={() => setTagFilter([])}
-                className="ml-auto text-[11px] text-ink-3 hover:text-[var(--cc-accent)]"
+                className="ml-auto text-[11px] text-ink-3 hover:text-accent"
               >
                 清空筛选
               </button>
@@ -585,7 +585,7 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                   type="button"
                   onClick={() => setTagFilter(tagFilter.filter((t) => t !== tag))}
                   title="取消这个标签"
-                  className="flex items-center gap-[3px] rounded-button border border-[var(--cc-accent)] bg-[var(--cc-accent)] px-snug py-[3px] text-[11px] text-white"
+                  className="flex items-center gap-[3px] rounded-button border border-accent bg-accent px-snug py-[3px] text-[11px] text-on-accent"
                 >
                   {tag}
                   <X size={10} aria-hidden />
@@ -618,12 +618,12 @@ export function OrganizeView({ onClose }: OrganizeViewProps): JSX.Element {
                       className={cn(
                         'flex items-center gap-[4px] rounded-button border px-snug py-[4px] text-[11px]',
                         active
-                          ? 'border-[var(--cc-accent)] bg-[var(--cc-accent)] text-white'
+                          ? 'border-accent bg-accent text-on-accent'
                           : 'border-line text-ink-2 hover:bg-surface-2',
                       )}
                     >
                       <span>{entry.tag}</span>
-                      <span className={active ? 'text-white/70' : 'text-ink-3'}>{entry.count}</span>
+                      <span className={active ? 'text-on-accent opacity-70' : 'text-ink-3'}>{entry.count}</span>
                     </button>
                   );
                 })}

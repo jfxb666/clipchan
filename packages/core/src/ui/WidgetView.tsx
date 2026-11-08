@@ -42,7 +42,7 @@ function WidgetRow({
       className={cn(
         'group flex cursor-default items-center gap-[6px] rounded-button border px-[6px] py-[5px]',
         selected
-          ? 'border-[var(--cc-primary)] bg-[var(--cc-primary-soft)]'
+          ? 'border-primary bg-primary-soft'
           : 'border-transparent bg-surface hover:border-line',
       )}
     >
@@ -73,7 +73,7 @@ function WidgetRow({
         className={cn(
           'shrink-0 rounded-full p-[2px] transition-colors',
           item.pinned
-            ? 'text-[var(--cc-warm)]'
+            ? 'text-warm'
             : 'text-ink-3 opacity-60 transition-colors group-hover:opacity-100',
         )}
       >

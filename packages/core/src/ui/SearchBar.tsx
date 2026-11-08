@@ -30,7 +30,7 @@ export const SearchBar = forwardRef<
   return (
     <div
       className={cn(
-        'cc-no-drag flex h-[34px] items-center gap-tight rounded-input border border-line bg-surface px-snug transition-colors focus-within:border-[var(--cc-border-strong)]',
+        'cc-no-drag flex h-[34px] items-center gap-tight rounded-input border border-line bg-surface px-snug transition-colors focus-within:border-line-strong',
         className,
       )}
     >
@@ -66,7 +66,7 @@ export const SearchBar = forwardRef<
         </button>
       ) : null}
       {errors.length > 0 ? (
-        <span className="shrink-0 text-[var(--cc-accent)]" title={errorText}>
+        <span className="shrink-0 text-accent" title={errorText}>
           <AlertTriangle size={13} aria-hidden />
         </span>
       ) : null}

@@ -31,7 +31,7 @@ interface ErrorBoundaryState {
 const CARD_CLASS =
   'mx-auto flex h-full max-w-[520px] flex-col items-center justify-center gap-base px-comfortable text-center';
 const PRIMARY_BTN_CLASS =
-  'rounded-button bg-[var(--cc-primary)] px-comfortable py-snug text-[12px] text-white hover:opacity-90';
+  'rounded-button bg-primary px-comfortable py-snug text-[12px] text-on-primary hover:opacity-90';
 const SECONDARY_BTN_CLASS =
   'rounded-button border border-line px-comfortable py-snug text-[12px] text-ink-2 hover:bg-surface-2 hover:text-ink';
 

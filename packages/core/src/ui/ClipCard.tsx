@@ -9,7 +9,7 @@ import { highlightSegments } from './highlight';
 import { cn, formatTime } from './util';
 
 /** 搜索命中片段：用 accent-soft 底衬，暗色主题下同一个变量会自己变深。 */
-const HIT_CLASS = 'rounded-sm bg-[var(--cc-accent-soft)] px-0.5 text-[var(--cc-accent)]';
+const HIT_CLASS = 'rounded-sm bg-accent-soft px-0.5 text-accent';
 
 /**
  * 列表卡片（spec §6.3 / §6.5）。
@@ -92,8 +92,8 @@ export function ClipCard({
       className={cn(
         'relative flex cursor-default items-start gap-snug rounded-card border bg-surface p-snug shadow-card',
         selected
-          ? 'border-[var(--cc-primary)] ring-1 ring-[var(--cc-primary)]'
-          : 'border-line hover:border-[var(--cc-border-strong)]',
+          ? 'border-primary ring-1 ring-primary'
+          : 'border-line hover:border-line-strong',
       )}
       style={{ contentVisibility: 'auto', containIntrinsicSize: '96px' } as CSSProperties}
     >
@@ -158,7 +158,7 @@ export function ClipCard({
               onOptimize(item.id);
             }}
             onDoubleClick={(event) => event.stopPropagation()}
-            className="shrink-0 rounded-full p-[3px] text-ink-3 opacity-60 transition-colors hover:opacity-100 hover:text-[var(--cc-primary)]"
+            className="shrink-0 rounded-full p-[3px] text-ink-3 opacity-60 transition-colors hover:opacity-100 hover:text-primary"
           >
             <Sparkles size={14} aria-hidden />
           </button>
@@ -176,8 +176,8 @@ export function ClipCard({
           className={cn(
             'shrink-0 rounded-full p-[3px] transition-colors',
             item.pinned
-              ? 'text-[var(--cc-warm)]'
-              : 'text-ink-3 opacity-60 hover:opacity-100 hover:text-[var(--cc-warm)]',
+              ? 'text-warm'
+              : 'text-ink-3 opacity-60 hover:opacity-100 hover:text-warm',
           )}
         >
           <Star size={14} fill={item.pinned ? 'currentColor' : 'none'} aria-hidden />

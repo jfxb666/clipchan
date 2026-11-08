@@ -56,7 +56,7 @@ export function QrResultView({
 
   return createPortal(
     <div
-      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-[var(--cc-scrim)] p-comfortable"
+      className="cc-no-drag fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-comfortable"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -68,7 +68,7 @@ export function QrResultView({
             type="button"
             title="关闭（Esc）"
             onClick={onClose}
-            className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+            className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-accent"
           >
             <X size={14} aria-hidden />
           </button>
@@ -81,7 +81,7 @@ export function QrResultView({
 
           {/* 失败原因单独一行：主进程抛出来的原文比一句「识别失败」有用得多。 */}
           {status === 'error' && error !== null ? (
-            <p className="mb-tight rounded-input bg-[var(--cc-accent-soft)] px-snug py-tight text-[12px] leading-[1.6] text-[var(--cc-accent)]">
+            <p className="mb-tight rounded-input bg-accent-soft px-snug py-tight text-[12px] leading-[1.6] text-accent">
               {error}
             </p>
           ) : null}

@@ -82,11 +82,11 @@ export interface OptimizeViewProps {
 }
 
 const SELECT_CLASS =
-  'max-w-[190px] shrink-0 rounded-input border border-line bg-surface px-snug py-[4px] text-[11px] text-ink outline-none focus:border-[var(--cc-primary)]';
+  'max-w-[190px] shrink-0 rounded-input border border-line bg-surface px-snug py-[4px] text-[11px] text-ink outline-none focus:border-primary';
 const GHOST_BUTTON_CLASS =
   'rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
 const PRIMARY_BUTTON_CLASS =
-  'flex items-center gap-[4px] rounded-button bg-[var(--cc-primary)] px-snug py-[4px] text-[11px] text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+  'flex items-center gap-[4px] rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
 
 /** 右栏 loading 期间的骨架块。 */
 function Skeleton() {
@@ -404,11 +404,11 @@ export function OptimizeView({
             停止
           </button>
         ) : null}
-        {sceneFailed ? <span className="text-[11px] text-red-400">场景加载失败，重开面板再试</span> : null}
+        {sceneFailed ? <span className="text-[11px] text-danger">场景加载失败，重开面板再试</span> : null}
       </div>
 
       {degraded ? (
-        <p className="shrink-0 border-b border-line bg-[var(--cc-accent-soft)] px-base py-tight text-[11px] leading-[1.6] text-[var(--cc-accent)]">
+        <p className="shrink-0 border-b border-line bg-accent-soft px-base py-tight text-[11px] leading-[1.6] text-accent">
           {degraded}
         </p>
       ) : null}
@@ -428,7 +428,7 @@ export function OptimizeView({
               value={text}
               onChange={(event) => setText(event.target.value)}
               placeholder="要优化的提示词，可直接改或清空重输"
-              className="cc-scroll min-h-0 flex-1 resize-none rounded-input border border-line bg-surface px-snug py-tight text-[12px] leading-[1.7] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-primary)]"
+              className="cc-scroll min-h-0 flex-1 resize-none rounded-input border border-line bg-surface px-snug py-tight text-[12px] leading-[1.7] text-ink outline-none placeholder:text-ink-3 focus:border-primary"
             />
           </label>
 
@@ -453,7 +453,7 @@ export function OptimizeView({
             ) : null}
             {error !== null ? (
               <div className="cc-scroll flex min-h-0 flex-1 flex-col gap-snug overflow-y-auto rounded-input border border-line bg-surface px-snug py-tight">
-                <p className="text-[11px] leading-[1.6] text-red-400">{error}</p>
+                <p className="text-[11px] leading-[1.6] text-danger">{error}</p>
                 <button type="button" className={GHOST_BUTTON_CLASS} onClick={() => void run()}>
                   重试
                 </button>
@@ -469,7 +469,7 @@ export function OptimizeView({
                 readOnly={loading}
                 onChange={(event) => setOutput(event.target.value)}
                 placeholder="选好场景与模式，点「优化」生成；生成后可以在这里直接修改再复制。"
-                className="cc-scroll min-h-0 flex-1 resize-none rounded-input border border-line bg-surface px-snug py-tight text-[12px] leading-[1.7] text-ink outline-none placeholder:text-ink-3 focus:border-[var(--cc-primary)]"
+                className="cc-scroll min-h-0 flex-1 resize-none rounded-input border border-line bg-surface px-snug py-tight text-[12px] leading-[1.7] text-ink outline-none placeholder:text-ink-3 focus:border-primary"
               />
             )}
 
@@ -482,7 +482,7 @@ export function OptimizeView({
                     type="button"
                     title="关闭"
                     onClick={toggleHistory}
-                    className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-[var(--cc-accent)]"
+                    className="shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-accent"
                   >
                     <X size={13} aria-hidden />
                   </button>
@@ -516,7 +516,7 @@ export function OptimizeView({
                               type="button"
                               title="删除这条历史"
                               onClick={() => void removeHistory(entry.id)}
-                              className="mt-[3px] shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-red-400"
+                              className="mt-[3px] shrink-0 rounded-full p-micro text-ink-3 transition-colors hover:text-danger"
                             >
                               <Trash2 size={12} aria-hidden />
                             </button>
@@ -534,7 +534,7 @@ export function OptimizeView({
                         <span className="text-[10px] text-ink-3">清空后不可恢复</span>
                         <button
                           type="button"
-                          className="rounded-button px-snug py-[3px] text-[11px] text-red-400 hover:bg-surface-2"
+                          className="rounded-button px-snug py-[3px] text-[11px] text-danger hover:bg-surface-2"
                           onClick={() => void clearHistory()}
                         >
                           确认清空

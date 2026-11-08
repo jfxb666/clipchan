@@ -80,7 +80,7 @@ export function HotkeyRecorder({ value, onChange, defaultValue, label }: HotkeyR
   return (
     <div className="flex shrink-0 flex-col items-end gap-[2px]">
       <div className="flex items-center gap-tight">
-        <span className="text-[11px] text-[var(--cc-primary)]">按下组合键…</span>
+        <span className="text-[11px] text-primary">按下组合键…</span>
         <button type="button" onClick={stop} className={actionClass}>
           取消
         </button>

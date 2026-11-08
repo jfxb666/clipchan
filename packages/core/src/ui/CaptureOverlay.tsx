@@ -29,7 +29,19 @@ import type { Point, Sel, Shape, Tool } from './captureOverlayLogic';
  *   容易算错的地方。
  */
 
-const MASK = 'rgba(0,0,0,.45)';
+
+/**
+ * 画布 API（ctx.strokeStyle 等）不认 CSS 变量，这里把 HUD 令牌解析成实际色值。
+ * HUD 恒暗、令牌值不随主题切换，所以每次绘制时解析一次即可；Node/无 document
+ * 环境落到 fallback（fallback 与 tokens.css 中的值必须保持一致）。
+ */
+function hudColor(varName: string, fallback: string): string {
+  if (typeof document === 'undefined') return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+  return value || fallback;
+}
+
+const MASK = 'var(--cc-hud-mask)';
 const TOOLBAR_HEIGHT = 46;
 const TOOLBAR_WIDTH = 470;
 const FONT_STACK =
@@ -143,7 +155,7 @@ function drawShape(ctx: CanvasRenderingContext2D, shape: Shape, img: HTMLImageEl
     ctx.textBaseline = 'top';
     // 先描一圈深色再填色：底图可能是白底也可能是黑底，单色文字总有一半看不见。
     ctx.lineWidth = 4;
-    ctx.strokeStyle = 'rgba(0,0,0,.55)';
+    ctx.strokeStyle = hudColor('--cc-hud-select-stroke', 'rgba(6,6,7,.55)');
     ctx.strokeText(shape.text, first.x, first.y);
     ctx.fillStyle = shape.color;
     ctx.fillText(shape.text, first.x, first.y);
@@ -240,7 +252,7 @@ export function CaptureOverlay({ platform }: CaptureOverlayProps): JSX.Element {
     const box = dragSel ?? sel;
     if (box && selectionValid(box)) {
       ctx.save();
-      ctx.strokeStyle = '#0a84ff';
+      ctx.strokeStyle = hudColor('--cc-hud-accent', '#0A84FF');
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 3]);
       ctx.strokeRect(box.x + 0.5, box.y + 0.5, box.width - 1, box.height - 1);
@@ -410,7 +422,7 @@ export function CaptureOverlay({ platform }: CaptureOverlayProps): JSX.Element {
 
   return (
     <div
-      style={{ position: 'fixed', inset: 0, overflow: 'hidden', background: '#000', cursor: 'crosshair' }}
+      style={{ position: 'fixed', inset: 0, overflow: 'hidden', background: 'var(--cc-hud-backdrop)', cursor: 'crosshair' }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -444,7 +456,7 @@ export function CaptureOverlay({ platform }: CaptureOverlayProps): JSX.Element {
             width: sel.width,
             height: sel.height,
             boxShadow: '0 0 0 9999px ' + MASK,
-            outline: '1px solid #0a84ff',
+            outline: '1px solid var(--cc-hud-accent)',
             pointerEvents: 'none',
           }}
         />
@@ -484,7 +496,7 @@ export function CaptureOverlay({ platform }: CaptureOverlayProps): JSX.Element {
             padding: '2px 6px',
             font: '600 18px ' + FONT_STACK,
             color,
-            background: 'rgba(0,0,0,.35)',
+            background: 'var(--cc-hud-scrim)',
             border: '1px solid ' + color,
             borderRadius: 4,
             outline: 'none',
@@ -502,11 +514,11 @@ export function CaptureOverlay({ platform }: CaptureOverlayProps): JSX.Element {
             alignItems: 'center',
             gap: 6,
             padding: '6px 8px',
-            background: 'rgba(28,28,30,.96)',
-            border: '1px solid rgba(255,255,255,.14)',
+            background: 'var(--cc-hud-panel)',
+            border: '1px solid var(--cc-hud-border)',
             borderRadius: 10,
             font: '13px ' + FONT_STACK,
-            color: '#f5f5f7',
+            color: 'var(--cc-hud-text)',
             cursor: 'default',
           }}
           onPointerDown={(e) => e.stopPropagation()}
@@ -521,15 +533,15 @@ export function CaptureOverlay({ platform }: CaptureOverlayProps): JSX.Element {
                 borderRadius: 6,
                 border: 'none',
                 cursor: 'pointer',
-                background: tool === t.key ? '#0a84ff' : 'rgba(255,255,255,.1)',
-                color: '#fff',
+                background: tool === t.key ? 'var(--cc-hud-accent)' : 'var(--cc-hud-substrate)',
+                color: 'var(--cc-hud-on-accent)',
                 font: '13px ' + FONT_STACK,
               }}
             >
               {t.label}
             </button>
           ))}
-          <span style={{ width: 1, height: 20, background: 'rgba(255,255,255,.18)' }} />
+          <span style={{ width: 1, height: 20, background: 'var(--cc-hud-divider)' }} />
           {COLORS.map((c) => (
             <button
               key={c}
@@ -543,11 +555,11 @@ export function CaptureOverlay({ platform }: CaptureOverlayProps): JSX.Element {
                 borderRadius: 9,
                 cursor: 'pointer',
                 background: c,
-                border: color === c ? '2px solid #fff' : '2px solid transparent',
+                border: color === c ? '2px solid var(--cc-hud-on-accent)' : '2px solid transparent',
               }}
             />
           ))}
-          <span style={{ width: 1, height: 20, background: 'rgba(255,255,255,.18)' }} />
+          <span style={{ width: 1, height: 20, background: 'var(--cc-hud-divider)' }} />
           <button type="button" onClick={() => setShapes((prev) => popShape(prev))} style={btnStyle(false)}>
             撤销
           </button>
@@ -576,17 +588,17 @@ export function CaptureOverlay({ platform }: CaptureOverlayProps): JSX.Element {
             maxWidth: 420,
             padding: '18px 22px',
             borderRadius: 12,
-            background: 'rgba(28,28,30,.96)',
-            border: '1px solid rgba(255,255,255,.16)',
-            color: '#f5f5f7',
+            background: 'var(--cc-hud-panel)',
+            border: '1px solid var(--cc-hud-border)',
+            color: 'var(--cc-hud-text)',
             font: '14px/1.6 ' + FONT_STACK,
             textAlign: 'center',
           }}
           onPointerDown={(e) => e.stopPropagation()}
         >
           <div style={{ fontWeight: 600, marginBottom: 6 }}>截图失败</div>
-          <div style={{ color: '#c7c7cc' }}>{error}</div>
-          <div style={{ marginTop: 8, color: '#8e8e93', fontSize: 12 }}>按 Esc 关闭</div>
+          <div style={{ color: 'var(--cc-hud-text-2)' }}>{error}</div>
+          <div style={{ marginTop: 8, color: 'var(--cc-hud-text-3)', fontSize: 12 }}>按 Esc 关闭</div>
         </div>
       ) : null}
     </div>
@@ -599,8 +611,8 @@ function btnStyle(primary: boolean): Record<string, string | number> {
     borderRadius: 6,
     cursor: 'pointer',
     border: 'none',
-    background: primary ? '#0a84ff' : 'rgba(255,255,255,.1)',
-    color: '#fff',
+    background: primary ? 'var(--cc-hud-accent)' : 'var(--cc-hud-substrate)',
+    color: 'var(--cc-hud-on-accent)',
     font: '13px ' + FONT_STACK,
   };
 }
