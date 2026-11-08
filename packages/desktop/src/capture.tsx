@@ -19,6 +19,11 @@ import { CaptureOverlay } from '@clipchan/core/ui/CaptureOverlay';
 import { APP_VERSION, ErrorBoundary } from '@clipchan/core/ui';
 import './index.css';
 
+// ★ HUD 焦点环取色标记（P4）：本窗口恒暗（tokens.css 里 :root[data-hud] 的作用域
+//   覆盖），焦点环用 --cc-hud-accent 而不是主题 primary——浅色主题的 primary 压在
+//   暗面板上对比度不达标。模块级打一次标记即可，本文件是 capture 窗口唯一入口。
+document.documentElement.dataset.hud = '1';
+
 const container = document.getElementById('root');
 if (!container) throw new Error('找不到 #root 挂载点');
 
