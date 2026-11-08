@@ -79,12 +79,14 @@ function TrashCard({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-[4px]">
+      {/* mt-[2px] 与 TypeBadge 的 mt-[2px] 同拍（同 ClipCard：动作按钮顶边对齐徽章顶边）。 */}
+      <div className="mt-[2px] flex shrink-0 items-center gap-[4px]">
+        {/* py-[4px]：与设置页小按钮的标准拍子（px-snug py-[4px] text-[11px]）对齐。 */}
         <button
           type="button"
           title="恢复到列表"
           onClick={() => onRestore(item.id)}
-          className="flex items-center gap-[3px] rounded-button border border-line px-snug py-[3px] text-[11px] text-ink-2 hover:bg-surface-2 hover:text-ink"
+          className="flex items-center gap-[3px] rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 hover:text-ink"
         >
           <RotateCcw size={11} aria-hidden />
           恢复
@@ -94,7 +96,7 @@ function TrashCard({
           title={pending ? '再点一次就真的删掉，不可恢复' : '永久删除（连图片文件一起删）'}
           onClick={() => onPurge(item.id)}
           className={cn(
-            'flex items-center gap-[3px] rounded-button border px-snug py-[3px] text-[11px]',
+            'flex items-center gap-[3px] rounded-button border px-snug py-[4px] text-[11px]',
             pending
               ? 'border-accent bg-accent text-on-accent'
               : 'border-line text-ink-2 hover:bg-surface-2 hover:text-accent',

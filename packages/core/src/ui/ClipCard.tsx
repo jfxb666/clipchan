@@ -92,7 +92,10 @@ export function ClipCard({
       className={cn(
         'relative flex cursor-default items-start gap-snug rounded-card border bg-surface p-snug shadow-card',
         selected
-          ? 'border-primary ring-1 ring-primary'
+          ? // ★ 键盘选中（↑/↓ 移动的就是这把选中）：2px 主色环 + 2px 外移，与全局
+            //   focus-visible 规范同一副面孔。外移色用 --cc-bg（卡片就坐在主背景上），
+            //   两个主题都过 AA：浅 5.89:1 / 深 6.80:1（见 tokens.css 焦点环注释）。
+            'border-primary ring-2 ring-primary ring-offset-2 ring-offset-bg'
           : 'border-line hover:border-line-strong',
       )}
       style={{ contentVisibility: 'auto', containIntrinsicSize: '96px' } as CSSProperties}
@@ -147,7 +150,9 @@ export function ClipCard({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-[2px]">
+      {/* ★ 对齐微调：mt-[2px] 与 TypeBadge 的 mt-[2px] 同拍——星标/优化这对图标按钮
+          的顶边和类型徽章的顶边齐平（按钮 20px 高、徽章 22px 高，顶对齐即光学对齐）。 */}
+      <div className="mt-[2px] flex shrink-0 items-center gap-[2px]">
         {onOptimize ? (
           <button
             type="button"

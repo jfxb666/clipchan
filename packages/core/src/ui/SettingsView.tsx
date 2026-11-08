@@ -138,9 +138,12 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void
       role="switch"
       aria-checked={on}
       onClick={() => onChange(!on)}
+      // ★ 状态补齐（P2）：悬停/按压沿用主按钮的 opacity 语言（hover:opacity-90 同款），
+      //   transition-colors → transition 才能把透明度也过渡进去；键盘焦点环走
+      //   tokens.css 的全局 :focus-visible（rounded-full 上 outline 会自动跟圆角）。
       className={cn(
-        'relative h-[20px] w-[36px] shrink-0 rounded-full transition-colors',
-        on ? 'bg-primary' : 'bg-line-strong',
+        'relative h-[20px] w-[36px] shrink-0 rounded-full transition active:opacity-80',
+        on ? 'bg-primary hover:opacity-90' : 'bg-line-strong hover:opacity-80',
       )}
     >
       <span
@@ -158,12 +161,19 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void
  * 以 AiProviderForm 为模板的极简版：两个字段（名称 + 提示词），校验在 customActions.ts 纯函数里，
  * 保存失败（主进程是最后一道闸）把中文错误显示在表单里。
  */
+/*
+ * ★ 输入框焦点指示的统一规范（P2）：文本输入框一律 focus:border-primary——
+ *   本页此前一半 focus:border-primary、一半 focus:border-line-strong，键盘 Tab 过去
+ *   有的变主色有的只加深一点，看不出是同一套系统。带 outline-none 的输入框不走
+ *   tokens.css 的全局焦点环（避免描边+外环双重指示），主色边框就是它们的焦点指示。
+ */
 const CUSTOM_INPUT_CLASS =
   'w-full rounded-input border border-line bg-surface px-snug py-[5px] text-[12px] text-ink outline-none placeholder:text-ink-3 focus:border-primary';
 const CUSTOM_GHOST_BUTTON_CLASS =
   'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60';
+/* 实心按钮的按压态：hover:opacity-90 之上再压一档（与 AiProviderForm 的主按钮同语言）。 */
 const CUSTOM_PRIMARY_BUTTON_CLASS =
-  'shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60';
+  'shrink-0 rounded-button bg-primary px-snug py-[4px] text-[11px] text-on-primary hover:opacity-90 active:opacity-80 disabled:cursor-not-allowed disabled:opacity-60';
 
 function CustomActionForm({
   action,
@@ -500,7 +510,7 @@ export function SettingsView({
                 if (!Number.isFinite(next)) return;
                 onUpdate({ historyLimit: Math.min(HISTORY_INPUT_MAX, Math.max(HISTORY_SLIDER_MIN, Math.round(next))) });
               }}
-              className="w-[70px] rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[12px] text-ink outline-none focus:border-line-strong"
+              className="w-[70px] rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[12px] text-ink outline-none focus:border-primary"
             />
           </div>
         </Row>
@@ -565,7 +575,7 @@ export function SettingsView({
               }
             }}
             placeholder="例如 chrome.exe"
-            className="w-[180px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-line-strong"
+            className="w-[180px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-primary"
           />
           <button
             type="button"
@@ -800,7 +810,7 @@ export function SettingsView({
               value={MERGE_SEPARATOR_PRESETS.includes(settings.mergeSeparator) ? '' : settings.mergeSeparator}
               placeholder="自定义"
               onChange={(event) => onUpdate({ mergeSeparator: event.target.value.slice(0, 8) })}
-              className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-line-strong"
+              className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-[12px] text-ink outline-none focus:border-primary"
             />
           </div>
         </Row>
@@ -888,7 +898,7 @@ export function SettingsView({
                 trashLimit: Math.min(TRASH_LIMIT_MAX, Math.max(TRASH_LIMIT_MIN, Math.round(next))),
               });
             }}
-            className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[12px] text-ink outline-none focus:border-line-strong"
+            className="w-[70px] shrink-0 rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[12px] text-ink outline-none focus:border-primary"
           />
         </Row>
 
@@ -909,10 +919,10 @@ export function SettingsView({
               type="button"
               onClick={() => onGhost(0)}
               disabled={!ghost.active}
-              className={cn(
-                'rounded-button border border-line px-snug py-[3px] text-[11px]',
-                ghost.active ? 'text-ink-2 hover:bg-surface' : 'cursor-not-allowed text-ink-3 opacity-60',
-              )}
+              // ★ 禁用态收口到全局 disabled: 习惯用法（cursor-not-allowed + opacity-60），
+              //   不再各写一套条件类；悬停底色用 bg-surface——本卡是 bg-surface-2，
+              //   hover:bg-surface-2 会跟卡片底融在一起（等于没有悬停反馈）。
+              className="rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface disabled:cursor-not-allowed disabled:opacity-60"
             >
               关闭
             </button>
@@ -923,7 +933,7 @@ export function SettingsView({
                 key={minutes}
                 type="button"
                 onClick={() => onGhost(minutes)}
-                className="rounded-button border border-line bg-surface px-snug py-[3px] text-[11px] text-ink-2 hover:bg-surface-2"
+                className="rounded-button border border-line bg-surface px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2"
               >
                 {minutes} 分钟
               </button>
@@ -934,16 +944,15 @@ export function SettingsView({
               max={GHOST_MAX_MINUTES}
               value={customMinutes}
               onChange={(event) => setCustomMinutes(event.target.value)}
-              className="w-[64px] rounded-input border border-line bg-surface px-tight py-[3px] text-right text-[11px] text-ink outline-none focus:border-line-strong"
+              className="w-[64px] rounded-input border border-line bg-surface px-tight py-[4px] text-right text-[11px] text-ink outline-none focus:border-primary"
             />
             <button
               type="button"
               disabled={!customValid}
               onClick={() => onGhost(custom)}
-              className={cn(
-                'rounded-button border border-line px-snug py-[3px] text-[11px]',
-                customValid ? 'text-ink-2 hover:bg-surface-2' : 'cursor-not-allowed text-ink-3 opacity-60',
-              )}
+              // ★ hover:bg-surface-2 在 bg-surface-2 卡上是隐形悬停（底色相同），
+              //   与同卡的「关闭」按钮统一为 hover:bg-surface；禁用态同上收口。
+              className="rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface disabled:cursor-not-allowed disabled:opacity-60"
             >
               自定义开启
             </button>
@@ -1019,12 +1028,8 @@ export function SettingsView({
             type="button"
             onClick={updateStatus?.state === 'downloaded' ? onApplyUpdate : onCheckUpdate}
             disabled={!canClickUpdate(updateStatus)}
-            className={cn(
-              'shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px]',
-              canClickUpdate(updateStatus)
-                ? 'text-ink-2 hover:bg-surface-2'
-                : 'cursor-not-allowed text-ink-3 opacity-60',
-            )}
+            // 禁用态收口到全局 disabled: 习惯用法（与自定义动作「添加」等按钮一致）。
+            className="shrink-0 rounded-button border border-line px-snug py-[4px] text-[11px] text-ink-2 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {updateButtonLabel(updateStatus)}
           </button>
